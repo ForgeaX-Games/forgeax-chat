@@ -1,0 +1,109 @@
+.kbl-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px 1px 6px;
+  margin: 0 1px;
+  background: rgba(212, 255, 72, 0.12);
+  border: 1px solid rgba(212, 255, 72, 0.30);
+  border-radius: 999px;
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.45;
+  vertical-align: baseline;
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background-color 0.12s, border-color 0.12s;
+  position: relative;
+}
+
+.kbl-pill:hover {
+  background: rgba(212, 255, 72, 0.22);
+  border-color: rgba(212, 255, 72, 0.55);
+}
+
+/* Inside a sent user message the bubble is itself lime
+   (`.user-bubble` = rgba(212,255,72,0.42)), the SAME hue as the pill's tint.
+   A translucent-lime pill on a lime bubble loses its border/background and its
+   `--text-primary` text drops below readable contrast. Re-skin the pill as a
+   distinct dark chip there so the label stays legible on the lime backdrop;
+   the composer (dark bg) keeps the lime-tint look above. */
+.user-bubble .kbl-pill {
+  background: rgba(18, 20, 24, 0.78);
+  border-color: rgba(212, 255, 72, 0.65);
+  color: #f1f5e3;
+}
+.user-bubble .kbl-pill:hover {
+  background: rgba(18, 20, 24, 0.9);
+  border-color: rgba(212, 255, 72, 0.85);
+}
+.user-bubble .kbl-pill-label { color: #eef4d2; }
+
+.kbl-pill-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.kbl-pill-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Per-kind subtle accent on the left edge to distinguish kinds at a glance. */
+.kbl-pill-file   { border-left-color: var(--primary); }
+.kbl-pill-dir    { border-left-color: var(--color-role-art); }
+.kbl-pill-agent  { border-left-color: var(--color-role-orchestrator); }
+.kbl-pill-tool   { border-left-color: var(--color-role-coding); }
+.kbl-pill-game   { border-left-color: var(--prim-color-green-400); }
+.kbl-pill-log    { border-left-color: var(--accent-error); }
+.kbl-pill-entity { border-left-color: var(--color-role-art, #c08cff); }
+
+.kbl-pill-tip {
+  position: fixed;
+  z-index: var(--z-tooltip);
+  min-width: 240px;
+  max-width: 360px;
+  padding: 10px 12px;
+  background: rgba(20, 22, 26, 0.98);
+  border: 1px solid var(--color-border-default));
+  border-radius: 8px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(212, 255, 72, 0.08) inset;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.78));
+  pointer-events: none;
+}
+
+.kbl-pill-tip-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.kbl-pill-tip-line {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.65);
+  word-break: break-all;
+}
+
+.kbl-pill-tip-detail {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.10);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: rgba(212, 255, 72, 0.7);
+  white-space: pre-wrap;
+  word-break: break-all;
+}

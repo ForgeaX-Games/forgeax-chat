@@ -1,0 +1,42 @@
+{
+  "name": "@forgeax/chat",
+  "version": "0.1.0",
+  "private": false,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "forgeax chat L2 app — the Forge chat surface (ChatPanel / Composer / message rendering). State (sessions / messages / agents) lives in @forgeax/interface's L1 session store; this package is the UI over it.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ForgeaX-Games/forgeax-studio.git",
+    "directory": "packages/chat"
+  },
+  "homepage": "https://github.com/ForgeaX-Games/forgeax-studio/tree/main/packages/chat",
+  "exports": {
+    ".": "./src/index.ts",
+    "./session-store": "./src/session-store/index.ts",
+    "./*": "./src/*.ts",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@forgeax/interface": "workspace:*",
+    "lucide-react": "^0.460.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.5"
+  }
+}

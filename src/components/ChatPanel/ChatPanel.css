@@ -1,0 +1,4558 @@
+.chat-panel {
+  background: var(--color-background-elevated);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Windowing — pop chat out into its own OS window (Tauri shell only). */
+.cp-window-toggle {
+  position: absolute;
+  top: 6px; right: 6px;
+  z-index: 5;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  color: var(--color-text-primary);
+  background: var(--color-background-base);
+  border: 1px solid var(--color-border-default);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.cp-window-toggle:hover { opacity: 1; }
+
+/* Sub-agent switcher — 顶部圆形头像 + 水平拖动 */
+.agent-switcher {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid var(--color-border-default);
+  background: var(--color-background-elevated);
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.as-track {
+  flex: 1;
+  display: flex; align-items: center; gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  cursor: grab;
+  user-select: none;
+  padding: 4px 0;
+}
+.as-track::-webkit-scrollbar { height: 0; }
+.as-track.dragging { cursor: grabbing; }
+
+.as-avatar-btn {
+  position: relative;
+  width: 28px; height: 28px;
+  border: none; background: transparent; cursor: pointer;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  transition: transform 0.15s;
+}
+.as-avatar-btn:hover:not(:disabled) { transform: scale(1.06); }
+.as-avatar-btn.not-ready { cursor: not-allowed; opacity: 0.42; }
+.as-avatar-btn.not-ready:hover { transform: none; }
+/* P6d step (d): ring around the avatar that is the *active emitter* — the
+   sub-agent that the next chat send will route to. Visually distinct from
+   .active (which only marks user-selected for ledger viewing). */
+.as-avatar-btn.is-active-emitter::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid var(--primary);
+  pointer-events: none;
+}
+/* Click feedback for not-ready buttons (touch-friendly — title tooltip is
+   hidden behind a hover delay; this surfaces immediately on tap). Brand pill
+   floats above the avatar, fades in/out across 2s. */
+.as-hint {
+  position: absolute; top: -22px; left: 50%;
+  font-size: 10px; font-weight: 600;
+  color: var(--prim-color-neutral-950); background: var(--primary);
+  padding: 2px 6px; border-radius: 4px;
+  white-space: nowrap; pointer-events: none;
+  z-index: 3;
+  animation: toast-pulse 2s ease-out forwards;
+}
+/* iter-106: renamed as-hint-pulse → toast-pulse to break the cross-component
+   coupling. Shared by .as-hint (AgentSwitcher) and .cb-hint (Composer);
+   both rely on the translate(-50%,…) centering so the keyframe stays generic. */
+@keyframes toast-pulse {
+  0%   { opacity: 0; transform: translate(-50%, 4px); }
+  10%  { opacity: 1; transform: translate(-50%, 0); }
+  85%  { opacity: 1; transform: translate(-50%, 0); }
+  100% { opacity: 0; transform: translate(-50%, -4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .as-hint { animation: none; opacity: 1; transform: translate(-50%, 0); }
+}
+.as-avatar-btn.active::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid var(--primary);
+  pointer-events: none;
+}
+
+.as-avatar {
+  width: 100%; height: 100%;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--prim-color-neutral-950);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.as-avatar.plus {
+  background: rgba(255,255,255,0.06);
+  color: var(--text-muted);
+  border: 1px dashed rgba(255,255,255,0.2);
+}
+.as-avatar-btn.add:hover .as-avatar.plus {
+  background: rgba(212,255,72,0.10);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.as-status {
+  position: absolute;
+  bottom: 0; right: 0;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-2);
+}
+.as-status.done { background: var(--accent-green); }
+.as-status.running { background: var(--accent-orange); animation: status-pulse 1.5s infinite; }
+.as-status.waiting { background: var(--accent-cyan); }
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* P3.18 — cli-idle placeholder mode + role-tribe outer ring.
+ *
+ * Two coupled behaviours:
+ *
+ * 1. `.as-avatar-btn.placeholder`: when cli daemon is down and AgentSwitcher
+ *    has fallen back to /api/workbench/agents, each marketplace agent shows
+ *    as a dim 0.55-opacity avatar. Click triggers the existing `.as-hint`
+ *    toast ("cli 未启动") instead of switching activeAgent (which would wedge
+ *    the next /api/chat send with a non-runnable id). Status dot is omitted
+ *    (no cli daemon = no live status).
+ *
+ * 2. `[data-role="..."]` outer ring: role-tribe color language third surface.
+ *    P3.8 introduced it on Sidebar AgentsPanel cards (5×5 dot left of role
+ *    text); P3.15 brought it to PreviewToolbar TEAM strip. Now AgentSwitcher
+ *    avatars get a 1.5px outer ring at inset:-2px so the colored ring sits
+ *    inside the 8px gap between adjacent avatars without overlapping. Lime
+ *    `.is-active-emitter::before` at inset:-3px stays outside; both rings
+ *    coexist (active emitter = 2px outer lime ring + 1.5px inner role ring).
+ *
+ * Color family reused verbatim from Sidebar.css L247-252 / PreviewMode.css
+ * `.pt-team-dot` so the 3 surfaces use identical hues — players who learn
+ * "purple = orchestrator" once apply it everywhere.
+ */
+.as-avatar-btn.placeholder {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.as-avatar-btn.placeholder .as-avatar {
+  filter: saturate(0.55);
+}
+.as-avatar-btn.placeholder:hover:not(:disabled) {
+  opacity: 0.95;
+  transform: none;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(196, 163, 255, 0.42);
+  border-radius: 50%;
+}
+/* P3.91 — Bus deep-link affordance for placeholder avatars.
+ *
+ * Plain click on a placeholder still fires the "cli 未启动" toast (P3.18).
+ * `ctrl/cmd+click` now deep-links to Bus admin (kind=agent solo + an
+ * expand-id target when the placeholder maps to a bus plugin — only
+ * `cc-coder` today via `agents_from_bus[]`).
+ *
+ * `.has-bus` marks those bus-backed placeholders with a 6px violet corner
+ * dot so players can spot which placeholder will land on its own row in
+ * Bus admin vs. land on the agent-kind section view. Same #c4a3ff hue as
+ * the .as-bus-btn row-level Bus button (P3.86) — keeps the "violet = agent
+ * kind" association consistent. Hover lifts the dot's glow.
+ *
+ * The hover ring around any placeholder hints at the modifier affordance
+ * without reading the title attribute (low-noise: 1px violet outline, only
+ * during hover).
+ */
+.as-avatar-btn.placeholder.has-bus .as-avatar {
+  position: relative;
+}
+.as-avatar-btn.placeholder.has-bus .as-avatar::after {
+  content: '';
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-role-orchestrator);
+  box-shadow: none;
+  pointer-events: none;
+  z-index: 2;
+}
+.as-avatar-btn.placeholder.has-bus:hover .as-avatar::after {
+  box-shadow: none;
+}
+.as-avatar-btn[data-role]::after {
+  /* role-tribe ring sits behind .active::after (which uses ::after at -3px);
+     since both target ::after we win via specificity tie-broken by source
+     order — but .active should still trump, so we guard with :not(.active). */
+}
+.as-avatar-btn[data-role]:not(.active):not(.is-active-emitter)::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.18);
+  pointer-events: none;
+}
+.as-avatar-btn[data-role="orchestrator"]:not(.active):not(.is-active-emitter)::before { border-color: var(--color-role-orchestrator); }
+.as-avatar-btn[data-role="pillar"]:not(.active):not(.is-active-emitter)::before       { border-color: var(--primary); }
+.as-avatar-btn[data-role="design"]:not(.active):not(.is-active-emitter)::before       { border-color: var(--color-role-design); }
+.as-avatar-btn[data-role="narrative"]:not(.active):not(.is-active-emitter)::before    { border-color: var(--color-role-narrative); }
+.as-avatar-btn[data-role="art"]:not(.active):not(.is-active-emitter)::before          { border-color: var(--color-role-art); }
+.as-avatar-btn[data-role="coding"]:not(.active):not(.is-active-emitter)::before       { border-color: var(--color-role-coding); }
+/* Dim ring for placeholders so the color isn't fighting the avatar's
+   desaturated gradient; live (non-placeholder) avatars get the full hue. */
+.as-avatar-btn.placeholder[data-role]:not(.active):not(.is-active-emitter)::before {
+  opacity: 0.72;
+}
+
+.as-more {
+  width: 22px; height: 22px;
+  border: none; background: transparent; cursor: pointer;
+  color: var(--text-muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.as-more:hover { background: rgba(255,255,255,0.06); color: var(--text-primary); }
+
+/* P3.86 — AgentSwitcher right-end Bus deep-link button.
+ *
+ * Sits between .as-track (the scrollable avatar row) and .as-more (the
+ * ChevronDown placeholder). Single click → setPendingBusKindFilter('agent')
+ * + setMode('bus') so the main panel swaps to Bus admin with the `agent`
+ * kind soloed — players read all 7 agent placeholders + 1 bus-registered
+ * cc-coder together without leaving keyboard focus.
+ *
+ * Color family locked to violet/agent #c4a3ff — the same hue used by:
+ *   - Sidebar AgentsPanel .ac-role-dot.orchestrator + .ac-bus-pill (P3.32)
+ *   - BusAdminPanel .ba-chip.k-agent
+ *   - PreviewToolbar .pt-team-dot[data-role="orchestrator"] (P3.15)
+ *   - Dashboard .dash-agent-cell-link (P3.71/P3.72)
+ *   - ChatPanel .cp-agent-bar-id.is-link (P3.80)
+ *   - Sidebar BUS KINDS .ss-kind-chip.k-agent (P2.7i)
+ *
+ * That's now 7 surfaces where "violet = agent kind" — strongest hue-to-kind
+ * association in the app. Reinforces the brand: when you see purple you know
+ * the destination is the agent dimension.
+ */
+.as-bus-btn {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid rgba(196, 163, 255, 0.32);
+  background: rgba(196, 163, 255, 0.08);
+  border-radius: 11px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(196, 163, 255, 0.92);
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, transform 0.14s, box-shadow 0.14s;
+}
+.as-bus-btn:hover {
+  background: rgba(196, 163, 255, 0.18);
+  border-color: rgba(196, 163, 255, 0.55);
+  transform: translateY(-0.5px);
+  box-shadow: none;
+}
+.as-bus-btn:focus-visible {
+  outline: 2px solid rgba(196, 163, 255, 0.6);
+  outline-offset: 2px;
+}
+.as-bus-btn:active {
+  background: rgba(196, 163, 255, 0.28);
+  transform: translateY(0);
+  box-shadow: none;
+}
+.as-bus-btn-label {
+  letter-spacing: 0.04em;
+}
+.as-bus-btn-arrow {
+  font-size: 11px;
+  line-height: 1;
+  color: rgba(196, 163, 255, 0.7);
+  transition: color 0.14s, transform 0.14s;
+}
+.as-bus-btn:hover .as-bus-btn-arrow {
+  color: rgba(196, 163, 255, 1);
+  transform: translateX(1px);
+}
+
+.cp-topbar {
+  display: flex; gap: 12px; padding: 10px 14px;
+  border-bottom: 1px solid var(--color-border-default);
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+.cp-ico {
+  width: 22px; height: 22px;
+  border: none; background: transparent; cursor: pointer;
+  color: var(--text-muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px;
+}
+.cp-ico:hover { color: var(--text-primary); background: rgba(255,255,255,0.05); }
+
+/* P3.96 — Sessions / Edit cp-ico 升级成 bus admin deep-link button。
+   Sessions = sky-blue #7dd3fc (跟 EmptyBusReadout head + TabStrip.tab-provider 同色家族)
+   Edit = violet #c4a3ff (跟 .ba-kind-tag.k-agent + .ss-kind-chip.k-agent + role-tribe orchestrator dot 同色家族)
+   Fullscreen 保持原 cp-ico:hover 样式。
+   渐入 → arrow span 复用 P3.93 / P3.89 / P3.87 同模式：默认 0 opacity 不污染 22×22 button,
+   hover 时渐入 0.92 alpha + 微动；resting 视觉跟原 placeholder 完全一样。 */
+.cp-ico.is-link {
+  position: relative;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+.cp-ico-arrow {
+  position: absolute;
+  right: -7px; top: 50%;
+  transform: translate(-2px, -50%);
+  font-size: 9px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, transform 120ms ease, color 120ms ease;
+  font-family: var(--font-mono);
+}
+.cp-ico.is-link:hover .cp-ico-arrow {
+  opacity: 0.92;
+  transform: translate(0, -50%);
+}
+.cp-ico-sessions:hover {
+  background: rgba(125, 211, 252, 0.10);
+  color: var(--color-role-art);
+  box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.42);
+  transform: translateY(-0.5px);
+}
+.cp-ico-sessions .cp-ico-arrow { color: var(--color-role-art); }
+.cp-ico-sessions:focus-visible {
+  outline: 2px solid rgba(125, 211, 252, 0.62);
+  outline-offset: 1px;
+}
+.cp-ico-sessions:active {
+  background: rgba(125, 211, 252, 0.18);
+  transform: translateY(0);
+  box-shadow: none;
+}
+.cp-ico-edit:hover {
+  background: rgba(196, 163, 255, 0.10);
+  color: var(--color-role-orchestrator);
+  box-shadow: 0 0 0 1px rgba(196, 163, 255, 0.42);
+  transform: translateY(-0.5px);
+}
+.cp-ico-edit .cp-ico-arrow { color: var(--color-role-orchestrator); }
+.cp-ico-edit:focus-visible {
+  outline: 2px solid rgba(196, 163, 255, 0.62);
+  outline-offset: 1px;
+}
+.cp-ico-edit:active {
+  background: rgba(196, 163, 255, 0.18);
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+/* P3.34 — agent → bus plugin deep-link bar (left side of cp-topbar).
+   margin-right:auto pushes the icon stack back to the right edge unchanged.
+   Color family: gray label/id for the always-on agent name, sky-blue
+   rgba(109,211,255,*) for the bus button — same alpha slices Sidebar
+   .ac-bus-pill.is-link (P3.32) and BusAdminPanel .ba-backlink (P3.33)
+   use, so the deep-link affordance is visually anchored across all
+   Chat / Sidebar / Bus surfaces. */
+.cp-agent-bar {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-right: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+}
+.cp-agent-bar-label {
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+.cp-agent-bar-id {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.cp-agent-bar-bus {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: 2px; padding: 2px 6px;
+  border: 1px solid rgba(109,211,255,0.32);
+  background: rgba(109,211,255,0.10);
+  border-radius: 4px;
+  color: rgba(109,211,255,0.92);
+  font: inherit;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, transform 120ms, box-shadow 120ms;
+}
+.cp-agent-bar-bus:hover {
+  background: rgba(109,211,255,0.20);
+  border-color: rgba(109,211,255,0.55);
+  box-shadow: none;
+  transform: translateY(-0.5px);
+}
+.cp-agent-bar-bus:focus-visible {
+  outline: 2px solid rgba(109,211,255,0.55);
+  outline-offset: 1px;
+}
+.cp-agent-bar-bus:active {
+  transform: translateY(0.5px);
+  background: rgba(109,211,255,0.28);
+}
+.cp-agent-bar-bus-sep { color: var(--text-muted); margin-right: 2px; }
+.cp-agent-bar-bus-label { color: rgba(109,211,255,0.78); letter-spacing: 0.04em; }
+.cp-agent-bar-bus-id { color: rgba(109,211,255,0.95); font-weight: 600; }
+.cp-agent-bar-bus-arrow { color: rgba(109,211,255,0.85); font-weight: 700; margin-left: 1px; }
+
+/* P3.80 — cp-agent-bar-id.is-link: violet/agent #c4a3ff family,
+   mirrors Dashboard .dash-agent-cell-link (P3.71/P3.72) so the
+   "violet pill = agent dimension deep-link" cue carries from any
+   table cell into this topbar entry. Sibling of the existing
+   sky-blue .cp-agent-bar-bus (P3.34) bus pill so the two dimensions
+   (agent / bus plugin) keep distinct color tribes. button reset
+   strips ua bg/border before applying the 4-state palette. */
+button.cp-agent-bar-id.is-link {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 6px;
+  border: 1px solid rgba(196,163,255,0.32);
+  background: rgba(196,163,255,0.10);
+  border-radius: 4px;
+  color: rgba(196,163,255,0.95);
+  font: inherit;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, transform 120ms, box-shadow 120ms;
+}
+button.cp-agent-bar-id.is-link:hover {
+  background: rgba(196,163,255,0.20);
+  border-color: rgba(196,163,255,0.55);
+  box-shadow: none;
+  transform: translateY(-0.5px);
+}
+button.cp-agent-bar-id.is-link:focus-visible {
+  outline: 2px solid rgba(196,163,255,0.55);
+  outline-offset: 1px;
+}
+button.cp-agent-bar-id.is-link:active {
+  transform: translateY(0.5px);
+  background: rgba(196,163,255,0.28);
+}
+.cp-agent-bar-id-arrow {
+  color: rgba(196,163,255,0.0);
+  font-weight: 700;
+  margin-left: 1px;
+  transition: color 120ms;
+}
+button.cp-agent-bar-id.is-link:hover .cp-agent-bar-id-arrow,
+button.cp-agent-bar-id.is-link:focus-visible .cp-agent-bar-id-arrow {
+  color: rgba(196,163,255,0.92);
+}
+
+/* P3.97 — cp-agent-bar-id.is-empty: shown when activeAgent is null (default
+   on every fresh chat tab). Same violet/agent #c4a3ff family as the .is-link
+   variant above so the colour cue stays consistent, but at dimmer base alpha
+   + dotted border + grayer text to read as "empty slot, fill me" rather
+   than "active link". Arrow stays visible at 55% even at rest (vs is-link's
+   0% at rest → 92% on hover) because the entire pill exists *to* signal
+   the deep-link affordance — the player isn't being told "this is data
+   you can drill into" but "click here to set this". Hover/focus/active
+   lifts to is-link parity. */
+button.cp-agent-bar-id.is-empty {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 6px;
+  border: 1px dashed rgba(196,163,255,0.32);
+  background: rgba(196,163,255,0.05);
+  border-radius: 4px;
+  color: rgba(196,163,255,0.72);
+  font: inherit;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, transform 120ms, box-shadow 120ms, color 120ms;
+}
+button.cp-agent-bar-id.is-empty:hover {
+  background: rgba(196,163,255,0.18);
+  border-color: rgba(196,163,255,0.55);
+  border-style: solid;
+  color: rgba(196,163,255,0.95);
+  box-shadow: none;
+  transform: translateY(-0.5px);
+}
+button.cp-agent-bar-id.is-empty:focus-visible {
+  outline: 2px solid rgba(196,163,255,0.55);
+  outline-offset: 1px;
+  border-style: solid;
+}
+button.cp-agent-bar-id.is-empty:active {
+  transform: translateY(0.5px);
+  background: rgba(196,163,255,0.26);
+  border-style: solid;
+}
+button.cp-agent-bar-id.is-empty .cp-agent-bar-id-arrow {
+  color: rgba(196,163,255,0.55);
+  font-weight: 700;
+  margin-left: 1px;
+  transition: color 120ms;
+}
+button.cp-agent-bar-id.is-empty:hover .cp-agent-bar-id-arrow,
+button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
+  color: rgba(196,163,255,0.95);
+}
+
+.cp-thread {
+  flex: 1;
+  overflow-y: auto;
+  padding: 64px 14px 8px;
+  display: flex; flex-direction: column;
+}
+
+/* "N 条新消息" 浮层 —— 用户滚离底部、又有新输出时出现。
+   定位在 cp-body(position:relative)底部居中,贴在 Composer 上方。 */
+.cp-jump-latest {
+  position: absolute;
+  /* 用 auto 外边距居中,不用 transform: translateX(-50%) —— 全站通用按钮 hover
+     用 transform(translate3d 抬升)做反馈,若拿 transform 居中会被 hover 覆盖、
+     导致左右错位。auto 外边距把 transform 留给通用 motion。 */
+  left: 0; right: 0; margin-inline: auto; width: max-content;
+  bottom: 12px;
+  z-index: 6;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px 5px 10px;
+  font-size: 12px; line-height: 1; font-weight: 500;
+  color: #1a1a1a;
+  background: var(--color-brand-primary, #d4ff48);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+  animation: cp-jump-in 160ms ease-out;
+}
+/* hover / press 反馈全部走 motion.css 的通用按钮规则(1px 抬升 + 阴影 + 内部
+   箭头微抬),不自定义,保持与全站按钮一致。 */
+.cp-jump-latest svg { flex-shrink: 0; }
+
+/* memleak case-02 — "load earlier" affordance shown atop the thread when older
+   messages are paged out to keep the DOM bounded. Subtle/dim so it doesn't
+   compete with content; scrolling to the top also auto-loads the next page. */
+.cp-load-earlier {
+  display: block;
+  margin: 6px auto 10px;
+  padding: 4px 12px;
+  font-size: 12px; line-height: 1.4;
+  color: var(--color-text-dim, #8b93a3);
+  background: transparent;
+  border: 1px solid var(--color-border-subtle, #2a2f3a);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+@keyframes cp-jump-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.ts {
+  color: rgba(255,255,255,0.4);
+  font-size: 11px;
+  margin-top: 12px;
+  text-align: center;
+}
+
+/* Day divider: rendered between consecutive messages when they cross a
+   day boundary. Dashed flanking lines + small label, matching ts visual weight. */
+.day-divider {
+  display: flex; align-items: center; gap: 10px;
+  margin: 18px 0 6px;
+  color: rgba(255,255,255,0.42);
+  font-size: 11px; letter-spacing: 0.05em;
+}
+.day-divider::before, .day-divider::after {
+  content: ''; flex: 1; border-top: 1px dashed rgba(255,255,255,0.10);
+}
+.day-divider span { white-space: nowrap; flex-shrink: 0; }
+
+.user-bubble {
+  align-self: flex-end;
+  /* WCAG AA non-text 3:1 + AA text 4.5:1. iter-47 raised alpha to 0.46/0.34
+     (avg 0.40) for bubble-vs-bg 3.46:1 ✓ but top edge α=0.46 yielded only
+     4.40:1 text contrast (failing 4.5:1). iter-89 tightens top to 0.42: text
+     contrast at top = 4.72:1 ✓, bubble-vs-bg avg (α=0.38) = 3.25:1 still ✓.
+     Bottom stays 0.34 since its text contrast was already 5.7:1. */
+  background: linear-gradient(180deg, rgba(212,255,72,0.42), rgba(212,255,72,0.34));
+  border: 1px solid rgba(212,255,72,0.60);
+  color: var(--text-primary);
+  padding: 8px 13px;
+  border-radius: 14px 14px 3px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-top: 8px;
+  max-width: 80%;
+  width: fit-content;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.30),   inset 0 1px 0 rgba(255,255,255,0.06);
+}
+/* HiDPI compensation: at 2x+ DPR, a 1 CSS px inset highlight spans 2+ device
+   pixels with sub-pixel antialiasing that softens it visually. Bumping alpha
+   to 0.12 (≈2x) restores the perceptual weight of the highlight without
+   changing layout. Both -webkit- (Blink/WebKit) and min-resolution (Firefox)
+   queries cover all modern engines. iter-90 audit: .user-bubble is the ONLY
+   element using an `inset 0 1px 0` highlight — copy buttons / topbar pills
+   use plain backgrounds without inset, so no parallel compensation needed. */
+@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+  .user-bubble {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.30),   inset 0 1px 0 rgba(255,255,255,0.12);
+  }
+}
+/* iter-91: 3x DPR (iPhone Pro Max, some Android flagships) spreads the 1 CSS px
+   highlight across 3 device pixels with even softer sub-pixel falloff. Linear
+   3x of base α 0.06 → 0.18 keeps the highlight perceptually consistent. The 3x
+   rule cascades after 2x so it wins on 3x devices. */
+@media (-webkit-min-device-pixel-ratio: 3), (min-resolution: 384dpi) {
+  .user-bubble {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.30),   inset 0 1px 0 rgba(255,255,255,0.18);
+  }
+}
+
+/* ── system message lines ──
+   role='system' ChatMessages render as one-line banners scoped between
+   user/asst bubbles. Four flavors driven by .is-error / .is-warning /
+   .is-incoming / .is-outgoing modifier classes (info is the dim default).
+   Mirrors agenteam-os-ref ink-renderer SystemLine.tsx: icon + source: + text
+   + collapse toggle for long bodies. Palette aligns with the rest of the
+   panel:
+     - error    red  #ff7a7a
+     - warning  amber #ffc878 (matches surfaces palette)
+     - incoming sky  #7dd3fc (matches bus-host strip / agent deep-link pill)
+     - outgoing violet #c4a3ff (matches AgentsPanel pill / cp-agent-bar link)
+     - info     dim white
+ */
+.sys-block { width: 100%; }
+.sys-line {
+  align-self: stretch;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-top: 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.72);
+  word-break: break-word;
+}
+.sys-icon {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-icon-primary);
+}
+.sys-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+.sys-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.78;
+  flex-shrink: 0;
+}
+.sys-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sys-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.42);
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+.sys-meta-from { opacity: 0.78; }
+.sys-meta-to { opacity: 0.92; }
+
+/* 拍一拍 inter-agent header: emitter avatar replaces the emoji, pat phrase
+ * replaces the source label. (尺寸在 .sys-pat-cap .sys-pat-avatar 里定义) */
+.sys-pat-avatar {
+  flex: 0 0 auto;
+  border-radius: 50%;
+  overflow: hidden;
+}
+.sys-pat-text {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.sys-line.is-incoming .sys-pat-text { color: #9ddcfd; }
+.sys-line.is-outgoing .sys-pat-text { color: #cfb6ff; }
+
+/* ── 拍一拍卡片 · 胶囊徽章 (方案 C) ──
+ * 拍一拍文案做圆角胶囊(方向色半透明底),发起者头像嵌在胶囊左端;
+ * 摘要+产出在下方缩进、共用一条左竖线,产出通过右下角「展开」按钮收放。 */
+.sys-line[data-pat] {
+  border: none;
+  background: transparent;
+  padding: 4px 8px;
+}
+.sys-pat-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+}
+/* 胶囊:头像 + 拍一拍文案,方向色底色,头像被框在胶囊内 */
+.sys-pat-cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 12px 2px 3px;
+  border-radius: 999px;
+}
+.sys-line[data-pat].is-outgoing .sys-pat-cap { background: rgba(150, 110, 255, 0.20); }
+.sys-line[data-pat].is-incoming .sys-pat-cap { background: rgba(90, 180, 255, 0.20); }
+.sys-pat-cap .sys-pat-avatar {
+  width: 22px;
+  height: 22px;
+  margin-top: -2px;
+}
+.sys-pat-cap .sys-pat-text {
+  flex: 0 1 auto;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 胶囊下方的文字内容:缩进 + 一条左竖线(摘要与产出共用,连续) */
+.sys-pat-content {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  margin-left: 12px;
+  padding-left: 12px;
+  border-left: 2px solid rgba(255, 255, 255, 0.16);
+}
+.sys-line[data-pat].is-outgoing .sys-pat-content { border-left-color: rgba(150, 110, 255, 0.5); }
+.sys-line[data-pat].is-incoming .sys-pat-content { border-left-color: rgba(90, 180, 255, 0.5); }
+.sys-line[data-pat] .sys-text {
+  font-size: 11px;
+  opacity: 0.72;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* 产出 —— 折叠进「展开」的 agent 实际输出 */
+.sys-pat-output {
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.82;
+}
+/* 展开按钮 —— 卡片右下角 */
+.sys-pat-foot {
+  align-self: flex-end;
+  margin-top: 1px;
+}
+
+/* 展开/收起按钮 —— 明确的圆角胶囊按钮 + 旋转 chevron,hover 提示「点击查看产出」 */
+.sys-pat-toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  padding: 1px 8px 1px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.sys-pat-toggle:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.sys-line[data-pat].is-outgoing .sys-pat-toggle:hover { border-color: var(--color-role-orchestrator); }
+.sys-line[data-pat].is-incoming .sys-pat-toggle:hover { border-color: var(--prim-color-sky-300); }
+.sys-pat-toggle .spt-chev {
+  transition: transform 0.16s ease;
+}
+.sys-pat-toggle .spt-chev.open { transform: rotate(180deg); }
+.sys-toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.65);
+  cursor: pointer;
+  line-height: 1.4;
+  flex-shrink: 0;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.sys-toggle:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.32);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+/* 报错 — red */
+.sys-line.is-error {
+  border-color: rgba(255, 122, 122, 0.45);
+  background: rgba(255, 122, 122, 0.08);
+  color: #ffb4b4;
+}
+.sys-line.is-error .sys-icon { color: var(--color-accent-error-default); }
+.sys-line.is-error .sys-label { color: #ff9a9a; }
+
+/* 警告 — amber */
+.sys-line.is-warning {
+  border-color: rgba(255, 200, 120, 0.42);
+  background: rgba(255, 200, 120, 0.08);
+  color: #ffd9a8;
+}
+.sys-line.is-warning .sys-icon { color: var(--color-status-warning-text); }
+.sys-line.is-warning .sys-label { color: #ffd29a; }
+
+/* 来信 — sky-blue */
+.sys-line.is-incoming {
+  border-color: rgba(125, 211, 252, 0.42);
+  background: rgba(125, 211, 252, 0.07);
+  color: #cfe8fb;
+}
+.sys-line.is-incoming .sys-icon { color: var(--prim-color-sky-300); }
+.sys-line.is-incoming .sys-label { color: #9ddcfd; }
+
+/* 出信 — violet */
+.sys-line.is-outgoing {
+  border-color: rgba(196, 163, 255, 0.42);
+  background: rgba(196, 163, 255, 0.06);
+  color: #ddd0f9;
+}
+.sys-line.is-outgoing .sys-icon { color: var(--color-role-orchestrator); }
+.sys-line.is-outgoing .sys-label { color: #cfb6ff; }
+
+/* info / 中性 — dim default */
+.sys-line.is-info {
+  border-color: rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.02);
+  color: rgba(255, 255, 255, 0.68);
+}
+.sys-line.is-info .sys-icon { color: var(--color-icon-tertiary); }
+.sys-line.is-info .sys-label { opacity: 0.6; }
+
+/* FORGE 卡 */
+.forge-card {
+  position: relative; /* anchor for .kc-copy-btn */
+  /* Total width of kc-header's right-side controls (kc-status 16 + kc-chev 16
+     + 8px gap + 8px padding-right ≈ 48). If you add a new icon to kc-header,
+     bump this value — .kc-copy-btn computes its right offset from it. */
+  --kc-header-controls: 48px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 10px;
+  /* 12px gives ~6px clearance between user-bubble's 3px box-shadow tail and
+     the kc-running 3px outer ring (4px margin → -2px overlap before this fix). */
+  margin-top: 12px;
+  font-size: 12px;
+  overflow: hidden;
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+/* When the provider pill is rendered (.kc-provider — "forgeax" / "claude"…),
+   it sits left of kc-status and the copy button must clear it too. Pill width
+   varies with provider-id text (9px mono); ~80px covers names up to ~10 chars
+   plus the 6px margin and 8px flex gap. Without this rule, .kc-copy-btn lands
+   on top of the pill on hover. */
+.forge-card:has(.kc-provider) {
+  --kc-header-controls: calc(48px + 80px);
+}
+/* Message-level Copy. right = controls width + 10px gap so it lands cleanly
+   left of the kc-status icon, regardless of how many header icons exist. */
+.kc-copy-btn {
+  position: absolute; top: 7px; right: calc(var(--kc-header-controls) + 10px); z-index: 2;
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 6px; font-size: 10px; line-height: 1;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10); border-radius: 4px;
+  color: rgba(255,255,255,0.55); cursor: pointer;
+  opacity: 0; transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.forge-card:hover .kc-copy-btn, .forge-card:focus-within .kc-copy-btn { opacity: 1; }
+.kc-copy-btn:hover { background: rgba(212,255,72,0.18); color: var(--primary); border-color: rgba(212,255,72,0.35); }
+/* Bright-screen guard: 0.65 + low-alpha bg can disappear in sunlight. Push rest
+   opacity up + brand-yellow tint so the button stays legible regardless of
+   ambient brightness, then snap to 1 on press for clear feedback. */
+@media (hover: none), (pointer: coarse) {
+  .kc-copy-btn {
+    opacity: 0.85;
+    color: rgba(255, 255, 255, 0.92);
+    background: rgba(212, 255, 72, 0.10);
+    border-color: rgba(212, 255, 72, 0.20);
+  }
+  .kc-copy-btn:active, .kc-copy-btn:focus { opacity: 1; }
+}
+.forge-card.kc-running {
+  border-color: rgba(212, 255, 72, 0.30);
+  animation: kc-card-pulse 2s ease-in-out infinite;
+}
+@keyframes kc-card-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212, 255, 72, 0); }
+  50% { box-shadow: 0 0 0 3px rgba(212, 255, 72, 0.10); }
+}
+/* Streaming card already wears a brand-yellow pulse ring + border. Touch-mode
+   copy buttons (iter-34) ALSO use brand-yellow 10% bg, so they visually merge
+   into the ring and become invisible. Plus copying half-streamed content is a
+   UX trap. Hide both copy buttons until the card settles. */
+.forge-card.kc-running .md-copy-btn,
+.forge-card.kc-running .kc-copy-btn {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+.kc-loading {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 0 2px;
+}
+.kc-loading-label {
+  color: rgba(255,255,255,0.55);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.kc-elapsed {
+  color: rgba(255,255,255,0.35);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.kc-slow-hint {
+  color: rgba(255,140,66,0.65);
+  font-size: 11px;
+  font-style: italic;
+}
+.dot-pulse { display: inline-flex; align-items: center; gap: 4px; }
+.dot-pulse > span {
+  display: inline-block;
+  width: 6px; height: 6px;
+  background: var(--primary);
+  border-radius: 50%;
+  opacity: 0.35;
+  animation: dot-pulse-anim 1.2s ease-in-out infinite;
+}
+.dot-pulse > span:nth-child(2) { animation-delay: 0.18s; }
+.dot-pulse > span:nth-child(3) { animation-delay: 0.36s; }
+@keyframes dot-pulse-anim {
+  0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-3px); }
+}
+.kc-header {
+  width: 100%;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px 4px 4px;
+  background: transparent; border: none; cursor: pointer;
+  border-bottom: 1px solid rgba(255,255,255,0.10);
+  /* iter-98 audit: chat-panel is fixed 340px → kc-header ≈328px after padding.
+     kc-name has flex:1 so it absorbs leftover space; the 8px flex gap is
+     non-shrinkable; logo(20)+status(16)+chev(16)+3×gap(8)=76px of fixed
+     chrome, leaving ~252px for the FORGE label whose intrinsic width is only
+     ~46px at letter-spacing:0.10em. Layout never crunches at any viewport. */
+}
+.kc-logo {
+  width: 28px; height: 28px; border-radius: 50%; object-fit: cover;
+  /* iter-96 supersedes this hint with a canvas pre-bake (Lanczos) via
+     useDownsampledImage. The hook falls back to the raw 1024×1024 PNG when
+     createImageBitmap is unavailable (old Safari / WebView); the hint below
+     still helps in that fallback path. Modern Chrome/Firefox already use
+     high-quality bicubic for <img> downscale and treat this as a no-op. */
+  image-rendering: -webkit-optimize-contrast;
+}
+@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+  /* On HiDPI, lift the icon slightly with a subtle ring so the smaller-than-
+     ideal raster still feels intentional rather than blurry. */
+  .kc-logo { box-shadow: 0 0 0 1px rgba(255,255,255,0.06); }
+}
+.kc-name {
+  flex: 1; text-align: left;
+  font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.62);
+  text-transform: uppercase; letter-spacing: 0.10em;
+  /* At 11px caps with 62% alpha, default sub-pixel AA (macOS Safari/Chrome) can
+     leave strokes uneven against the dark ForgeCard bg. Force grayscale AA for
+     consistent strokes across engines. letter-spacing bumped 0.08→0.10em so
+     glyph edges have a touch more breathing room. iter-99 audit: Linux/Windows
+     Chrome already default to grayscale (no sub-pixel AA on those platforms),
+     so -webkit-font-smoothing is a no-op there — macOS is the actual target.
+     -moz-osx-font-smoothing only matters on Firefox/macOS. Keeping both is a
+     two-line cross-engine baseline for the platform that needs it. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+.kc-provider {
+  font-size: 9px;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  opacity: 0.85;
+  letter-spacing: 0.02em;
+  cursor: help;
+  margin-left: 6px;
+}
+.kc-status, .kc-chev {
+  width: 16px; height: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-muted);
+}
+.kc-chev { color: rgba(255,255,255,0.5); }
+
+/* Live work-state word in the agent bubble header (top-right). `.kc-name`
+   (flex:1) shoves it to the right edge, so it sits just left of the provider/
+   status/chevron cluster. Reads the same 9-bucket emotion state that drives
+   the avatar webm, so face + text stay in sync; only mounted while the turn
+   is running/waiting (ForgeCard guards it).
+
+   Two nested spans give "隐现 + 呼吸感":
+     - outer .kc-statusword  : continuous slow opacity breathe (always alive).
+     - inner .kc-statusword-in: replays a fade+rise entrance on every text swap
+       (keyed remount). Nesting means the two opacity animations multiply
+       instead of fighting over the same property. */
+.kc-statusword {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+  color: #39ff14;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
+  /* 半透明荧光绿圆角矩形底 */
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(57, 255, 20, 0.12);
+  border: 1px solid rgba(57, 255, 20, 0.28);
+  animation: kc-status-breathe 2.6s ease-in-out infinite;
+}
+.kc-statusword-in {
+  display: inline-block;
+  animation: kc-status-in 380ms ease-out both;
+}
+@keyframes kc-status-breathe {
+  0%, 100% { opacity: 0.32; }
+  50%      { opacity: 1; }
+}
+@keyframes kc-status-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kc-statusword { animation: none; opacity: 0.85; }
+  .kc-statusword-in { animation: none; transform: none; }
+}
+
+.status-done { color: var(--accent-green); }
+.status-running { color: var(--accent-orange); animation: spin 1s linear infinite; }
+.status-waiting { color: var(--accent-cyan); }
+@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+
+.kc-body {
+  padding: 10px 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.kc-status-text {
+  color: rgba(255,255,255,0.6);
+  font-size: 11px;
+  font-weight: 500;
+}
+.kc-text {
+  color: var(--text-primary);
+  line-height: 1.55;
+  font-size: 13px;
+  position: relative;
+}
+.kc-empty {
+  color: var(--text-muted, rgba(255,255,255,0.4));
+  font-size: 12px;
+  font-style: italic;
+  padding: 2px 0;
+}
+.kc-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.42);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.kc-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.kc-text-folded {
+  max-height: 360px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 75%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 75%, transparent 100%);
+}
+.kc-fold-toggle {
+  position: absolute;
+  bottom: 4px; left: 50%;
+  transform: translateX(-50%);
+  background: rgba(212, 255, 72, 0.14);
+  border: 1px solid rgba(212, 255, 72, 0.32);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: 12px;
+  cursor: pointer;
+  z-index: 1;
+  transition: background 0.15s;
+}
+.kc-fold-toggle:hover { background: rgba(212, 255, 72, 0.22); }
+.kc-text:not(.kc-text-folded) .kc-fold-toggle {
+  position: static;
+  transform: none;
+  display: inline-block;
+  margin-top: 8px;
+}
+
+/* Interleaved layout: text segments + tool chips in chronological order */
+.kc-interleaved { display: flex; flex-direction: column; gap: 6px; }
+.kc-interleaved > .tool-chip-wrap { align-self: flex-start; max-width: 100%; }
+
+/* P-segments (2026-05-17) — segments[]-driven render.  Each child is a
+   text / thinking / tool slot; their array order is the event timeline. */
+.kc-segmented { display: flex; flex-direction: column; gap: 6px; }
+.kc-segmented > .tool-chip-wrap { align-self: flex-start; max-width: 100%; }
+
+/* Inline thinking chunk (segments[] only — the bottom thought-card is the
+   legacy fallback).  Smaller, italic, and visually distinct from prose so
+   the timeline reads as reasoning↔text↔tool. */
+.thought-chunk {
+  border-left: 2px solid rgba(124, 92, 255, 0.4);
+  padding: 4px 0 4px 8px;
+  margin: 2px 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+}
+.thought-chunk .tc-row {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: rgba(255, 255, 255, 0.55); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.4px;
+  font-family: var(--font-mono);
+}
+.thought-chunk .tc-row:hover { color: rgba(255, 255, 255, 0.85); }
+.thought-chunk .tc-content {
+  margin-top: 4px;
+  font-style: italic;
+}
+.thought-chunk .tc-content p { margin: 0 0 4px; line-height: 1.5; }
+.thought-chunk.collapsed .tc-row .tc-label { opacity: 0.7; }
+
+/* Tool chips: name + inline arg preview so user sees what agent is doing */
+.kc-tools { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.tool-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
+  align-self: flex-start;
+  max-width: 100%;
+}
+.tool-chip .tc-icon { color: var(--color-icon-secondary); flex-shrink: 0; }
+.tool-chip .tc-name { color: var(--text-primary); font-weight: 600; }
+.tool-chip .tc-arg {
+  color: rgba(255,255,255,0.55);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+.tool-chip.tool-error { border-color: rgba(255,80,80,0.4); background: rgba(255,80,80,0.08); }
+.tool-chip.tool-done .tc-icon { color: var(--color-accent-green-default); }
+
+.tool-chip-wrap { display: flex; flex-direction: column; align-self: flex-start; max-width: 100%; }
+.tool-chip.clickable { cursor: pointer; }
+.tool-chip.clickable:hover { background: rgba(255,255,255,0.07); }
+.tool-chip:disabled { cursor: default; }
+.tc-toggle { color: rgba(255,255,255,0.45); margin-left: 2px; }
+.tc-result {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.32);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: rgba(255,255,255,0.82);
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  animation: tc-slide-in 0.25s ease;
+}
+@keyframes tc-slide-in {
+  from { opacity: 0; max-height: 0; margin-top: 0; padding: 0 10px; }
+  to { opacity: 1; }
+}
+.tc-result.is-error { border-color: rgba(255,80,80,0.4); background: rgba(255,80,80,0.08); color: var(--accent-error); }
+.tc-result.is-streaming {
+  border-color: rgba(212, 255, 72, 0.15);
+  background: rgba(0,0,0,0.25);
+  max-height: 110px;
+  overflow: hidden;
+}
+.tc-cursor {
+  display: inline-block;
+  width: 5px;
+  height: 12px;
+  background: var(--primary);
+  opacity: 0.6;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  animation: tc-blink 1s ease-in-out infinite;
+}
+@keyframes tc-blink { 0%, 100% { opacity: 0.6; } 50% { opacity: 0.15; } }
+/* "View all" mode drops the inner cap so content flows naturally — avoids the
+   awkward nested scroll (panel scroll inside outer cp-thread scroll). User
+   already opted into seeing the whole thing by clicking 查看全部. */
+.tc-result.is-expanded { max-height: none; overflow: visible; }
+/* JSON syntax highlighting palette (forgeax dark theme). Colors picked so any
+   two adjacent token types stay AA against the 32%-black .tc-result bg. */
+.jh-key  { color: var(--color-syntax-key); }         /* keys — blue, GH-style */
+.jh-str  { color: var(--color-syntax-string); }         /* string values — warm yellow, matches md-inline-code */
+.jh-num  { color: var(--color-syntax-number); }         /* numbers — sage green */
+.jh-bool { color: var(--color-syntax-boolean); font-weight: 600; }  /* true/false — purple */
+.jh-null { color: rgba(255,255,255,0.40); font-style: italic; }  /* null — muted */
+.tc-result-toggle {
+  align-self: flex-start;
+  margin-top: 4px;
+  background: rgba(212, 255, 72, 0.10);
+  border: 1px solid rgba(212, 255, 72, 0.28);
+  color: var(--primary);
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.tc-result-toggle:hover { background: rgba(212, 255, 72, 0.18); }
+.tc-result-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  font-family: var(--font-sans);
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--primary);
+  background: rgba(212, 255, 72, 0.12);
+  border: 1px solid rgba(212, 255, 72, 0.28);
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: 1px;
+}
+
+/* Markdown rendering for assistant text */
+.md { color: var(--text-primary); font-size: 13px; line-height: 1.55; }
+.md > * + * { margin-top: 8px; }
+.md-p { margin: 0; }
+.md-reflection {
+  position: relative;
+  border-left: 1px solid var(--color-border-default);
+  background: rgba(255,255,255,0.03);
+  padding: 6px 10px 6px 28px;
+  border-radius: 0 5px 5px 0;
+  color: rgba(255,255,255,0.72);
+  font-style: italic;
+}
+.md-reflection::before {
+  content: "↺";
+  position: absolute;
+  left: 9px; top: 4px;
+  color: var(--primary);
+  font-size: 14px;
+  font-style: normal;
+  font-weight: 700;
+}
+.md-h { margin: 12px 0 4px; font-weight: 700; color: var(--text-primary); line-height: 1.3; }
+.md-h1 { font-size: 18px; }
+.md-h2 { font-size: 16px; }
+.md-h3 { font-size: 14px; }
+.md-h4, .md-h5, .md-h6 { font-size: 13px; }
+.md-ul, .md-ol { margin: 0; padding-left: 20px; }
+.md-ul li, .md-ol li { margin: 2px 0; }
+.md-inline-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--color-syntax-string);
+}
+.md-code-wrap { position: relative; }
+.md-code-wrap:hover .md-copy-btn,
+.md-code-wrap:focus-within .md-copy-btn { opacity: 1; }
+.md-copy-btn {
+  position: absolute;
+  top: 6px; right: 6px;
+  z-index: 1;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.10);
+  color: rgba(255,255,255,0.75);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+.md-copy-btn:hover { background: rgba(212,255,72,0.18); color: var(--primary); border-color: rgba(212,255,72,0.35); }
+/* Touch / no-hover devices (mobile, tablets, iframe-without-pointer): button
+   is always visible — hover-reveal is meaningless without a cursor.
+   Bright-screen guard: bump opacity + add brand-yellow tint so the button
+   stays legible in sunlight; snap to 1 on press for clear feedback. */
+@media (hover: none), (pointer: coarse) {
+  .md-copy-btn {
+    opacity: 0.85;
+    color: rgba(255, 255, 255, 0.95);
+    background: rgba(212, 255, 72, 0.10);
+    border-color: rgba(212, 255, 72, 0.20);
+  }
+  .md-copy-btn:active, .md-copy-btn:focus { opacity: 1; }
+}
+.md-code-lang {
+  position: absolute;
+  top: 6px; left: 10px;
+  font-size: 10px;
+  color: rgba(255,255,255,0.40);
+  font-family: var(--font-mono);
+  text-transform: lowercase;
+  pointer-events: none;
+}
+.md-code {
+  margin: 0;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 5px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.md-code-wrap:has(.md-code-lang) .md-code { padding-top: 22px; }
+.md-code code {
+  font-family: var(--font-mono);
+  color: rgba(255,255,255,0.85);
+  background: transparent;
+  white-space: pre;
+}
+.md-quote {
+  margin: 0;
+  padding: 2px 10px;
+  border-left: 3px solid rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.7);
+}
+.md-hr { border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 8px 0; }
+
+/* GFM table */
+.md-table-wrap { overflow-x: auto; }
+.md-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 50%;
+}
+.md-table th, .md-table td {
+  border: 1px solid rgba(255,255,255,0.10);
+  padding: 5px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-table th {
+  background: rgba(212,255,72,0.07);
+  color: var(--text-primary);
+  font-weight: 700;
+}
+.md-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+
+/* GFM task list */
+.md-task { list-style: none; margin-left: -16px; position: relative; padding-left: 22px; }
+.md-task-box {
+  position: absolute; left: 0; top: 1px;
+  width: 14px; height: 14px;
+  /* Dotted (denser than dashed → still visible at 14px even on low-DPI / weak
+     antialiasing) + border-radius:50% (circle, NOT square) makes it visually
+     impossible to mistake for an HTML checkbox: native checkboxes are always
+     squares and always solid borders. cursor:help reinforces "status, not
+     control". Brand-fill on `.is-checked` swap stays the same. */
+  border: 1px dotted rgba(255,255,255,0.40);
+  border-radius: 50%;
+  font-size: 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: transparent;
+  font-weight: 700;
+  background: rgba(0,0,0,0.20);
+  cursor: help;
+}
+.md-task.is-checked .md-task-box {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--prim-color-neutral-950);
+}
+.md-task.is-checked { color: rgba(255,255,255,0.55); text-decoration: line-through; }
+.md a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+
+.md-typewriter .md-typewriter-body {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.md-cursor {
+  display: inline-block;
+  color: var(--primary);
+  font-weight: 600;
+  margin-left: 1px;
+  animation: md-blink 1s steps(2) infinite;
+}
+@keyframes md-blink { 50% { opacity: 0; } }
+/* Skip-typewriter pill: trails the cursor with a small brand-tinted button.
+   Subtle at rest (so it doesn't dominate the live text), brightens on hover. */
+.md-skip-btn {
+  display: inline-flex; align-items: center;
+  margin-left: 8px; padding: 1px 8px;
+  font-size: 10px; font-weight: 600;
+  color: rgba(212,255,72,0.75);
+  background: rgba(212,255,72,0.08);
+  border: 1px solid rgba(212,255,72,0.25);
+  border-radius: 10px;
+  cursor: pointer; user-select: none;
+  vertical-align: 2px;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.md-skip-btn:hover { color: var(--primary); background: rgba(212,255,72,0.16); border-color: rgba(212,255,72,0.45); }
+.md-skip-btn:active { transform: scale(0.96); }
+.md strong { font-weight: 700; color: var(--text-primary); }
+.md em { font-style: italic; }
+
+/* Thought process card */
+.thought-card {
+  background: rgba(0,0,0,0.20);
+  border: 0.67px solid rgba(255,255,255,0.05);
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin-top: 2px;
+}
+.tc-row {
+  width: 100%;
+  display: flex; align-items: center; gap: 4px;
+  background: transparent; border: none; cursor: pointer;
+  padding: 2px 0;
+  text-align: left;
+}
+.tc-brain { color: var(--primary); flex-shrink: 0; }
+.tc-label {
+  flex: 1;
+  font-size: 11px; font-weight: 700;
+  color: var(--text-primary);
+}
+.tc-chev {
+  width: 16px; height: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: rgba(255,255,255,0.5);
+}
+.tc-content {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: rgba(255,255,255,0.5);
+}
+.tc-content p { margin: 0 0 6px; }
+.tc-content p:last-child { margin-bottom: 0; }
+
+/* Composer */
+.composer {
+  flex-shrink: 0;
+  transition: outline 0.15s;
+}
+.composer--asset-drop {
+  outline: 2px dashed var(--accent, #4c9eff);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+.composer--asset-drop .composer-card {
+  background: rgba(76, 158, 255, 0.06);
+}
+.composer-input {
+  width: 100%;
+  resize: none;
+  background: transparent;
+  border: none;
+  padding: 12px 12px 8px;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  outline: none;
+  min-height: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.composer-input::placeholder { color: var(--color-text-disabled); }
+
+.composer-bar {
+  display: flex; align-items: center; gap: 4px;
+  padding: 0 8px 8px;
+}
+.cb-btn {
+  background: none; border: none; cursor: pointer; padding: 0;
+  width: 24px; height: 24px;
+  color: var(--color-text-primary);
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm);
+  transition: background var(--motion-duration-instant);
+}
+.cb-btn:hover { background: var(--color-interaction-hover); }
+/* "Coming soon" placeholder icons: dim at rest, no hover-elevation, but click
+   surfaces .cb-hint via iter-55-style 2s pill. Position is anchor for hint. */
+.cb-btn.cb-soon { position: relative; opacity: 0.55; cursor: not-allowed; }
+.cb-btn.cb-soon:hover { color: rgba(255,255,255,0.55); background: transparent; }
+.cb-hint {
+  position: absolute; bottom: 28px; left: 50%;
+  font-size: 10px; font-weight: 600;
+  color: var(--prim-color-neutral-950); background: var(--primary);
+  padding: 2px 6px; border-radius: 4px;
+  white-space: nowrap; pointer-events: none; z-index: 3;
+  animation: toast-pulse 2s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cb-hint { animation: none; opacity: 1; transform: translate(-50%, 0); }
+}
+.cb-model {
+  background: var(--bg-2);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  color: var(--color-text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.cb-model:hover:not(:disabled) { background: var(--color-interaction-hover); }
+.cb-model:disabled { cursor: not-allowed; opacity: 0.55; }
+
+/* Composer cli-selector — single-turn provider override. */
+.cb-cli { position: relative; }
+.cb-cli-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--prim-color-neutral-0);
+  border: none;
+  border-radius: 36px;
+  padding: 10px 10px;
+  color: var(--color-text-on-bright-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  text-align: left;
+}
+.cb-cli-btn:hover:not(:disabled) { opacity: 0.9; }
+.cb-cli-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Provider is currently 不可用 — orange tint on white pill */
+.cb-cli-btn.cb-cli-warning {
+  background: var(--color-accent-orange-soft);
+  color: var(--color-accent-orange-default);
+}
+.cb-cli-btn.cb-cli-active:hover:not(:disabled) { opacity: 0.9; }
+.cb-cli-btn.cb-cli-warning:hover:not(:disabled) {
+  background: var(--color-accent-orange-soft);
+  color: var(--color-accent-orange-default);
+  opacity: 0.9;
+}
+.cb-cli-label { letter-spacing: 0.02em; }
+.cb-cli-menu {
+  position: absolute;
+  bottom: calc(100% + 6px); right: 0;
+  background: var(--bg-1);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  /* P2.7g — widened from 240 → 340 to give the bus description mini-strip
+     enough room to fit 1–2 lines per row without ugly mid-clause wraps. */
+  min-width: 340px;
+  max-width: 460px;
+  padding: 4px;
+  z-index: 100;
+  display: flex; flex-direction: column; gap: 1px;
+}
+/* Every row is two-line: a horizontal id+name+pills row (.cb-cli-row), then a
+   mono description mini-strip (.cb-cli-desc) below. So the item is a column. */
+.cb-cli-item {
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+  padding: 6px 8px 7px;
+  border: none; background: transparent;
+  cursor: pointer;
+  border-radius: 4px;
+  color: var(--text-default, rgba(255,255,255,0.85));
+  font-family: inherit; font-size: 12px;
+  text-align: left;
+}
+.cb-cli-row {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+}
+.cb-cli-item:hover:not(:disabled) { background: rgba(255,255,255,0.06); }
+.cb-cli-item.is-current { background: rgba(212, 255, 72, 0.08); }
+.cb-cli-item.is-focused { outline: 1px solid rgba(207, 163, 255, 0.4); outline-offset: -1px; }
+/* P-down-clickable (2026-05-17) — was opacity:0.55 + cursor:not-allowed;
+   now down providers are selectable so the player can attempt them anyway.
+   Visual signals still convey risk: dimmer than ok rows, amber-tinted text. */
+.cb-cli-item.is-down { opacity: 0.72; }
+.cb-cli-item.is-down:hover { opacity: 1; }
+.cb-cli-item.is-down .cb-cli-id { color: var(--accent-orange); }
+.cb-cli-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.05);
+  color: var(--text-default);
+  min-width: 60px;
+  display: inline-block;
+}
+.cb-cli-name { flex: 1; font-size: 11px; color: var(--text-muted); }
+.cb-cli-reason {
+  display: inline; opacity: 0.7;
+  font-size: 10px;
+  font-style: italic;
+}
+.cb-cli-hint { flex: 1; font-size: 10px; color: var(--text-muted); font-style: italic; }
+.cb-cli-pill {
+  font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  font-family: var(--font-mono);
+}
+.cb-cli-pill.ok { color: var(--accent-green); background: rgba(74,222,128,0.10); }
+.cb-cli-pill.down { color: var(--accent-error); background: rgba(255,107,107,0.10); }
+/* P2.7d — "this CLI provider is also a bus cli-provider plugin" badge. Sky
+   blue tone matches AgentsPanel `.ap-h-pill.bus` / `.ac-bus-pill` so the same
+   "bus-sourced" signal looks consistent across surfaces. */
+.cb-cli-bus-pill {
+  font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  font-family: var(--font-mono);
+  color: var(--color-role-art); background: rgba(125, 211, 252, 0.12);
+  border: 1px solid rgba(125, 211, 252, 0.22);
+  letter-spacing: 0.04em;
+}
+/* P3.36 — clickable variant. Sky-blue alpha family mirrors AgentsPanel
+   `.ac-bus-pill.is-link` (P3.32) + BusAdmin `.ba-backlink` (P3.33) +
+   ChatPanel `.cp-agent-bar-bus` (P3.34) so the "sky-blue 1px border + →
+   arrow = clickable deep-link" muscle memory carries from any of those
+   surfaces into this dropdown row. cursor:pointer on the span + 120ms
+   transition keeps it consistent with other interactive pills. */
+.cb-cli-bus-pill.is-link {
+  cursor: pointer;
+  border-color: rgba(125, 211, 252, 0.32);
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+.cb-cli-bus-pill.is-link:hover {
+  background: rgba(125, 211, 252, 0.28);
+  border-color: rgba(125, 211, 252, 0.55);
+  transform: translateY(-0.5px);
+  box-shadow: none;
+}
+.cb-cli-bus-pill.is-link:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.55);
+}
+.cb-cli-bus-pill.is-link:active {
+  background: rgba(125, 211, 252, 0.36);
+  transform: translateY(0.5px);
+}
+/* P2.7g — bus manifest description.zh mini-strip under each row that lives
+   on bus. Same sky-blue color family as `.cb-cli-bus-pill` + `.ac-bus-pill`
+   + `.ac-produces` (AgentsPanel) so all "bus-sourced metadata" surfaces
+   share visual ownership. mono-ish font so player reads it as "machine
+   metadata" not "free-form description"; subtle indent (calc 60+8=68px) so
+   the text aligns with the displayName column above, not the id chip. */
+.cb-cli-desc {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.35;
+  color: rgba(125, 211, 252, 0.78);
+  padding-left: 68px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  letter-spacing: 0.01em;
+}
+
+.cb-send {
+  background: var(--primary);
+  border: none; cursor: pointer;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--prim-color-neutral-950);
+  box-shadow: none;
+  transition: opacity 0.15s;
+}
+.cb-send:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+.cb-send.cb-stop {
+  background: var(--accent-error);
+  color: var(--prim-color-neutral-950);
+  box-shadow: none;
+}
+.cb-send.cb-stop:hover { background: var(--accent-error); }
+
+/* Accessibility: respect users who've opted out of motion. Freeze the looping
+   animations (subagent status pulse, ForgeCard running border pulse, dot-pulse
+   loading balls, status icon spin, typewriter cursor blink) but keep their
+   visible static state so loading affordances still read. We don't disable
+   `transition` outright — focus rings & hover-fade are short enough to be
+   safe — but kill the long-running keyframe loops. */
+@media (prefers-reduced-motion: reduce) {
+  .as-status.running,
+  .forge-card.kc-running,
+  .dot-pulse > span,
+  .status-running,
+  .md-cursor {
+    animation: none !important;
+  }
+  /* Keep the static color/glow so user can still tell something's running. */
+  .forge-card.kc-running {
+    box-shadow: 0 0 0 2px rgba(212, 255, 72, 0.10);
+  }
+  .dot-pulse > span { opacity: 0.7; }
+  .md-cursor { opacity: 1; }
+}
+
+/* ── SubAgentCard (vag_web-style sub-agent inline panel) ───────────────── */
+.sub-agent-card {
+  margin: 6px 0 6px 4px;
+  border-left: 3px solid var(--prim-color-neutral-450);
+  background: rgba(255,255,255,0.025);
+  border-radius: 4px;
+  font-size: 11px;
+}
+.sac-header {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--text-secondary, rgba(255,255,255,0.7));
+  text-align: left;
+  font-size: 11px;
+}
+.sac-header:hover { background: rgba(255,255,255,0.04); }
+.sac-emoji { font-size: 12px; }
+.sac-name { font-weight: 600; }
+.sac-role { color: var(--text-muted, rgba(255,255,255,0.4)); font-size: 10px; }
+/* Handoff "拍一拍" header: initiator avatar replaces the emoji, the pat
+   sentence replaces the name. The avatar is a small circle aligned to the
+   row; the text takes the remaining space and ellipsizes so the status /
+   tools meta on the right stays visible. */
+.sac-pat-avatar { flex: 0 0 auto; border-radius: 50%; }
+.sac-pat-text {
+  font-weight: 600;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sac-provider {
+  font-size: 9px;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  opacity: 0.85;
+  letter-spacing: 0.02em;
+  cursor: help;
+}
+
+/* P3.77 — provider badge pill upgraded to bus cli-provider deep-link.
+   Applied to .kc-provider.is-link (ForgeCard header) and .sac-provider.is-link
+   (SubAgentCard header) when the provider id matches a bus cli-provider
+   plugin. Arrow stays invisible at rest so resting chat thread reads as
+   pure data; hover/focus reveals the → and tints the bg with the cli's
+   own brand colour (currentColor inherits the badge style.color). */
+.kc-provider.is-link,
+.sac-provider.is-link {
+  cursor: pointer;
+  outline: none;
+  opacity: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: background-color 120ms ease, transform 120ms ease, opacity 120ms ease;
+}
+.kc-provider.is-link:hover,
+.sac-provider.is-link:hover {
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  transform: translateY(-0.5px);
+}
+.kc-provider.is-link:active,
+.sac-provider.is-link:active {
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  transform: translateY(0);
+}
+.kc-provider.is-link:focus-visible,
+.sac-provider.is-link:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 60%, transparent);
+}
+.kc-provider.is-link .provider-badge-arrow,
+.sac-provider.is-link .provider-badge-arrow {
+  display: inline-block;
+  font-size: 9px;
+  line-height: 1;
+  color: currentColor;
+  opacity: 0;
+  transform: translateX(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.kc-provider.is-link:hover .provider-badge-arrow,
+.kc-provider.is-link:focus-visible .provider-badge-arrow,
+.sac-provider.is-link:hover .provider-badge-arrow,
+.sac-provider.is-link:focus-visible .provider-badge-arrow {
+  opacity: 0.92;
+  transform: translateX(0);
+}
+
+.sac-status { margin-left: auto; font-size: 10px; padding: 1px 6px; border-radius: 3px; }
+.sac-status.streaming { color: var(--accent-orange); background: rgba(255,140,66,0.1); }
+.sac-status.done { color: var(--accent-green); background: rgba(74,222,128,0.1); }
+.sac-status.error { color: var(--accent-error); background: rgba(255,107,107,0.1); }
+.sac-tools { font-size: 10px; color: var(--text-muted, rgba(255,255,255,0.4)); }
+.sac-body { padding: 6px 10px 8px; display: flex; flex-direction: column; gap: 4px; }
+.sac-thinking summary { font-size: 10px; color: var(--text-muted, rgba(255,255,255,0.4)); cursor: pointer; }
+.sac-thinking pre { font-size: 10px; max-height: 180px; overflow: auto; background: rgba(0,0,0,0.3); padding: 6px 8px; border-radius: 4px; color: var(--text-secondary); }
+.sac-tool-list { display: flex; flex-direction: column; gap: 2px; }
+.sac-tool { display: flex; align-items: center; gap: 6px; font-size: 10px; font-family: var(--font-mono); color: var(--text-secondary); padding: 2px 0; }
+.sac-tool.running .sac-tool-name { color: var(--accent-orange); }
+.sac-tool.done .sac-tool-name { color: var(--accent-green); }
+.sac-tool.error .sac-tool-name { color: var(--accent-error); }
+.sac-tool-dot { animation: pulse 1.5s infinite; }
+.sac-tool-err { color: var(--accent-error); font-size: 10px; }
+.sac-text { font-size: 11px; color: var(--text-primary); white-space: pre-wrap; padding-top: 4px; border-top: 1px dashed rgba(255,255,255,0.04); }
+
+/* P3.11 — ChatPanel empty-state bus inventory readout. Slots between the
+ * generic example prompt and the composer so first-time visitors learn
+ * "this studio has a bus host with N plugins across 6 kinds" without
+ * having to click anything. Same kind-color family as Sidebar BUS KINDS
+ * footer (P2.7i) and BusAdminPanel kind chips (P2.6e) — one palette
+ * across surfaces so the player builds a single mental map.
+ *
+ * Visual hierarchy: small green head row (bus host · 19 plugins loaded)
+ * → 6 colored kind chips → muted hint line with two example prompts.
+ * Lives inside .cp-empty so it inherits the centered column layout. */
+.cp-empty {
+  padding: 14px 16px;
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.75));
+}
+.cp-empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+}
+.cp-empty-sub {
+  font-size: 11px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.5));
+  line-height: 1.5;
+}
+
+.cp-empty-bus {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgba(125, 211, 252, 0.04), rgba(125, 211, 252, 0.01));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cp-empty-bus-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.78);
+}
+/* P3.89 — head row 升级 button + sky-blue hover/focus/active 家族,
+ * 第 25 个 deep-link surface · 第 13 处 setMode('bus') producer。
+ * 配色锁 sky #7dd3fc 跟 .cp-empty-bus-dot/label 同色家族对齐。 */
+button.cp-empty-bus-head {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  margin: -3px -4px;
+  padding: 3px 4px;
+  width: calc(100% + 8px);
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  position: relative;
+  transition: transform 0.08s ease, box-shadow 0.12s ease,
+    background-color 0.12s ease, border-color 0.12s ease;
+}
+button.cp-empty-bus-head.is-link:hover {
+  background: rgba(125, 211, 252, 0.10);
+  border-color: rgba(125, 211, 252, 0.42);
+  box-shadow: none;
+  transform: translateY(-0.5px);
+}
+button.cp-empty-bus-head.is-link:hover .cp-empty-bus-arrow {
+  opacity: 0.92;
+  transform: translateX(0);
+}
+button.cp-empty-bus-head.is-link:focus-visible {
+  outline: 2px solid rgba(125, 211, 252, 0.62);
+  outline-offset: 1px;
+}
+button.cp-empty-bus-head.is-link:active {
+  background: rgba(125, 211, 252, 0.18);
+  transform: translateY(0);
+  box-shadow: none;
+}
+.cp-empty-bus-arrow {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-role-art);
+  opacity: 0;
+  transform: translateX(-2px);
+  transition: opacity 0.14s ease, transform 0.14s ease;
+  flex-shrink: 0;
+}
+.cp-empty-bus-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-role-art);
+  box-shadow: none;
+  flex-shrink: 0;
+}
+.cp-empty-bus-label {
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: rgba(125, 211, 252, 0.85);
+  font-weight: 700;
+}
+.cp-empty-bus-total {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--primary);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(212, 255, 72, 0.10);
+  border: 1px solid rgba(212, 255, 72, 0.32);
+  line-height: 1.2;
+}
+.cp-empty-bus-sub {
+  font-size: 9px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.5));
+  letter-spacing: 0.02em;
+}
+.cp-empty-bus-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.cp-bus-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid transparent;
+  line-height: 1.4;
+}
+.cp-bus-chip.is-empty { opacity: 0.4; }
+.cp-bus-chip-name { font-weight: 600; }
+.cp-bus-chip-n { font-weight: 700; opacity: 0.92; }
+/* P3.59 — button variant; 2nd pendingBusKindFilter producer surface (1st was
+ * Sidebar BUS KINDS footer P3.37). hover/focus/active mirrors .ss-kind-chip
+ * .is-link palette so the player's "kind chip → bus admin" muscle memory
+ * transfers from sidebar to chat empty-state. button reset is needed because
+ * the parent .cp-empty-bus-row was sized for <span>. */
+button.cp-bus-chip {
+  background: transparent;
+  font: inherit;
+  margin: 0;
+  cursor: pointer;
+  transition: transform 0.08s ease, box-shadow 0.12s ease,
+    background-color 0.12s ease, border-color 0.12s ease;
+}
+button.cp-bus-chip.is-link:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.18);
+}
+button.cp-bus-chip.is-link.k-workbench:hover     { background: rgba(212, 255,  72, 0.22); border-color: rgba(212, 255,  72, 0.55); box-shadow: none; }
+button.cp-bus-chip.is-link.k-agent:hover         { background: rgba(168,  85, 247, 0.22); border-color: rgba(168,  85, 247, 0.55); box-shadow: none; }
+button.cp-bus-chip.is-link.k-cli-provider:hover  { background: rgba(108, 196, 255, 0.22); border-color: rgba(108, 196, 255, 0.55); box-shadow: none; }
+button.cp-bus-chip.is-link.k-model-binding:hover { background: rgba(126, 231, 196, 0.22); border-color: rgba(126, 231, 196, 0.55); box-shadow: none; }
+button.cp-bus-chip.is-link.k-skill:hover         { background: rgba(255, 200, 120, 0.22); border-color: rgba(255, 200, 120, 0.55); box-shadow: none; }
+button.cp-bus-chip.is-link.k-tool:hover          { background: rgba(255, 140,  66, 0.22); border-color: rgba(255, 140,  66, 0.55); box-shadow: none; }
+button.cp-bus-chip.is-link:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.75);
+  outline-offset: 1px;
+}
+button.cp-bus-chip.is-link:active {
+  transform: translateY(0);
+  filter: brightness(0.95);
+}
+/* Kind palette — kept in lockstep with .ss-kind-chip.k-* (Sidebar footer)
+ * and .ba-chip.k-* (BusAdminPanel) so the player's color memory transfers. */
+.cp-bus-chip.k-workbench     { background: rgba(212, 255,  72, 0.10); border-color: rgba(212, 255,  72, 0.32); color: var(--primary); }
+.cp-bus-chip.k-agent         { background: rgba(168,  85, 247, 0.12); border-color: rgba(168,  85, 247, 0.35); color: var(--color-role-orchestrator); }
+.cp-bus-chip.k-cli-provider  { background: rgba(108, 196, 255, 0.10); border-color: rgba(108, 196, 255, 0.34); color: var(--color-kind-cli-provider); }
+.cp-bus-chip.k-model-binding { background: rgba(126, 231, 196, 0.10); border-color: rgba(126, 231, 196, 0.32); color: var(--accent-mint); }
+.cp-bus-chip.k-skill         { background: rgba(255, 200, 120, 0.10); border-color: rgba(255, 200, 120, 0.34); color: var(--color-role-narrative); }
+.cp-bus-chip.k-tool          { background: rgba(255, 140,  66, 0.10); border-color: rgba(255, 140,  66, 0.34); color: var(--color-role-coding); }
+.cp-empty-bus-hint {
+  font-size: 10px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.45));
+  font-style: italic;
+  line-height: 1.4;
+}
+
+/* P-UI-ACTIONS — surfaces (bus.ui) inventory in ChatPanel empty state.
+ * Mirror of .cp-empty-bus but accented amber #ffc878 to differentiate from
+ * the sky-blue bus-host strip directly above. Inside the strip, individual
+ * surface chips use the same layer palette established in BusAdminPanel
+ * P-UI-SURFACES (HOST=lime · PLUGIN=sky-blue · IFRAME=amber) so the player
+ * carries "lime=host / sky=plugin" muscle memory across ChatPanel + Bus tab. */
+.cp-empty-surfaces {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 200, 120, 0.20);
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgba(255, 200, 120, 0.05), rgba(255, 200, 120, 0.01));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cp-empty-surfaces-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.78);
+  flex-wrap: wrap;
+}
+.cp-empty-surfaces-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-role-narrative);
+  box-shadow: none;
+  flex-shrink: 0;
+}
+.cp-empty-surfaces-label {
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: rgba(255, 200, 120, 0.92);
+  font-weight: 700;
+}
+.cp-empty-surfaces-total {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--primary);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(212, 255, 72, 0.10);
+  border: 1px solid rgba(212, 255, 72, 0.32);
+  line-height: 1.2;
+}
+.cp-empty-surfaces-actions {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent-mint);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(126, 231, 196, 0.08);
+  border: 1px solid rgba(126, 231, 196, 0.28);
+  line-height: 1.2;
+}
+.cp-empty-surfaces-sub {
+  font-size: 9px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.5));
+  letter-spacing: 0.02em;
+}
+.cp-empty-surfaces-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.cp-surface-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid transparent;
+  line-height: 1.4;
+  background: transparent;
+  font-family: inherit;
+  font: inherit;
+  margin: 0;
+  cursor: pointer;
+  transition: transform 0.08s ease, box-shadow 0.12s ease,
+    background-color 0.12s ease, border-color 0.12s ease;
+}
+.cp-surface-chip-layer {
+  font-weight: 700;
+  text-transform: uppercase;
+  opacity: 0.85;
+  font-size: 8px;
+  letter-spacing: 0.05em;
+}
+.cp-surface-chip-id { font-weight: 600; }
+.cp-surface-chip-n { font-weight: 700; opacity: 0.92; }
+.cp-surface-chip.layer-host {
+  background: rgba(212, 255,  72, 0.10);
+  border-color: rgba(212, 255,  72, 0.34);
+  color: var(--primary);
+}
+.cp-surface-chip.layer-plugin {
+  background: rgba(125, 211, 252, 0.10);
+  border-color: rgba(125, 211, 252, 0.34);
+  color: var(--color-role-art);
+}
+.cp-surface-chip.layer-iframe {
+  background: rgba(255, 200, 120, 0.10);
+  border-color: rgba(255, 200, 120, 0.34);
+  color: var(--color-role-narrative);
+}
+.cp-surface-chip.is-link:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.18);
+}
+.cp-surface-chip.is-link.layer-host:hover   { background: rgba(212, 255,  72, 0.22); border-color: rgba(212, 255,  72, 0.55); box-shadow: none; }
+.cp-surface-chip.is-link.layer-plugin:hover { background: rgba(125, 211, 252, 0.22); border-color: rgba(125, 211, 252, 0.55); box-shadow: none; }
+.cp-surface-chip.is-link.layer-iframe:hover { background: rgba(255, 200, 120, 0.22); border-color: rgba(255, 200, 120, 0.55); box-shadow: none; }
+.cp-surface-chip.is-link:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.75);
+  outline-offset: 1px;
+}
+.cp-surface-chip.is-link:active {
+  transform: translateY(0);
+  filter: brightness(0.95);
+}
+
+/* P4.2 — recent bus events live ticker. 3rd readout in ChatPanel empty
+ * state, slots after .cp-empty-bus (sky #7dd3fc) and .cp-empty-surfaces
+ * (amber #ffc878). Mint #6ee7b7 family — distinct from the static
+ * inventories above so the player learns "mint = live event stream".
+ * Head dot pulses via @keyframes cp-ev-flash on each new poll-delta
+ * (3s cadence). Each row is a full-width <button> deep-link into Bus
+ * admin (setMode('bus') + setPendingBusExpandId(source)).
+ */
+.cp-empty-events {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid rgba(110, 231, 183, 0.20);
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgba(110, 231, 183, 0.05), rgba(110, 231, 183, 0.01));
+  display: flex; flex-direction: column;
+  gap: 6px;
+}
+button.cp-empty-events-head {
+  appearance: none; -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  margin: -3px -4px 0;
+  padding: 3px 4px;
+  width: calc(100% + 8px);
+  text-align: left;
+  font: inherit;
+  color: rgba(255, 255, 255, 0.78);
+  cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10px;
+  transition: transform 0.08s ease, box-shadow 0.12s ease,
+    background-color 0.12s ease, border-color 0.12s ease;
+}
+button.cp-empty-events-head.is-link:hover {
+  background: rgba(110, 231, 183, 0.10);
+  border-color: rgba(110, 231, 183, 0.42);
+  box-shadow: none;
+  transform: translateY(-0.5px);
+}
+button.cp-empty-events-head.is-link:hover .cp-empty-events-arrow {
+  opacity: 0.92;
+  transform: translateX(0);
+}
+button.cp-empty-events-head.is-link:focus-visible {
+  outline: 2px solid rgba(110, 231, 183, 0.62);
+  outline-offset: 1px;
+}
+button.cp-empty-events-head.is-link:active {
+  background: rgba(110, 231, 183, 0.18);
+  transform: translateY(0);
+  box-shadow: none;
+}
+.cp-empty-events-arrow {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent-mint);
+  opacity: 0;
+  transform: translateX(-2px);
+  transition: opacity 0.14s ease, transform 0.14s ease;
+  flex-shrink: 0;
+}
+.cp-empty-events-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent-mint);
+  box-shadow: none;
+  flex-shrink: 0;
+}
+.cp-empty-events-dot.is-flashing { animation: cp-ev-flash 600ms ease-out; }
+@keyframes cp-ev-flash {
+  0%   { background: var(--color-text-primary); box-shadow: none; transform: scale(1.6); }
+  35%  { background: var(--accent-mint); box-shadow: none; transform: scale(1.25); }
+  100% { background: var(--accent-mint); box-shadow: none; transform: scale(1); }
+}
+.cp-empty-events-label {
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(110, 231, 183, 0.92);
+  font-weight: 700;
+}
+.cp-empty-events-total {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-mint);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(110, 231, 183, 0.10);
+  border: 1px solid rgba(110, 231, 183, 0.32);
+  line-height: 1.2;
+}
+.cp-empty-events-sub {
+  font-size: 9px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.5));
+  letter-spacing: 0.02em;
+}
+.cp-empty-events-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex; flex-direction: column;
+  gap: 2px;
+}
+.cp-empty-events-row-wrap { margin: 0; padding: 0; }
+button.cp-empty-events-row {
+  appearance: none; -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  width: 100%;
+  margin: 0;
+  padding: 3px 5px;
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.12s ease, border-color 0.12s ease,
+    box-shadow 0.12s ease;
+  min-width: 0;
+}
+button.cp-empty-events-row.is-link:hover {
+  background: rgba(110, 231, 183, 0.08);
+  border-color: rgba(110, 231, 183, 0.32);
+  box-shadow: none;
+  color: rgba(255, 255, 255, 0.94);
+}
+button.cp-empty-events-row.is-link:focus-visible {
+  outline: 2px solid rgba(110, 231, 183, 0.55);
+  outline-offset: 1px;
+}
+.cp-empty-events-row-dot {
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: var(--accent-mint);
+  box-shadow: none;
+  flex-shrink: 0;
+}
+.cp-empty-events-row-name {
+  font-weight: 600;
+  color: rgba(110, 231, 183, 0.92);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.cp-empty-events-row-src {
+  font-size: 9px;
+  color: rgba(125, 211, 252, 0.78);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 38%;
+  flex-shrink: 1;
+}
+.cp-empty-events-row-ago {
+  font-variant-numeric: tabular-nums;
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.42);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* P4.4 — per-row kind family color (resolved at runtime from
+ * sourceKindMap built off /api/bus/plugins). Each row picks one of the 6
+ * canonical kind hues already locked in across .cp-bus-chip / .ba-chip /
+ * .ss-kind-chip — same lime/violet/sky/teal/amber/orange palette so the
+ * player learns one color = one kind across the studio. 'unknown' family
+ * keeps the original P4.2 mint #6ee7b7 so rows from a not-yet-mapped
+ * source still read as the neutral live color. Two-char kind tag
+ * (wb/ag/cli/mb/sk/tl/--) is a tiny uppercase mono badge between the dot
+ * and the event name; its color matches the family hue at 85% alpha. */
+.cp-empty-events-row-kind {
+  display: inline-block;
+  flex-shrink: 0;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-family: var(--font-mono);
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  line-height: 12px;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* workbench / lime #d4ff48 */
+.cp-empty-events-row.fam-workbench .cp-empty-events-row-dot {
+  background: var(--primary);
+  box-shadow: none;
+}
+.cp-empty-events-row.fam-workbench .cp-empty-events-row-kind {
+  color: rgba(212, 255, 72, 0.92);
+  background: rgba(212, 255, 72, 0.08);
+  border-color: rgba(212, 255, 72, 0.28);
+}
+.cp-empty-events-row.fam-workbench .cp-empty-events-row-name {
+  color: rgba(212, 255, 72, 0.86);
+}
+button.cp-empty-events-row.is-link.fam-workbench:hover {
+  background: rgba(212, 255, 72, 0.08);
+  border-color: rgba(212, 255, 72, 0.32);
+  box-shadow: none;
+  color: rgba(255, 255, 255, 0.94);
+}
+button.cp-empty-events-row.is-link.fam-workbench:focus-visible {
+  outline: 2px solid rgba(212, 255, 72, 0.55);
+}
+
+/* agent / violet #c4a3ff */
+.cp-empty-events-row.fam-agent .cp-empty-events-row-dot {
+  background: var(--color-role-orchestrator);
+  box-shadow: none;
+}
+.cp-empty-events-row.fam-agent .cp-empty-events-row-kind {
+  color: rgba(196, 163, 255, 0.92);
+  background: rgba(196, 163, 255, 0.08);
+  border-color: rgba(196, 163, 255, 0.3);
+}
+.cp-empty-events-row.fam-agent .cp-empty-events-row-name {
+  color: rgba(196, 163, 255, 0.88);
+}
+button.cp-empty-events-row.is-link.fam-agent:hover {
+  background: rgba(196, 163, 255, 0.08);
+  border-color: rgba(196, 163, 255, 0.32);
+  box-shadow: none;
+  color: rgba(255, 255, 255, 0.94);
+}
+button.cp-empty-events-row.is-link.fam-agent:focus-visible {
+  outline: 2px solid rgba(196, 163, 255, 0.55);
+}
+
+/* cli-provider / sky #6cc4ff */
+.cp-empty-events-row.fam-cli-provider .cp-empty-events-row-dot {
+  background: var(--color-kind-cli-provider);
+  box-shadow: none;
+}
+.cp-empty-events-row.fam-cli-provider .cp-empty-events-row-kind {
+  color: rgba(108, 196, 255, 0.92);
+  background: rgba(108, 196, 255, 0.08);
+  border-color: rgba(108, 196, 255, 0.3);
+}
+.cp-empty-events-row.fam-cli-provider .cp-empty-events-row-name {
+  color: rgba(108, 196, 255, 0.88);
+}
+button.cp-empty-events-row.is-link.fam-cli-provider:hover {
+  background: rgba(108, 196, 255, 0.08);
+  border-color: rgba(108, 196, 255, 0.32);
+  box-shadow: none;
+  color: rgba(255, 255, 255, 0.94);
+}
+button.cp-empty-events-row.is-link.fam-cli-provider:focus-visible {
+  outline: 2px solid rgba(108, 196, 255, 0.55);
+}
+
+/* model-binding / teal #7be7c4 */
+.cp-empty-events-row.fam-model-binding .cp-empty-events-row-dot {
+  background: var(--accent-mint);
+  box-shadow: none;
+}
+.cp-empty-events-row.fam-model-binding .cp-empty-events-row-kind {
+  color: rgba(126, 231, 196, 0.92);
+  background: rgba(126, 231, 196, 0.08);
+  border-color: rgba(126, 231, 196, 0.3);
+}
+.cp-empty-events-row.fam-model-binding .cp-empty-events-row-name {
+  color: rgba(126, 231, 196, 0.88);
+}
+button.cp-empty-events-row.is-link.fam-model-binding:hover {
+  background: rgba(126, 231, 196, 0.08);
+  border-color: rgba(126, 231, 196, 0.32);
+  box-shadow: none;
+  color: rgba(255, 255, 255, 0.94);
+}
+button.cp-empty-events-row.is-link.fam-model-binding:focus-visible {
+  outline: 2px solid rgba(126, 231, 196, 0.55);
+}
+
+/* skill / amber #ffc878 */
+.cp-empty-events-row.fam-skill .cp-empty-events-row-dot {
+  background: var(--color-role-narrative);
+  box-shadow: none;
+}
+.cp-empty-events-row.fam-skill .cp-empty-events-row-kind {
+  color: rgba(255, 200, 120, 0.92);
+  background: rgba(255, 200, 120, 0.08);
+  border-color: rgba(255, 200, 120, 0.3);
+}
+.cp-empty-events-row.fam-skill .cp-empty-events-row-name {
+  color: rgba(255, 200, 120, 0.88);
+}
+button.cp-empty-events-row.is-link.fam-skill:hover {
+  background: rgba(255, 200, 120, 0.08);
+  border-color: rgba(255, 200, 120, 0.32);
+  box-shadow: none;
+  color: rgba(255, 255, 255, 0.94);
+}
+button.cp-empty-events-row.is-link.fam-skill:focus-visible {
+  outline: 2px solid rgba(255, 200, 120, 0.55);
+}
+
+/* tool / orange #ff8c42 */
+.cp-empty-events-row.fam-tool .cp-empty-events-row-dot {
+  background: var(--color-role-coding);
+  box-shadow: none;
+}
+.cp-empty-events-row.fam-tool .cp-empty-events-row-kind {
+  color: rgba(255, 140, 66, 0.92);
+  background: rgba(255, 140, 66, 0.08);
+  border-color: rgba(255, 140, 66, 0.3);
+}
+.cp-empty-events-row.fam-tool .cp-empty-events-row-name {
+  color: rgba(255, 140, 66, 0.88);
+}
+button.cp-empty-events-row.is-link.fam-tool:hover {
+  background: rgba(255, 140, 66, 0.08);
+  border-color: rgba(255, 140, 66, 0.32);
+  box-shadow: none;
+  color: rgba(255, 255, 255, 0.94);
+}
+button.cp-empty-events-row.is-link.fam-tool:focus-visible {
+  outline: 2px solid rgba(255, 140, 66, 0.55);
+}
+
+/* unknown / neutral mint #6ee7b7 — keeps the original P4.2 row color so
+ * unmapped rows (pre-fetch race or 7th-kind future plugin) still read as
+ * the live ticker default. */
+.cp-empty-events-row.fam-unknown .cp-empty-events-row-kind {
+  color: rgba(110, 231, 183, 0.78);
+  background: rgba(110, 231, 183, 0.08);
+  border-color: rgba(110, 231, 183, 0.28);
+}
+
+/* P3.13 — model-binding routing strip above the composer textarea.
+ * One row per kind=model-binding plugin loaded on the bus. Until now the
+ * 1 anthropic-text plugin was invisible outside the Bus admin panel; this
+ * surfaces vendor/channel/roles at the point of composition.
+ * Color base = teal #7be7c4 (rgba 126,231,196) — same model-binding hue
+ * locked in across .ba-chip.k-model-binding / .ss-kind-chip.k-model-binding /
+ * .cp-bus-chip.k-model-binding so the player's "teal = mb" memory transfers.
+ */
+.cb-mb-strip {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 4px 8px 5px;
+  border: 1px solid rgba(126, 231, 196, 0.18);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(126, 231, 196, 0.05), rgba(126, 231, 196, 0.02));
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-muted, rgba(255, 255, 255, 0.55));
+}
+.cb-mb-strip-head {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: rgba(126, 231, 196, 0.8);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.cb-mb-strip-arrow { color: rgba(126, 231, 196, 0.55); font-size: 11px; }
+.cb-mb-strip-label { font-weight: 600; }
+.cb-mb-row {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 6px 2px;
+  border-radius: 999px;
+  background: rgba(126, 231, 196, 0.06);
+  border: 1px solid rgba(126, 231, 196, 0.20);
+}
+/* P3.42 — make each model-binding row a deep-link button into Bus admin
+ * (setMode('bus') + setPendingBusExpandId(mb.id)). Reuses the same teal hue
+ * family as the static strip so the affordance reads as "same row, now
+ * clickable" rather than a new color. Matches the deep-link pipeline used
+ * by AgentsPanel .ac-bus-pill.is-link / Sidebar wb-* placeholder backlink /
+ * BusAdminPanel .ba-backlink — 10th surface to route through pendingBusExpandId.
+ */
+button.cb-mb-row {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  appearance: none;
+}
+.cb-mb-row.is-link { transition: background 90ms ease-out, border-color 90ms ease-out, transform 90ms ease-out, box-shadow 90ms ease-out; }
+.cb-mb-row.is-link:hover {
+  background: rgba(126, 231, 196, 0.14);
+  border-color: rgba(126, 231, 196, 0.48);
+  box-shadow: none;
+  transform: translateY(-0.5px);
+}
+.cb-mb-row.is-link:focus-visible {
+  outline: none;
+  border-color: rgba(126, 231, 196, 0.65);
+  box-shadow: 0 0 0 2px rgba(126, 231, 196, 0.45);
+}
+.cb-mb-row.is-link:active {
+  background: rgba(126, 231, 196, 0.20);
+  transform: translateY(0);
+}
+.cb-mb-arrow {
+  margin-left: 1px;
+  font-size: 10px;
+  color: rgba(126, 231, 196, 0.62);
+  letter-spacing: 0;
+}
+.cb-mb-row.is-link:hover .cb-mb-arrow { color: rgba(126, 231, 196, 0.92); }
+.cb-mb-chip.cb-mb-kind {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent-mint);
+  background: rgba(126, 231, 196, 0.14);
+  border: 1px solid rgba(126, 231, 196, 0.32);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 9px;
+}
+.cb-mb-vendor {
+  color: color-mix(in srgb, var(--accent-mint) 60%, transparent);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.cb-mb-sep { color: rgba(126, 231, 196, 0.4); }
+.cb-mb-channel {
+  color: rgba(126, 231, 196, 0.92);
+  letter-spacing: 0.04em;
+}
+.cb-mb-roles {
+  display: inline-flex; gap: 3px;
+  margin-left: 2px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(126, 231, 196, 0.22);
+}
+.cb-mb-role {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+/* === P3.83 — cb-mb-role chips become per-role span-role-buttons ============
+ * Each role chip (reasoning / draft / summarize / other) deep-links to
+ * BusAdmin with kind=model-binding solo + that mb plugin row expanded.
+ * Per-role accent color carves the strip into three sub-targets so the
+ * player visually parses "the routing tier into three lanes" rather than
+ * one opaque row. Hover/active/focus-visible mirror the cb-mb-row 4-state
+ * grammar; parent stays a real <button> so this is span+role+tabIndex.
+ *   reasoning → sky-blue #7dd3fc  (analytic / wisdom)
+ *   draft     → pink #ff6db5      (creative / spark)
+ *   summarize → lime #d4ff48      (clarity / wrap-up)
+ *   default   → teal #7be7c4      (same as cb-mb-channel)
+ */
+.cb-mb-role.is-link {
+  cursor: pointer;
+  outline: 0;
+  transition: background 100ms ease, border-color 100ms ease,
+              color 100ms ease, transform 100ms ease,
+              box-shadow 100ms ease;
+}
+.cb-mb-role-reasoning {
+  color: rgba(125, 211, 252, 0.92);
+  border-color: rgba(125, 211, 252, 0.30);
+  background: rgba(125, 211, 252, 0.08);
+}
+.cb-mb-role-draft {
+  color: rgba(255, 109, 181, 0.92);
+  border-color: rgba(255, 109, 181, 0.30);
+  background: rgba(255, 109, 181, 0.08);
+}
+.cb-mb-role-summarize {
+  color: rgba(212, 255, 72, 0.92);
+  border-color: rgba(212, 255, 72, 0.30);
+  background: rgba(212, 255, 72, 0.08);
+}
+.cb-mb-role.is-link:hover {
+  transform: translateY(-0.5px);
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  border-color: color-mix(in srgb, currentColor 58%, transparent);
+  box-shadow: none;
+}
+.cb-mb-role.is-link:active {
+  transform: translateY(0);
+  background: color-mix(in srgb, currentColor 24%, transparent);
+}
+.cb-mb-role.is-link:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 55%, transparent);
+}
+
+/* === P3.84 — Composer cb-tl-strip (kind=tool surface) =======================
+ * Sibling strip to cb-mb-strip (P3.13), orange-tinted (#ff8c42) to lock the
+ * «tool = orange» color family established by Sidebar BUS KINDS .k-tool,
+ * BusAdmin .ba-chip.k-tool / .ba-kind-tag.k-tool / .ba-backlink-kind.k-tool /
+ * .ba-prov-tag.k-tool, Analytics .dash-kind-bar.k-tool. First Composer surface
+ * for kind=tool plugins (mb / cli-provider / skill / agent already surfaced;
+ * tool was the last invisible kind in this view).
+ *
+ * Row click → setMode('bus') + setPendingBusKindFilter('tool') +
+ * setPendingBusExpandId(plugin.id) → BusAdmin tool solo'd + that row
+ * expanded; reuses pendingBusKindFilter (P3.37 store slot) +
+ * pendingBusExpandId (P2.7f store slot) → 0 store changes.
+ */
+.cb-tl-strip {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 4px 8px 5px;
+  border: 1px solid rgba(255, 140, 66, 0.18);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(255, 140, 66, 0.05), rgba(255, 140, 66, 0.02));
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-muted, rgba(255, 255, 255, 0.55));
+}
+.cb-tl-strip-head {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: rgba(255, 140, 66, 0.85);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.cb-tl-strip-arrow { color: rgba(255, 140, 66, 0.55); font-size: 11px; }
+.cb-tl-strip-label { font-weight: 600; }
+.cb-tl-row {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  appearance: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 1px 8px 2px 6px;
+  border-radius: 999px;
+  background: rgba(255, 140, 66, 0.06);
+  border: 1px solid rgba(255, 140, 66, 0.20);
+  transition: background 90ms ease-out, border-color 90ms ease-out,
+              transform 90ms ease-out, box-shadow 90ms ease-out;
+}
+.cb-tl-row.is-link:hover {
+  background: rgba(255, 140, 66, 0.14);
+  border-color: rgba(255, 140, 66, 0.48);
+  box-shadow: none;
+  transform: translateY(-0.5px);
+}
+.cb-tl-row.is-link:focus-visible {
+  outline: none;
+  border-color: rgba(255, 140, 66, 0.65);
+  box-shadow: 0 0 0 2px rgba(255, 140, 66, 0.45);
+}
+.cb-tl-row.is-link:active {
+  background: rgba(255, 140, 66, 0.22);
+  transform: translateY(0);
+}
+.cb-tl-chip.cb-tl-kind {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--color-role-coding);
+  background: rgba(255, 140, 66, 0.14);
+  border: 1px solid rgba(255, 140, 66, 0.32);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 9px;
+}
+.cb-tl-name {
+  color: var(--prim-color-orange-200);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.cb-tl-tools {
+  display: inline-flex; gap: 3px;
+  margin-left: 2px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(255, 140, 66, 0.22);
+}
+.cb-tl-tool {
+  font-size: 9px;
+  color: rgba(255, 140, 66, 0.92);
+  background: rgba(255, 140, 66, 0.08);
+  border: 1px solid rgba(255, 140, 66, 0.26);
+  border-radius: 3px;
+  padding: 0 4px;
+  letter-spacing: 0.02em;
+}
+.cb-tl-evt {
+  display: inline-flex; align-items: center; gap: 3px;
+  margin-left: 2px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(255, 199, 120, 0.22);
+  color: rgba(255, 199, 120, 0.85);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+}
+.cb-tl-evt-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--color-role-narrative);
+  box-shadow: none;
+}
+.cb-tl-arrow {
+  margin-left: 1px;
+  font-size: 10px;
+  color: rgba(255, 140, 66, 0.62);
+  letter-spacing: 0;
+}
+.cb-tl-row.is-link:hover .cb-tl-arrow { color: rgba(255, 140, 66, 0.92); }
+
+/* === P3.45 — Composer slash button goes live with bus skills =================
+ * Sparkles button keeps the same icon family as cb-soon but flips classes when
+ * bus reports ≥1 kind=skill plugin: enabled color, lime tabular-nums count
+ * badge, and a real popover anchored above the button. The popover lists each
+ * skill trigger; clicking inserts the trigger at the textarea cursor (no more
+ * 即将上线 dead-end for the slash icon).
+ *
+ * Visual family:
+ *   - cb-slash-btn lime accent matches the Composer .composer-input:focus
+ *     accent (lime #d4ff48) so the player reads "primary action color" again.
+ *   - cb-slash-menu shares the dark popover shell of .cb-cli-menu so we don't
+ *     introduce a new popover skin — the player learns one popover language.
+ *   - Trigger tokens are mono lime + bold so they read like the textarea's
+ *     own typed text after insertion.
+ */
+.cb-slash { position: relative; }
+.cb-slash-btn {
+  opacity: 1;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.78);
+  position: relative;
+}
+.cb-slash-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-interaction-hover);
+}
+.cb-slash-btn.is-open {
+  color: var(--color-text-primary);
+  background: var(--color-interaction-hover);
+}
+.cb-slash-menu {
+  position: absolute;
+  bottom: 30px;
+  left: -4px;
+  z-index: 5;
+  min-width: 260px;
+  max-width: 360px;
+  background: var(--bg-1);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.50);
+  padding: 6px 4px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.cb-slash-menu-head {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 3px;
+}
+.cb-slash-menu-head-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+.cb-slash-menu-head-n {
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  color: var(--primary);
+  background: rgba(212, 255, 72, 0.14);
+  border: 1px solid rgba(212, 255, 72, 0.32);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.3;
+}
+.cb-slash-menu-head-sub {
+  font-size: 9px;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.42);
+  letter-spacing: 0.04em;
+}
+.cb-slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.35;
+  width: 100%;
+  transition: background-color 110ms ease;
+}
+.cb-slash-item:hover,
+.cb-slash-item:focus-visible {
+  background: rgba(212, 255, 72, 0.10);
+  outline: none;
+}
+.cb-slash-item:focus-visible {
+  box-shadow: 0 0 0 1px rgba(212, 255, 72, 0.55) inset;
+}
+/* P3.49 — keyboard-focused row. Stronger than :hover so the active row reads
+ * clearly even before the player touches the mouse. Lime accent locks to the
+ * skill kind colour family (.cb-slash-trigger, .ss-kind-chip.k-skill). */
+.cb-slash-item.is-active {
+  background: rgba(212, 255, 72, 0.16);
+  box-shadow: 0 0 0 1px rgba(212, 255, 72, 0.62) inset;
+}
+.cb-slash-trigger {
+  color: var(--primary);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 10.5px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.cb-slash-name {
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font-size: 11px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.cb-slash-desc {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 10px;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.cb-slash-foot {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.35);
+  padding: 5px 8px 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 3px;
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+
+/* P3.46 — @ button popover for agent mentions. Mirrors .cb-slash family but
+ * uses violet (#c4a3ff) as accent so player reads "agent kind" — same color
+ * as .ss-kind-chip.k-agent (Sidebar BUS KINDS footer), .ba-kind-tag.k-agent
+ * (Bus admin section header), and .ac-role-dot.r-orchestrator (Sidebar
+ * AgentsPanel role dots). 5th surface for violet=agent.
+ */
+.cb-at { position: relative; }
+.cb-at-btn {
+  opacity: 1;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.78);
+  position: relative;
+}
+.cb-at-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-interaction-hover);
+}
+.cb-at-btn.is-open {
+  color: var(--color-text-primary);
+  background: var(--color-interaction-hover);
+}
+.cb-at-menu {
+  position: absolute;
+  bottom: 30px;
+  left: -4px;
+  z-index: 5;
+  min-width: 280px;
+  max-width: 380px;
+  background: var(--bg-1);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.50);
+  padding: 6px 4px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.cb-at-menu-head {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 3px;
+}
+.cb-at-menu-head-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-role-orchestrator);
+}
+.cb-at-menu-head-n {
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  color: var(--color-role-orchestrator);
+  background: rgba(196, 163, 255, 0.14);
+  border: 1px solid rgba(196, 163, 255, 0.32);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.3;
+}
+.cb-at-menu-head-sub {
+  font-size: 9px;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.42);
+  letter-spacing: 0.04em;
+}
+.cb-at-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.35;
+  width: 100%;
+  transition: background-color 110ms ease;
+}
+.cb-at-item:hover,
+.cb-at-item:focus-visible {
+  background: rgba(196, 163, 255, 0.10);
+  outline: none;
+}
+.cb-at-item:focus-visible {
+  box-shadow: 0 0 0 1px rgba(196, 163, 255, 0.55) inset;
+}
+/* P3.49 — keyboard-focused row. Violet accent locks to the agent kind colour
+ * family (.cb-at-bus-pill / .ss-kind-chip.k-agent / .ba-kind-tag.k-agent). */
+.cb-at-item.is-active {
+  background: rgba(196, 163, 255, 0.16);
+  box-shadow: 0 0 0 1px rgba(196, 163, 255, 0.62) inset;
+}
+.cb-at-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  background: rgba(255, 255, 255, 0.10);
+  color: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  flex-shrink: 0;
+  line-height: 1;
+}
+.cb-at-role-orchestrator { border-color: rgba(196, 163, 255, 0.62); color: var(--color-role-orchestrator); }
+.cb-at-role-pillar       { border-color: rgba(212, 255, 72, 0.62); color: var(--primary); }
+.cb-at-role-design       { border-color: rgba(255, 109, 181, 0.62); color: var(--color-role-design); }
+.cb-at-role-narrative    { border-color: rgba(255, 200, 120, 0.62); color: var(--color-role-narrative); }
+.cb-at-role-art          { border-color: rgba(125, 211, 252, 0.62); color: var(--color-role-art); }
+.cb-at-role-coding       { border-color: rgba(255, 140, 66, 0.62); color: var(--color-role-coding); }
+.cb-at-role-coder        { border-color: rgba(255, 140, 66, 0.62); color: var(--color-role-coding); }
+.cb-at-id {
+  color: var(--color-role-orchestrator);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 10.5px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.cb-at-item.is-main .cb-at-id {
+  text-shadow: 0 0 6px rgba(196, 163, 255, 0.45);
+}
+.cb-at-name {
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  font-size: 11px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.cb-at-role {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 9.5px;
+  font-style: italic;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cb-at-bus-pill {
+  color: rgba(125, 211, 252, 0.92);
+  background: rgba(125, 211, 252, 0.10);
+  border: 1px solid rgba(125, 211, 252, 0.42);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 4px;
+  border-radius: 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.cb-at-foot {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.35);
+  padding: 5px 8px 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 3px;
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+
+/* === P3.47 — Composer model button goes live with bus model-binding =========
+ * The cb-model button has been disabled "dropdown 即将上线" since daemon took
+ * over. Mirrors .cb-slash (P3.45) / .cb-at (P3.46) popover skin but uses
+ * teal #7be7c4 family (same hue as .cb-mb-strip / .ss-kind-chip.k-model-binding
+ * / .ba-kind-tag.k-model-binding) so the player's "teal = model-binding kind"
+ * memory transfers. Click any row → setMode('bus') + setPendingBusExpandId →
+ * Bus admin opens that plugin row expanded (11th surface on pendingBusExpandId
+ * pipeline). Hides the badge + popover gracefully when modelBindings is null
+ * or empty so an offline bus collapses back to the legacy disabled cb-model
+ * appearance.
+ */
+.cb-mbsel { position: relative; display: inline-flex; }
+.cb-mbsel-btn {
+  cursor: pointer;
+  opacity: 1;
+  position: relative;
+  border-color: rgba(126, 231, 196, 0.32);
+  color: rgba(126, 231, 196, 0.92);
+  background: rgba(126, 231, 196, 0.06);
+}
+.cb-mbsel-btn:hover:not(:disabled) {
+  color: var(--accent-mint);
+  background: rgba(126, 231, 196, 0.12);
+  border-color: rgba(126, 231, 196, 0.55);
+}
+.cb-mbsel-btn.is-open {
+  color: var(--accent-mint);
+  background: rgba(126, 231, 196, 0.16);
+  border-color: rgba(126, 231, 196, 0.62);
+}
+.cb-mbsel-label { font-variant-numeric: tabular-nums; }
+.cb-mbsel-menu {
+  position: absolute;
+  bottom: 30px;
+  left: -4px;
+  z-index: 5;
+  min-width: 320px;
+  max-width: 460px;
+  background: var(--bg-1);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.50);
+  padding: 6px 4px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.cb-mbsel-menu-head {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 3px;
+}
+/* P3.90 — popover head 升级成可点击 button → bus admin kind=model-binding 过滤
+   入口。teal #7be7c4 配色家族锁到 .cb-mbsel-menu-head-tag/n 同源 + 跟 cb-mb-strip
+   (P3.13) + .ba-chip.k-model-binding (P2.6e) + .ss-kind-chip.k-model-binding
+   (P2.7i) 全栈对齐 — 玩家「teal=model-binding」一次学习处处复用。 */
+button.cb-mbsel-menu-head {
+  appearance: none;
+  font-family: inherit;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin: 0 0 3px;
+  width: calc(100% + 8px);
+  margin-left: -4px;
+  text-align: left;
+}
+.cb-mbsel-menu-head.is-link {
+  cursor: pointer;
+  border-radius: 4px 4px 0 0;
+  padding: 3px 8px 6px;
+  position: relative;
+  transition: background-color 110ms ease, box-shadow 110ms ease, transform 110ms ease;
+}
+.cb-mbsel-menu-head.is-link:hover {
+  background: rgba(126, 231, 196, 0.08);
+  box-shadow: none;
+  transform: translateY(-0.5px);
+}
+.cb-mbsel-menu-head.is-link:focus-visible {
+  outline: 2px solid rgba(126, 231, 196, 0.62);
+  outline-offset: 1px;
+}
+.cb-mbsel-menu-head.is-link:active {
+  background: rgba(126, 231, 196, 0.18);
+  transform: translateY(0);
+  box-shadow: none;
+}
+.cb-mbsel-menu-head-arrow {
+  font-size: 10px;
+  color: var(--accent-mint);
+  opacity: 0;
+  transform: translateX(-2px);
+  transition: opacity 140ms ease, transform 140ms ease;
+  margin-left: auto;
+  padding-left: 4px;
+  font-family: var(--font-mono);
+  line-height: 1;
+}
+.cb-mbsel-menu-head.is-link:hover .cb-mbsel-menu-head-arrow,
+.cb-mbsel-menu-head.is-link:focus-visible .cb-mbsel-menu-head-arrow {
+  opacity: 0.92;
+  transform: translateX(0);
+}
+.cb-mbsel-menu-head-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-mint);
+  font-family: var(--font-mono);
+}
+.cb-mbsel-menu-head-n {
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  color: var(--accent-mint);
+  background: rgba(126, 231, 196, 0.14);
+  border: 1px solid rgba(126, 231, 196, 0.32);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.3;
+}
+.cb-mbsel-menu-head-sub {
+  font-size: 9px;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.42);
+  letter-spacing: 0.04em;
+}
+.cb-mbsel-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.35;
+  width: 100%;
+  transition: background-color 110ms ease, box-shadow 110ms ease;
+  flex-wrap: wrap;
+}
+.cb-mbsel-item:hover,
+.cb-mbsel-item:focus-visible {
+  background: rgba(126, 231, 196, 0.10);
+  outline: none;
+}
+/* P3.49 — keyboard-focused row. Teal accent locks to the model-binding kind
+ * colour family (.cb-mb-strip / .ss-kind-chip.k-model-binding /
+ * .ba-kind-tag.k-model-binding). */
+.cb-mbsel-item.is-active {
+  background: rgba(126, 231, 196, 0.16);
+  box-shadow: 0 0 0 1px rgba(126, 231, 196, 0.62) inset;
+}
+.cb-mbsel-item:focus-visible {
+  box-shadow: 0 0 0 1px rgba(126, 231, 196, 0.55) inset;
+}
+.cb-mbsel-vendor {
+  color: color-mix(in srgb, var(--accent-mint) 60%, transparent);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.cb-mbsel-sep { color: rgba(126, 231, 196, 0.45); }
+.cb-mbsel-channel {
+  color: rgba(126, 231, 196, 0.92);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.cb-mbsel-models {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(126, 231, 196, 0.22);
+}
+.cb-mbsel-model {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: rgba(126, 231, 196, 0.85);
+  background: rgba(126, 231, 196, 0.07);
+  border: 1px solid rgba(126, 231, 196, 0.22);
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+}
+.cb-mbsel-roles {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(255, 255, 255, 0.10);
+}
+.cb-mbsel-role {
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 1.45;
+}
+.cb-mbsel-role.r-reasoning {
+  color: var(--color-role-orchestrator);
+  background: rgba(196, 163, 255, 0.10);
+  border: 1px solid rgba(196, 163, 255, 0.32);
+}
+.cb-mbsel-role.r-draft {
+  color: var(--primary);
+  background: rgba(212, 255, 72, 0.10);
+  border: 1px solid rgba(212, 255, 72, 0.32);
+}
+.cb-mbsel-role.r-summarize {
+  color: var(--color-role-narrative);
+  background: rgba(255, 200, 120, 0.10);
+  border: 1px solid rgba(255, 200, 120, 0.32);
+}
+.cb-mbsel-role:not(.r-reasoning):not(.r-draft):not(.r-summarize) {
+  color: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+.cb-mbsel-arrow {
+  margin-left: auto;
+  font-size: 11px;
+  color: rgba(126, 231, 196, 0.55);
+  letter-spacing: 0;
+  flex-shrink: 0;
+}
+.cb-mbsel-item:hover .cb-mbsel-arrow,
+.cb-mbsel-item:focus-visible .cb-mbsel-arrow {
+  color: rgba(126, 231, 196, 0.95);
+}
+
+/* P3.48 — deep-link arrow inside cb-at-item (agent popover bus-backed row) +
+ * cb-slash-item (skill popover, all rows are bus-backed). Mirrors cb-mbsel-arrow
+ * pattern but renders inside a row that has its own primary onClick (insert),
+ * so the arrow is a nested role="button" span with stopPropagation. Color
+ * families lock to surface accents: sky-blue (bus pill family) for cb-at,
+ * amber (skill kind family — Sidebar BUS KINDS k-skill + Bus admin
+ * ba-chip.k-skill) for cb-slash. */
+.cb-at-arrow {
+  margin-left: 2px;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 700;
+  color: rgba(125, 211, 252, 0.60);
+  background: rgba(125, 211, 252, 0.08);
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  border-radius: 4px;
+  padding: 1px 5px;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
+}
+.cb-at-arrow:hover {
+  color: rgba(125, 211, 252, 1);
+  background: rgba(125, 211, 252, 0.18);
+  border-color: rgba(125, 211, 252, 0.58);
+  box-shadow: none;
+  transform: translateX(1px);
+}
+.cb-at-arrow:focus-visible {
+  outline: 2px solid rgba(125, 211, 252, 0.85);
+  outline-offset: 1px;
+  color: rgba(125, 211, 252, 1);
+}
+.cb-at-arrow:active {
+  background: rgba(125, 211, 252, 0.26);
+  transform: translateX(0);
+}
+
+.cb-slash-arrow {
+  margin-left: auto;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 700;
+  color: rgba(255, 200, 120, 0.60);
+  background: rgba(255, 200, 120, 0.08);
+  border: 1px solid rgba(255, 200, 120, 0.30);
+  border-radius: 4px;
+  padding: 1px 5px;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
+}
+.cb-slash-arrow:hover {
+  color: rgba(255, 200, 120, 1);
+  background: rgba(255, 200, 120, 0.18);
+  border-color: rgba(255, 200, 120, 0.58);
+  box-shadow: none;
+  transform: translateX(1px);
+}
+.cb-slash-arrow:focus-visible {
+  outline: 2px solid rgba(255, 200, 120, 0.85);
+  outline-offset: 1px;
+  color: rgba(255, 200, 120, 1);
+}
+.cb-slash-arrow:active {
+  background: rgba(255, 200, 120, 0.26);
+  transform: translateX(0);
+}
+.cb-mbsel-foot {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.35);
+  padding: 5px 8px 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 3px;
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+
+/* — — — (PR #10/#11 TodoFlow + mp-sm-* variants) — — — */
+/* ─────────────────────────────────────────────────────────────────────
+   TodoFlow — common-at-the-bottom todo list with tool chips nested
+   under whichever todo was in_progress when each tool fired.
+   ───────────────────────────────────────────────────────────────────── */
+
+.todo-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(255,255,255,0.10);
+}
+
+.todo-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.todo-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+.todo-row.todo-pending .todo-icon     { color: var(--color-icon-secondary); }
+.todo-row.todo-in_progress .todo-icon { color: var(--accent-orange); }
+.todo-row.todo-completed .todo-icon   { color: var(--accent-green); }
+.todo-row.todo-cancelled .todo-icon,
+.todo-row.todo-missing .todo-icon     { color: var(--color-icon-tertiary); }
+
+.todo-content {
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.todo-content.is-active {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.todo-content.is-cancelled {
+  text-decoration: line-through;
+  color: rgba(255,255,255,0.40);
+}
+.todo-missing {
+  color: rgba(255,255,255,0.30);
+  font-style: italic;
+}
+
+/* Tool chips nested under a todo: indented + left-bordered to read as
+   "these tools ran under this todo's work" */
+.todo-nest {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 6px 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 1px dashed var(--color-border-default);
+}
+
+/* Orphan SubAgentCard fallback (subAgents without an associated chip) */
+.kc-orphan-subs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+/* sm variant — used when TodoFlow renders inside SubAgentCard */
+.todo-flow.mp-sm { font-size: 11px; margin-top: 6px; padding-top: 6px; }
+.todo-flow.mp-sm .todo-row { font-size: 11px; padding: 2px 0; gap: 6px; }
+.todo-flow.mp-sm .todo-icon { padding-top: 1px; }
+.todo-nest.mp-sm { margin: 1px 0 4px 8px; padding-left: 10px; gap: 3px; }
+
+/* ─────────────────────────────────────────────────────────────────────
+   message-parts/ sm variants — used by SubAgentCard so its inline
+   ForgeText / ToolChipRow / KcCopyBtn / interleave render at the
+   compact ~11px scale instead of the main bubble's 13px. The base
+   selectors above stay untouched (size='md' default for ForgeCard).
+   ───────────────────────────────────────────────────────────────────── */
+
+/* Text — sub bubble baseline 11px (matches .sac-text) */
+.kc-text.mp-sm { font-size: 11px; line-height: 1.5; }
+.kc-text.mp-sm .kc-fold-toggle { font-size: 10px; padding: 2px 9px; }
+.kc-text.mp-sm.kc-text-folded { max-height: 220px; }
+
+/* Copy btn — small variant, sits in sac-body top-right */
+.kc-copy-btn.mp-sm { font-size: 10px; padding: 2px 6px; gap: 3px; align-self: flex-end; }
+
+/* Interleaved container inside sub-agent card: tighter gap */
+.kc-interleaved.mp-sm { gap: 4px; }
+.kc-tools.mp-sm { gap: 3px; margin-top: 4px; }
+
+/* Tool chip — smaller pill + smaller arg preview */
+.tool-chip.mp-sm { font-size: 10px; padding: 2px 7px; gap: 5px; }
+.tool-chip.mp-sm .tc-arg { font-size: 9.5px; }
+.tool-chip-wrap.mp-sm > .tc-result.mp-sm,
+.tc-result.mp-sm {
+  font-size: 10px; line-height: 1.45; max-height: 180px; padding: 6px 8px;
+}
+.tc-result-toggle.mp-sm { font-size: 10px; padding: 2px 8px; }
+
+/* ── P3.99 CpBusPulse — ChatPanel.cp-topbar live event indicator + deep-link ──
+ * 6th lime #4bde80 "bus healthy" surface after BusHealthLamp / TopBar
+ * tb-bus-chip / TabStrip ts-bus-chip / Dashboard Overview Bus row /
+ * PreviewToolbar pt-pulse. Visually identical 3-state machine; bonus
+ * deep-link hover affordance: cursor pointer + arrow renders bright + dot
+ * scales slightly + 1px lime ring. Click → setMode('bus') drops into
+ * BusAdmin overview (no kind filter), 32nd deep-link surface · 15th
+ * setMode('bus') producer. */
+.cp-pulse {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px 0 7px;
+  background: rgba(75, 222, 128, 0.06);
+  border: 1px solid rgba(75, 222, 128, 0.22);
+  border-radius: 11px;
+  font-size: 10px; line-height: 1;
+  cursor: pointer; color: var(--text-muted);
+  font-family: var(--font-mono);
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease, color 120ms ease;
+}
+.cp-pulse.is-pending {
+  background: rgba(160, 160, 160, 0.04);
+  border-color: rgba(160, 160, 160, 0.18);
+}
+.cp-pulse.is-down {
+  background: rgba(248, 113, 113, 0.06);
+  border-color: rgba(248, 113, 113, 0.32);
+}
+.cp-pulse-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--prim-color-green-400);
+  box-shadow: none;
+  display: inline-block; flex: 0 0 6px;
+}
+.cp-pulse-dot.is-pending {
+  background: rgba(180, 180, 180, 0.35);
+  box-shadow: none;
+}
+.cp-pulse-dot.is-down {
+  background: var(--accent-error);
+  box-shadow: none;
+}
+.cp-pulse-dot.is-flashing {
+  animation: cp-pulse-flash 600ms ease-out;
+}
+@keyframes cp-pulse-flash {
+  0%   { background: var(--color-text-primary); transform: scale(1.35); box-shadow: none; }
+  35%  { background: var(--primary); transform: scale(1.15); box-shadow: none; }
+  100% { background: var(--prim-color-green-400); transform: scale(1);    box-shadow: none; }
+}
+.cp-pulse-label {
+  font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: rgba(75, 222, 128, 0.78);
+}
+.cp-pulse.is-pending .cp-pulse-label,
+.cp-pulse.is-down .cp-pulse-label {
+  color: var(--text-muted);
+}
+.cp-pulse-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px; color: rgba(255,255,255,0.92);
+}
+.cp-pulse.is-pending .cp-pulse-count { color: var(--text-muted); }
+.cp-pulse.is-down .cp-pulse-count { color: var(--accent-error); font-weight: 600; }
+.cp-pulse-arrow {
+  font-size: 9px;
+  color: rgba(75, 222, 128, 0.75);
+  opacity: 0;
+  margin-left: -2px;
+  transition: opacity 120ms ease, transform 120ms ease;
+  transform: translateX(-2px);
+}
+.cp-pulse:hover {
+  background: rgba(75, 222, 128, 0.13);
+  border-color: rgba(75, 222, 128, 0.48);
+  box-shadow: none;
+  transform: translateY(-0.5px);
+  color: rgba(255,255,255,0.95);
+}
+.cp-pulse:hover .cp-pulse-arrow {
+  opacity: 0.95;
+  transform: translateX(0);
+}
+.cp-pulse:focus-visible {
+  outline: 2px solid rgba(75, 222, 128, 0.62);
+  outline-offset: 1px;
+}
+.cp-pulse:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+.cp-pulse.is-down:hover {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.55);
+  box-shadow: none;
+}
+.cp-pulse.is-down .cp-pulse-arrow { color: rgba(248, 113, 113, 0.75); }
+
+/* P4.15 — CpProvPulse: 4-tone CLI-provider health pill living next to
+ * CpBusPulse in cp-topbar. Color family mirrors PreviewToolbar pt-prov
+ * (P4.7) + TopBar tb-providers (P4.3) + BusAdminPanel cli-provider section
+ * LED (P4.14) — sky-blue for cli-provider kind (`is-ok`), amber for partial
+ * (`is-warn`), red for none-ok / endpoint-down (`is-down`), dim grey for
+ * loading. Same shape/size as .cp-pulse so the row reads as siblings. */
+.cp-prov {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px 0 7px;
+  border-radius: 9999px;
+  background: rgba(96, 165, 250, 0.07);
+  border: 1px solid rgba(96, 165, 250, 0.32);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  font-size: 10.5px;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease, color 120ms ease;
+}
+.cp-prov.is-loading {
+  background: rgba(160, 160, 160, 0.04);
+  border-color: rgba(160, 160, 160, 0.18);
+}
+.cp-prov.is-warn {
+  background: rgba(245, 178, 67, 0.09);
+  border-color: rgba(245, 178, 67, 0.42);
+}
+.cp-prov.is-down {
+  background: rgba(248, 113, 113, 0.06);
+  border-color: rgba(248, 113, 113, 0.32);
+}
+.cp-prov-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent-blue);
+  box-shadow: none;
+  display: inline-block; flex: 0 0 6px;
+}
+.cp-prov.is-loading .cp-prov-dot {
+  background: rgba(180, 180, 180, 0.35);
+  box-shadow: none;
+  animation: cp-prov-dim-pulse 1.6s ease-in-out infinite;
+}
+.cp-prov.is-warn .cp-prov-dot {
+  background: var(--color-status-amber);
+  box-shadow: none;
+}
+.cp-prov.is-down .cp-prov-dot {
+  background: var(--accent-error);
+  box-shadow: none;
+}
+@keyframes cp-prov-dim-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1;    }
+}
+.cp-prov-icon {
+  color: var(--color-kind-cli-provider);
+  display: inline-flex;
+}
+.cp-prov.is-loading .cp-prov-icon { color: var(--text-muted); }
+.cp-prov.is-warn .cp-prov-icon { color: var(--color-status-amber); }
+.cp-prov.is-down .cp-prov-icon { color: var(--color-accent-error-default); }
+.cp-prov-label {
+  font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: rgba(96, 165, 250, 0.82);
+}
+.cp-prov.is-loading .cp-prov-label,
+.cp-prov.is-down .cp-prov-label { color: var(--text-muted); }
+.cp-prov.is-warn .cp-prov-label { color: rgba(245, 178, 67, 0.88); }
+.cp-prov-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px; color: rgba(255,255,255,0.92);
+}
+.cp-prov.is-loading .cp-prov-count { color: var(--text-muted); }
+.cp-prov.is-warn .cp-prov-count { color: var(--color-status-amber); font-weight: 600; }
+.cp-prov.is-down .cp-prov-count { color: var(--accent-error); font-weight: 600; }
+.cp-prov:hover {
+  background: rgba(96, 165, 250, 0.13);
+  border-color: rgba(96, 165, 250, 0.55);
+  box-shadow: none;
+  transform: translateY(-1px);
+  color: rgba(255,255,255,0.95);
+}
+.cp-prov.is-warn:hover {
+  background: rgba(245, 178, 67, 0.15);
+  border-color: rgba(245, 178, 67, 0.62);
+  box-shadow: none;
+}
+.cp-prov.is-down:hover {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.55);
+  box-shadow: none;
+}
+.cp-prov:focus-visible {
+  outline: 2px solid rgba(96, 165, 250, 0.62);
+  outline-offset: 1px;
+}
+.cp-prov:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+/* P4.16 — CpModelPulse: teal #7be7c4 model-binding LED pill living between
+ * CpBusPulse and CpProvPulse in cp-topbar. Mirrors TopBar tb-model (P4.5)
+ * + PreviewToolbar pt-mb (P4.6) + BusAdminPanel k-model-binding chip family.
+ * 4-tone (loading dim grey / ok teal / empty dim teal / down red) so the
+ * row reads as a sibling of .cp-pulse + .cp-prov. */
+.cp-mb {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px 0 7px;
+  border-radius: 9999px;
+  background: rgba(126, 231, 196, 0.08);
+  border: 1px solid rgba(126, 231, 196, 0.32);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  font-size: 10.5px;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease, color 120ms ease;
+}
+.cp-mb.is-loading {
+  background: rgba(160, 160, 160, 0.04);
+  border-color: rgba(160, 160, 160, 0.18);
+}
+.cp-mb.is-empty {
+  background: rgba(126, 231, 196, 0.04);
+  border-color: rgba(126, 231, 196, 0.22);
+}
+.cp-mb.is-down {
+  background: rgba(248, 113, 113, 0.06);
+  border-color: rgba(248, 113, 113, 0.32);
+}
+.cp-mb-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent-mint);
+  box-shadow: none;
+  display: inline-block; flex: 0 0 6px;
+}
+.cp-mb.is-loading .cp-mb-dot {
+  background: rgba(180, 180, 180, 0.35);
+  box-shadow: none;
+  animation: cp-mb-dim-pulse 1.6s ease-in-out infinite;
+}
+.cp-mb.is-empty .cp-mb-dot {
+  background: rgba(126, 231, 196, 0.45);
+  box-shadow: none;
+}
+.cp-mb.is-down .cp-mb-dot {
+  background: var(--accent-error);
+  box-shadow: none;
+}
+@keyframes cp-mb-dim-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1;    }
+}
+.cp-mb-icon {
+  color: var(--color-kind-model-binding);
+  display: inline-flex;
+}
+.cp-mb.is-loading .cp-mb-icon { color: var(--text-muted); }
+.cp-mb.is-empty .cp-mb-icon { color: rgba(126, 231, 196, 0.55); }
+.cp-mb.is-down .cp-mb-icon { color: var(--color-accent-error-default); }
+.cp-mb-label {
+  font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: rgba(126, 231, 196, 0.85);
+}
+.cp-mb.is-loading .cp-mb-label,
+.cp-mb.is-down .cp-mb-label { color: var(--text-muted); }
+.cp-mb.is-empty .cp-mb-label { color: rgba(126, 231, 196, 0.55); }
+.cp-mb-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px; color: rgba(255,255,255,0.92);
+  font-weight: 600;
+}
+.cp-mb.is-loading .cp-mb-count { color: var(--text-muted); }
+.cp-mb.is-empty .cp-mb-count { color: rgba(126, 231, 196, 0.6); }
+.cp-mb.is-down .cp-mb-count { color: var(--accent-error); }
+.cp-mb:hover {
+  background: rgba(126, 231, 196, 0.15);
+  border-color: rgba(126, 231, 196, 0.58);
+  box-shadow: none;
+  transform: translateY(-1px);
+  color: rgba(255,255,255,0.95);
+}
+.cp-mb.is-empty:hover {
+  background: rgba(126, 231, 196, 0.10);
+  border-color: rgba(126, 231, 196, 0.42);
+  box-shadow: none;
+  opacity: 0.92;
+}
+.cp-mb.is-down:hover {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.55);
+  box-shadow: none;
+}
+.cp-mb:focus-visible {
+  outline: 2px solid rgba(126, 231, 196, 0.62);
+  outline-offset: 1px;
+}
+.cp-mb:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+/* P4.26 — cp-topbar CpSkillPulse · gold #ffc878 family · mirrors cp-mb
+   grammar but in the skill color ramp shared with .ba-chip.k-skill /
+   ts-kind-chip.k-skill / Composer slash-menu Sparkles / TopBar tb-skill /
+   PreviewToolbar pt-skill so the gold = skill muscle memory carries
+   across every surface that exposes the skill kind dimension. */
+.cp-skill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px 0 7px;
+  border-radius: 9999px;
+  background: rgba(255, 200, 120, 0.08);
+  border: 1px solid rgba(255, 200, 120, 0.32);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  font-size: 10.5px;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease, color 120ms ease;
+}
+.cp-skill.is-loading {
+  background: rgba(160, 160, 160, 0.04);
+  border-color: rgba(160, 160, 160, 0.18);
+}
+.cp-skill.is-empty {
+  background: rgba(255, 200, 120, 0.04);
+  border-color: rgba(255, 200, 120, 0.22);
+}
+.cp-skill.is-down {
+  background: rgba(248, 113, 113, 0.06);
+  border-color: rgba(248, 113, 113, 0.32);
+}
+.cp-skill-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--color-role-narrative);
+  box-shadow: none;
+  display: inline-block; flex: 0 0 6px;
+}
+.cp-skill.is-loading .cp-skill-dot {
+  background: rgba(180, 180, 180, 0.35);
+  box-shadow: none;
+  animation: cp-skill-dim-pulse 1.6s ease-in-out infinite;
+}
+.cp-skill.is-empty .cp-skill-dot {
+  background: rgba(255, 200, 120, 0.45);
+  box-shadow: none;
+}
+.cp-skill.is-down .cp-skill-dot {
+  background: var(--accent-error);
+  box-shadow: none;
+}
+@keyframes cp-skill-dim-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1;    }
+}
+.cp-skill-icon {
+  color: var(--color-kind-skill);
+  display: inline-flex;
+}
+.cp-skill.is-loading .cp-skill-icon { color: var(--text-muted); }
+.cp-skill.is-empty .cp-skill-icon { color: rgba(255, 200, 120, 0.55); }
+.cp-skill.is-down .cp-skill-icon { color: var(--color-accent-error-default); }
+.cp-skill-label {
+  font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: rgba(255, 200, 120, 0.88);
+}
+.cp-skill.is-loading .cp-skill-label,
+.cp-skill.is-down .cp-skill-label { color: var(--text-muted); }
+.cp-skill.is-empty .cp-skill-label { color: rgba(255, 200, 120, 0.55); }
+.cp-skill-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px; color: rgba(255,255,255,0.92);
+  font-weight: 600;
+}
+.cp-skill.is-loading .cp-skill-count { color: var(--text-muted); }
+.cp-skill.is-empty .cp-skill-count { color: rgba(255, 200, 120, 0.6); }
+.cp-skill.is-down .cp-skill-count { color: var(--accent-error); }
+.cp-skill:hover {
+  background: rgba(255, 200, 120, 0.15);
+  border-color: rgba(255, 200, 120, 0.58);
+  box-shadow: none;
+  transform: translateY(-1px);
+  color: rgba(255,255,255,0.95);
+}
+.cp-skill.is-empty:hover {
+  background: rgba(255, 200, 120, 0.10);
+  border-color: rgba(255, 200, 120, 0.42);
+  box-shadow: none;
+  opacity: 0.92;
+}
+.cp-skill.is-down:hover {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.55);
+  box-shadow: none;
+}
+.cp-skill:focus-visible {
+  outline: 2px solid rgba(255, 200, 120, 0.62);
+  outline-offset: 1px;
+}
+.cp-skill:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+/* P4.27 — cp-topbar CpToolPulse · orange #ff8c42 family · mirrors cp-skill
+   grammar but in the tool color ramp shared with .ba-chip.k-tool /
+   ts-kind-chip.k-tool / TopBar tb-tool / PreviewToolbar pt-tool so the
+   orange = tool muscle memory carries across every surface that exposes
+   the tool kind dimension. */
+.cp-tool {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px 0 7px;
+  border-radius: 9999px;
+  background: rgba(255, 140, 66, 0.08);
+  border: 1px solid rgba(255, 140, 66, 0.32);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  font-size: 10.5px;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease, color 120ms ease;
+}
+.cp-tool.is-loading {
+  background: rgba(160, 160, 160, 0.04);
+  border-color: rgba(160, 160, 160, 0.18);
+}
+.cp-tool.is-empty {
+  background: rgba(255, 140, 66, 0.04);
+  border-color: rgba(255, 140, 66, 0.22);
+}
+.cp-tool.is-down {
+  background: rgba(248, 113, 113, 0.06);
+  border-color: rgba(248, 113, 113, 0.32);
+}
+.cp-tool-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--color-role-coding);
+  box-shadow: none;
+  display: inline-block; flex: 0 0 6px;
+}
+.cp-tool.is-loading .cp-tool-dot {
+  background: rgba(180, 180, 180, 0.35);
+  box-shadow: none;
+  animation: cp-tool-dim-pulse 1.6s ease-in-out infinite;
+}
+.cp-tool.is-empty .cp-tool-dot {
+  background: rgba(255, 140, 66, 0.45);
+  box-shadow: none;
+}
+.cp-tool.is-down .cp-tool-dot {
+  background: var(--accent-error);
+  box-shadow: none;
+}
+@keyframes cp-tool-dim-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1;    }
+}
+.cp-tool-icon {
+  color: var(--color-kind-tool);
+  display: inline-flex;
+}
+.cp-tool.is-loading .cp-tool-icon { color: var(--text-muted); }
+.cp-tool.is-empty .cp-tool-icon { color: rgba(255, 140, 66, 0.55); }
+.cp-tool.is-down .cp-tool-icon { color: var(--color-accent-error-default); }
+.cp-tool-label {
+  font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: rgba(255, 140, 66, 0.88);
+}
+.cp-tool.is-loading .cp-tool-label,
+.cp-tool.is-down .cp-tool-label { color: var(--text-muted); }
+.cp-tool.is-empty .cp-tool-label { color: rgba(255, 140, 66, 0.55); }
+.cp-tool-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px; color: rgba(255,255,255,0.92);
+  font-weight: 600;
+}
+.cp-tool.is-loading .cp-tool-count { color: var(--text-muted); }
+.cp-tool.is-empty .cp-tool-count { color: rgba(255, 140, 66, 0.6); }
+.cp-tool.is-down .cp-tool-count { color: var(--accent-error); }
+.cp-tool:hover {
+  background: rgba(255, 140, 66, 0.15);
+  border-color: rgba(255, 140, 66, 0.58);
+  box-shadow: none;
+  transform: translateY(-1px);
+  color: rgba(255,255,255,0.95);
+}
+.cp-tool.is-empty:hover {
+  background: rgba(255, 140, 66, 0.10);
+  border-color: rgba(255, 140, 66, 0.42);
+  box-shadow: none;
+  opacity: 0.92;
+}
+.cp-tool.is-down:hover {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.55);
+  box-shadow: none;
+}
+.cp-tool:focus-visible {
+  outline: 2px solid rgba(255, 140, 66, 0.62);
+  outline-offset: 1px;
+}
+.cp-tool:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+/* P4.28 — cp-topbar CpAgentPulse · violet #c4a3ff family · mirrors cp-tool
+   grammar but in the agent color ramp shared with .ac-role-dot agent-tribe /
+   .ba-chip.k-agent / ts-kind-chip.k-agent / TopBar tb-agent / PreviewToolbar
+   pt-agent / cp-agent-bar empty-state so the violet = agent muscle memory
+   carries across every surface that exposes the agent kind dimension. */
+.cp-agent {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px 0 7px;
+  border-radius: 9999px;
+  background: rgba(196, 163, 255, 0.08);
+  border: 1px solid rgba(196, 163, 255, 0.32);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  font-size: 10.5px;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease, color 120ms ease;
+}
+.cp-agent.is-loading {
+  background: rgba(160, 160, 160, 0.04);
+  border-color: rgba(160, 160, 160, 0.18);
+}
+.cp-agent.is-empty {
+  background: rgba(196, 163, 255, 0.04);
+  border-color: rgba(196, 163, 255, 0.22);
+}
+.cp-agent.is-down {
+  background: rgba(248, 113, 113, 0.06);
+  border-color: rgba(248, 113, 113, 0.32);
+}
+.cp-agent-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--color-role-orchestrator);
+  box-shadow: none;
+  display: inline-block; flex: 0 0 6px;
+}
+.cp-agent.is-loading .cp-agent-dot {
+  background: rgba(180, 180, 180, 0.35);
+  box-shadow: none;
+  animation: cp-agent-dim-pulse 1.6s ease-in-out infinite;
+}
+.cp-agent.is-empty .cp-agent-dot {
+  background: rgba(196, 163, 255, 0.45);
+  box-shadow: none;
+}
+.cp-agent.is-down .cp-agent-dot {
+  background: var(--accent-error);
+  box-shadow: none;
+}
+@keyframes cp-agent-dim-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 1;    }
+}
+.cp-agent-icon {
+  color: var(--color-kind-agent);
+  display: inline-flex;
+}
+.cp-agent.is-loading .cp-agent-icon { color: var(--text-muted); }
+.cp-agent.is-empty .cp-agent-icon { color: rgba(196, 163, 255, 0.55); }
+.cp-agent.is-down .cp-agent-icon { color: var(--color-accent-error-default); }
+.cp-agent-label {
+  font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: rgba(196, 163, 255, 0.88);
+}
+.cp-agent.is-loading .cp-agent-label,
+.cp-agent.is-down .cp-agent-label { color: var(--text-muted); }
+.cp-agent.is-empty .cp-agent-label { color: rgba(196, 163, 255, 0.55); }
+.cp-agent-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px; color: rgba(255,255,255,0.92);
+  font-weight: 600;
+}
+.cp-agent.is-loading .cp-agent-count { color: var(--text-muted); }
+.cp-agent.is-empty .cp-agent-count { color: rgba(196, 163, 255, 0.6); }
+.cp-agent.is-down .cp-agent-count { color: var(--accent-error); }
+.cp-agent:hover {
+  background: rgba(196, 163, 255, 0.15);
+  border-color: rgba(196, 163, 255, 0.58);
+  box-shadow: none;
+  transform: translateY(-1px);
+  color: rgba(255,255,255,0.95);
+}
+.cp-agent.is-empty:hover {
+  background: rgba(196, 163, 255, 0.10);
+  border-color: rgba(196, 163, 255, 0.42);
+  box-shadow: none;
+  opacity: 0.92;
+}
+.cp-agent.is-down:hover {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.55);
+  box-shadow: none;
+}
+.cp-agent:focus-visible {
+  outline: 2px solid rgba(196, 163, 255, 0.62);
+  outline-offset: 1px;
+}
+.cp-agent:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+
+/* ── ask_user 交互卡 ───────────────────────────────────────────────────────
+   复用 tool 段渲染:agent 调 ask_user 工具时,ForgeCard 用本卡替代普通 chip。
+   单选(radio)/ 多选(checkbox)由 data-multi 区分,作答 POST /ask-reply。 */
+.ask-user-card {
+  margin: 6px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--primary, #d4ff48);
+  border-radius: 10px;
+  background: rgba(212, 255, 72, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ask-user-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ask-user-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: var(--prim-color-neutral-950, #0a0a0a);
+  background: var(--primary, #d4ff48);
+}
+.ask-user-mode {
+  font-size: 11px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.45));
+}
+.ask-user-q {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+  line-height: 1.4;
+}
+.ask-user-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ask-user-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.14));
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary, #fff);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.ask-user-opt:hover:not(.is-locked) {
+  border-color: var(--primary, #d4ff48);
+  background: rgba(212, 255, 72, 0.08);
+}
+.ask-user-opt.is-checked {
+  border-color: var(--primary, #d4ff48);
+  background: rgba(212, 255, 72, 0.12);
+}
+.ask-user-opt.is-locked {
+  cursor: default;
+  opacity: 0.7;
+}
+.ask-user-opt-icon {
+  margin-top: 1px;
+  flex: 0 0 auto;
+  color: var(--primary, #d4ff48);
+}
+.ask-user-opt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ask-user-opt-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+.ask-user-opt-desc {
+  font-size: 11.5px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.5));
+  line-height: 1.35;
+}
+.ask-user-submit {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 6px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  border-radius: 8px;
+  color: var(--prim-color-neutral-950, #0a0a0a);
+  background: var(--primary, #d4ff48);
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.06s;
+}
+.ask-user-submit:hover:not(:disabled) { transform: translateY(-1px); }
+.ask-user-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ask-user-resolved {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--accent-green, #6ee7a8);
+}
+.ask-user-empty {
+  font-size: 12px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.45));
+}
+
+/* ask_user 「其他…」自填文本框 */
+.ask-user-opt-custom .ask-user-opt-desc { font-style: italic; }
+.ask-user-custom-input {
+  width: 100%;
+  margin: -2px 0 2px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text-primary, #fff);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--primary, #d4ff48);
+  border-radius: 8px;
+  outline: none;
+}
+.ask-user-custom-input::placeholder { color: var(--text-muted, rgba(255, 255, 255, 0.4)); }
+.ask-user-custom-input:disabled { opacity: 0.6; cursor: default; }
+
+/* ask_user 流式期「准备中」占位 —— args 还没拼完时显示,避免「无问题」闪烁 */
+.ask-user-card.ask-user-preparing {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.55));
+  font-size: 12.5px;
+  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--color-border-default, rgba(255, 255, 255, 0.14));
+}
+.ask-user-spin { color: var(--primary, #d4ff48); animation: status-pulse 1.2s linear infinite; }
+
+/* ── checkpoint 回退点(Cursor 软回退)───────────────────── */
+
+/* 被回退段整体置灰:暗示"再发消息这些会消失"。
+ * 注意:.cp-thread > .msg-block 有入场淡入动画(motion.css,animation … both),
+ * 动画的 fill 会把 CSS `opacity` 锁成 1、覆盖普通声明 —— 所以这里**不能**用
+ * opacity 属性变灰(会被覆盖,曾导致"没有视觉差异")。改用 filter 的 grayscale
+ * + opacity():filter 不在那条动画里,我们的值稳定生效,grayscale 让"灰"更明确。 */
+.msg-block.is-rewound {
+  filter: grayscale(0.9) opacity(0.4);
+  pointer-events: none;
+}
+
+/* 回退入口:Cursor 风格 —— 气泡右上角常驻一个小撤销图标,低调,hover 提亮。 */
+.user-bubble { position: relative; }
+/* 有回退入口的气泡:右侧留出图标空间,避免单行文字被压住 */
+.user-bubble.has-rewind { padding-right: 26px; }
+.rw-here-btn {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: inherit;            /* 跟随气泡文字色(亮底黑字 / 暗底白字都自适应) */
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+.rw-here-btn:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.1);
+}
+.user-bubble:hover .rw-here-btn { opacity: 0.7; }
+
+/* 挂起态分隔 banner:「已回退到此处 ─ Redo checkpoint」+ 手改通知 */
+.rw-banner {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--primary, #d4ff48);
+  border-radius: 10px;
+  background: rgba(212, 255, 72, 0.05);
+  font-size: 12.5px;
+}
+.rw-banner-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.rw-banner-row + .rw-banner-row { margin-top: 6px; }
+.rw-banner-label { color: var(--primary, #d4ff48); font-weight: 600; }
+.rw-dirty { color: var(--text-muted, rgba(255, 255, 255, 0.65)); }
+
+/* 确认浮层 */
+.rw-overlay {
+  position: absolute; inset: 0; z-index: 30;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.rw-dialog {
+  width: min(340px, 86%);
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.14));
+  background: rgba(24, 26, 31, 0.98);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.rw-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.rw-preview { font-size: 12.5px; color: var(--text-muted, rgba(255, 255, 255, 0.65)); margin-bottom: 10px; }
+.rw-diffstat .ins { color: #7ddb6e; font-style: normal; }
+.rw-diffstat .del { color: #e5707b; font-style: normal; }
+.rw-actions { display: flex; flex-direction: column; gap: 6px; }
+.rw-btn {
+  padding: 6px 10px;
+  font-size: 12.5px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.14));
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary, #fff);
+  cursor: pointer;
+  text-align: center;
+}
+.rw-btn:hover:not(:disabled) { border-color: var(--primary, #d4ff48); }
+.rw-btn:disabled { opacity: 0.5; cursor: default; }
+.rw-primary { border-color: var(--primary, #d4ff48); background: rgba(212, 255, 72, 0.12); }
+.rw-ghost { background: transparent; }
+.rw-redo {
+  border-color: var(--primary, #d4ff48);
+  color: var(--primary, #d4ff48);
+  background: transparent;
+  white-space: nowrap;
+}
+.rw-hint { margin-top: 8px; font-size: 11.5px; color: var(--text-muted, rgba(255, 255, 255, 0.45)); }
+.rw-err { color: #e5707b; }
+
+/* ── checkpoint 内联编辑框(Cursor 软回退:目标消息原地变可编辑框)── */
+.rw-edit-block { padding-bottom: 2px; position: relative; }
+.rw-inline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rw-inline-box {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--primary, #d4ff48);
+  border-radius: 12px;
+  background: rgba(212, 255, 72, 0.06);
+}
+.rw-inline-input {
+  flex: 1;
+  min-height: 20px;
+  max-height: 200px;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary, #fff);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 0;
+}
+.rw-inline-input::placeholder { color: var(--text-muted, rgba(255, 255, 255, 0.4)); }
+.rw-inline-actions { display: flex; align-items: center; flex-shrink: 0; }
+.rw-inline-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 50%;
+  background: var(--primary, #d4ff48);
+  color: #000;
+  cursor: pointer;
+  transition: opacity 0.12s ease;
+}
+.rw-inline-send:disabled { opacity: 0.35; cursor: default; }
+.rw-inline-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.rw-redo-link {
+  padding: 0 2px;
+  font-size: 11.5px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.5));
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.rw-redo-link:hover { color: var(--text-primary, #fff); }
+.rw-inline-foot .rw-err { font-size: 11px; }
+
+/* 逐文件 diff 列表:文件多时容器内滚动 */
+.rw-file-list {
+  max-height: 160px;
+  overflow-y: auto;
+  margin: 6px 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 4px 0;
+}
+.rw-file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.rw-file-row:hover { background: rgba(255, 255, 255, 0.04); }
+.rw-file-status { flex-shrink: 0; width: 13px; text-align: center; font-weight: 700; font-size: 11px; }
+.rw-fs-added { color: #7ddb6e; }
+.rw-fs-deleted { color: #e5707b; }
+.rw-fs-modified { color: #e8c468; }
+.rw-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted, rgba(255, 255, 255, 0.65));
+}
+.rw-file-list .rw-diffstat { flex-shrink: 0; font-size: 11px; }
+.rw-file-binary {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.45));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+/* 消息编辑态 */
+.user-bubble.can-edit { cursor: text; }
+.user-bubble.can-edit:hover { outline: 1px dashed rgba(212, 255, 72, 0.4); outline-offset: 2px; }
+.rw-edit-confirm-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 4px;
+}
+.rw-edit-confirm-dialog {
+  width: 100%;
+  max-width: 460px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.14));
+  background: rgba(24, 26, 31, 0.98);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+}

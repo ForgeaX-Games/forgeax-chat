@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 
 
 import { AtSign, SquareChartGantt, Upload, ChevronDown, ArrowUp, Unplug, Square, Zap, Pencil, Trash2 } from 'lucide-react';
-import { useTranslation } from '@forgeax/interface/i18n';
+import { useTranslation, getLocale } from '@forgeax/interface/i18n';
+import { workbenchAgentsUrl } from '@forgeax/interface/lib/workbench-lang';
 import { useAppStore } from '@forgeax/interface/store';
 import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
 import { useChatStore, useActiveStreaming } from '../../session-store';
@@ -13,6 +14,8 @@ import { RichInput, type RichInputHandle } from '../Composer/RichInput';
 import { buildAssetPill, requestComposerInsert, useComposerPendingInsert, clearComposerPendingInsert } from '@forgeax/interface/lib/composer-bridge';
 import {
   getAgentModel,
+  listModels,
+  setAgentModels,
   type AgentModelState,
 } from '@forgeax/interface/lib/model-config';
 import { ModelPicker } from '@forgeax/interface/components/ModelPicker';
@@ -30,9 +33,9 @@ interface CliProviderInfo {
 // 的全量 catalog（用 commands.list_models 拿）；点击切换走 commands.set_agent_models
 // 真实写回 agent.json，server 端自动 controlAgent("restart") 让已 running 的 agent
 // 重读盘。2026-06-02 起 claude-code 桥也消费 agent.json::models.model（chat 桥把它
-// 解析进 req.options.model，provider 转成 `claude --model <id>`），所以 forgeax 与
-// claude-code 渠道都允许切换（见 canSwitchModel）；其余尚未接线的第三方 cli-provider
-// （codex/cursor…）仍 disabled —— 对它们改 agent.json 不生效。
+// 解析进 req.options.model，provider 转成 `claude --model <id>`）。2026-07 ADR-0020
+// 落地 rented CLI 的 driver-scoped catalog：CLI provider 同样写 agent.json，但
+// picker 请求 `list_models <providerId>`，只展示该 CLI 自己的模型目录。
 //
 // 2026-05-17 — ComposerToolRow + .cb-tl-strip 删除。tool 插件入口由 Bus
 // admin 承载,Composer 上方常驻一条 orange chip 是冗余。
@@ -91,6 +94,7 @@ const PROVIDER_DISPLAY_FALLBACK: Record<string, string> = {
   'claude-code': 'the reference agent CLI',
   'codex': 'OpenAI Codex',
   'cursor-agent': 'Cursor',
+  'codebuddy': 'a peer agent CLI',
 };
 
 // Concise one-line description per provider/kernel id → i18n key. Every dropdown
@@ -133,7 +137,7 @@ function compactProviderLabel(label: string, providerId: string | null): string 
 }
 
 export function Composer() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [text, setText] = useState('');
   const sendMessage = useChatStore((s) => s.sendMessage);
   const cancelStream = useChatStore((s) => s.cancelStream);
@@ -266,7 +270,7 @@ export function Composer() {
         const providerId = item.id.slice(BUS_CLI_ID_PREFIX.length);
         next.set(providerId, {
           full: item,
-          descZh: pickLang(item.description, 'zh', ''),
+          descZh: pickLang(item.description, getLocale(), ''),
         });
       }
       setBusCliMap(next);
@@ -303,8 +307,8 @@ export function Composer() {
           if (!s.trigger) continue;
           rows.push({
             pluginId: item.id,
-            displayName: pickLang(item.displayName, 'zh', item.id),
-            descZh: pickLang(item.description, 'zh', ''),
+            displayName: pickLang(item.displayName, getLocale(), item.id),
+            descZh: pickLang(item.description, getLocale(), ''),
             skillId: s.id,
             trigger: s.trigger,
           });
@@ -338,7 +342,7 @@ export function Composer() {
   // AGENTS list and AgentSwitcher), then bus-only agents appended.
   const fetchAgentMentions = async () => {
     try {
-      const res = await fetch('/api/workbench/agents');
+      const res = await fetch(workbenchAgentsUrl());
       if (!res.ok) throw new Error(`GET /api/workbench/agents → ${res.status}`);
       const data = (await res.json()) as {
         agents?: Array<{ id: string; name: string; naming?: { title: string; sub: string }; role: string; avatar: string; isMain: boolean }>;
@@ -384,7 +388,7 @@ export function Composer() {
     void fetchBusCliInfo();
     void fetchBusSkills();
     void fetchAgentMentions();
-  }, []);
+  }, [i18n.language]);
   useEffect(() => {
     if (cliOpen) {
       void fetchProviders();
@@ -398,10 +402,41 @@ export function Composer() {
   // useModelLabel）。
   const isForgeaXNative = providerOverride === null || providerOverride === 'forgeax';
   // 2026-06-02 — claude-code 现在也读 agent.json::models.model（chat 桥把它解析进
-  // req.options.model，provider 转成 `claude --model`），所以模型选择器对 claude-code
-  // 渠道同样有效，不再 disabled。其余第三方 cli-provider（codex/cursor…）仍按需保守 disabled。
+  // req.options.model，provider 转成 `claude --model`）。2026-07 — rented CLI 都走
+  // driver-scoped catalog，选中模型经 TurnRequest.model 传给各自 `--model`。
   const canSwitchModel =
-    isForgeaXNative || providerOverride === 'claude-code';
+    isForgeaXNative || providerOverride === 'claude-code' || providerOverride === 'codex' || providerOverride === 'cursor-agent' || providerOverride === 'codebuddy';
+  const modelCatalogProviderId =
+    providerOverride === 'claude-code' || providerOverride === 'codex' || providerOverride === 'cursor-agent' || providerOverride === 'codebuddy'
+      ? providerOverride
+      : null;
+  const catalogProviderFor = useCallback((nextProvider: string | null): string | null => (
+    nextProvider === 'claude-code' || nextProvider === 'codex' || nextProvider === 'cursor-agent' || nextProvider === 'codebuddy'
+      ? nextProvider
+      : null
+  ), []);
+  const switchProviderWithDefaultModel = useCallback((nextProvider: string | null) => {
+    if (providerOverride === nextProvider) {
+      setCliOpen(false);
+      return;
+    }
+    setProviderOverride(nextProvider);
+    setCliOpen(false);
+
+    if (!activeAgent || !forgeaxSid) return;
+    void (async () => {
+      try {
+        const catalog = await listModels(catalogProviderFor(nextProvider));
+        const nextModel = catalog.find((m) => !m.hidden)?.id ?? catalog[0]?.id;
+        if (!nextModel) return;
+        const res = await setAgentModels(forgeaxSid, activeAgent, [nextModel]);
+        const selected = res.selected ?? nextModel;
+        setAgentModel({ sid: forgeaxSid, agentPath: activeAgent, selected, chain: [selected], raw: [selected] });
+      } catch (err) {
+        console.warn('[composer] switch provider default model failed', { provider: nextProvider, sid: forgeaxSid, agent: activeAgent, err });
+      }
+    })();
+  }, [activeAgent, catalogProviderFor, forgeaxSid, providerOverride, setProviderOverride]);
   useEffect(() => {
     if (!canSwitchModel || !activeAgent || !forgeaxSid) {
       setAgentModel(null);
@@ -445,8 +480,7 @@ export function Composer() {
         if (focused < 0) return;
         e.preventDefault();
         if (focused === 0) {
-          setProviderOverride(null);
-          setCliOpen(false);
+          switchProviderWithDefaultModel(null);
         } else {
           const p = list[focused - 1];
           // Only commit + close on a healthy pick. Enter on a DOWN row used to
@@ -454,8 +488,7 @@ export function Composer() {
           // (mouse click on disabled row is already blocked by `disabled=`).
           // Keep the menu open so the user can pick another row instead.
           if (p && p.health.ok) {
-            setProviderOverride(p.id);
-            setCliOpen(false);
+            switchProviderWithDefaultModel(p.id);
           }
         }
       }
@@ -466,7 +499,7 @@ export function Composer() {
       window.removeEventListener('click', onClick);
       window.removeEventListener('keydown', onKey);
     };
-  }, [cliOpen]);
+  }, [cliOpen, switchProviderWithDefaultModel]);
   // R3 (2026-05-20)：默认行（providerOverride === null）的语义从「auto · 用
   // agent 自己 declared 的 backend」变成「forgeax 原生 · 直发 Session/EventBus」。
   // 三方 CLI 桥（claude-code 等）继续作为下面的可选条目。等 commands.attach_script_agent
@@ -1091,15 +1124,14 @@ export function Composer() {
               </div>
             )}
           </div>
-          {/* Model picker is only meaningful for the forgeax NATIVE provider —
-              every CLI provider (claude-code / codex / cursor-agent) drives its
-              own model from its own config, so hide the picker entirely rather
-              than show a disabled/misleading control. */}
-          {isForgeaXNative && (
+          {/* Model picker follows the selected runtime. Gateway/native runtimes use
+              list_models; rented CLIs use their driver-scoped catalogs. */}
+          {canSwitchModel && (
           <ModelPicker
             className="cb-mbsel"
             mode="single"
             variant="button"
+            providerId={modelCatalogProviderId}
             displayLabel={compactModelLabel(agentModel?.selected ?? modelLabel)}
             value={agentModel?.selected ?? null}
             onChange={(next) => {
@@ -1157,7 +1189,7 @@ export function Composer() {
                   type="button"
                   role="menuitem"
                   className={`cb-cli-item ${!providerOverride ? 'is-current' : ''} ${cliFocused === 0 ? 'is-focused' : ''}`}
-                  onClick={() => { setProviderOverride(null); setCliOpen(false); }}
+                  onClick={() => switchProviderWithDefaultModel(null)}
                   onMouseEnter={() => setCliFocused(0)}
                   title={t('composer.cliDescForgeax')}
                 >
@@ -1180,10 +1212,7 @@ export function Composer() {
                     type="button"
                     role="menuitem"
                     className={`cb-cli-item ${providerOverride === p.id ? 'is-current' : ''} ${!p.health.ok ? 'is-down' : ''} ${cliFocused === idx + 1 ? 'is-focused' : ''}`}
-                    onClick={() => {
-                      setProviderOverride(p.id);
-                      setCliOpen(false);
-                    }}
+                    onClick={() => switchProviderWithDefaultModel(p.id)}
                     onMouseEnter={() => setCliFocused(idx + 1)}
                     title={p.health.detail ?? ''}
                   >

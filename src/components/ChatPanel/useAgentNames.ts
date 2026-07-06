@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { getLocale, subscribe, type Locale } from '@forgeax/interface/i18n';
+import { workbenchAgentsUrl } from '@forgeax/interface/lib/workbench-lang';
 
 /**
  * Module-cached agent id → display name resolver.
@@ -10,13 +12,14 @@ import { useEffect, useState } from 'react';
  * a SubAgentCard-heavy transcript must not fan out N identical requests.
  */
 let cache: Record<string, string> | null = null;
+let cacheLang: Locale | null = null;
 let inflight: Promise<Record<string, string>> | null = null;
 const subscribers = new Set<() => void>();
 
-function load(): Promise<Record<string, string>> {
-  if (cache) return Promise.resolve(cache);
+function load(lang: Locale): Promise<Record<string, string>> {
+  if (cache && cacheLang === lang) return Promise.resolve(cache);
   if (!inflight) {
-    inflight = fetch('/api/workbench/agents?lang=zh')
+    inflight = fetch(workbenchAgentsUrl())
       .then((r) => r.json() as Promise<{ agents?: Array<{ id?: string; name?: string }> }>)
       .then((j) => {
         const map: Record<string, string> = {};
@@ -24,12 +27,17 @@ function load(): Promise<Record<string, string>> {
           if (a.id) map[a.id] = a.name?.trim() || a.id;
         }
         cache = map;
+        cacheLang = lang;
         subscribers.forEach((fn) => fn());
         return map;
       })
       .catch(() => {
         cache = {};
+        cacheLang = lang;
         return cache;
+      })
+      .finally(() => {
+        inflight = null;
       });
   }
   return inflight;
@@ -46,16 +54,23 @@ export function shortAgentId(ref: string): string {
 }
 
 export function useAgentNames(): (id: string | null | undefined) => string {
+  const lang = getLocale();
   const [, force] = useState(0);
   useEffect(() => {
-    if (cache) return;
     const fn = () => force((n) => n + 1);
     subscribers.add(fn);
-    void load();
+    const offLocale = subscribe(() => {
+      cache = null;
+      cacheLang = null;
+      void load(getLocale());
+      fn();
+    });
+    void load(lang);
     return () => {
       subscribers.delete(fn);
+      offLocale();
     };
-  }, []);
+  }, [lang]);
   return (id) => {
     if (!id) return '';
     const short = shortAgentId(id);

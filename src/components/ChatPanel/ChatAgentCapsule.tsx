@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from '@forgeax/interface/i18n';
+import { workbenchAgentsUrl } from '@forgeax/interface/lib/workbench-lang';
 import { useAppStore } from '@forgeax/interface/store';
 import { useBusSnapshot } from '@forgeax/interface/lib/use-bus-snapshot';
 import { publish } from '@forgeax/interface/lib/bus';
@@ -128,7 +129,7 @@ function initialFor(id: string): string {
  * table and full constraints.
  */
 export function ChatAgentCapsule() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const activeSid = useAppStore((s) => s.activeSid);
   const tabs = useAppStore((s) => s.tabs);
   const setTabAgent = useAppStore((s) => s.setTabAgent);
@@ -281,7 +282,7 @@ export function ChatAgentCapsule() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/workbench/agents?lang=zh')
+    fetch(workbenchAgentsUrl())
       .then((r) => r.json())
       .then((j: { agents?: WorkbenchAgent[] }) => {
         if (cancelled) return;
@@ -297,7 +298,7 @@ export function ChatAgentCapsule() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [i18n.language]);
 
   // When the active agent changes, jump to the page that contains it.
   useEffect(() => {

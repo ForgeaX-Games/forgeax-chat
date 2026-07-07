@@ -1146,6 +1146,7 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
   align-items: center;
   gap: 3px;
 }
+
 .kc-text-folded {
   max-height: 360px;
   overflow: hidden;

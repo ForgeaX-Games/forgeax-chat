@@ -37,6 +37,7 @@ import {
 } from '@forgeax/interface/store';
 import { parseSse } from '@forgeax/interface/lib/sse';
 import { expandPills } from '@forgeax/interface/lib/composer-bridge';
+import { resolveReplyLanguage } from '@forgeax/interface/lib/reply-language';
 import { TurnAccumulator } from '@forgeax/interface/lib/event-engine/turn-accumulator';
 import {
   parseEventLines,
@@ -723,6 +724,11 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   sendMessage: async (text, opts) => {
     if (!text.trim()) return;
     const trimmed = text.trim();
+    // Resolve the agent reply language for THIS turn (follow-input detection or
+    // the global quick-switch value). Sent as a field — the server injects a
+    // directive into composeTurnRequest's dynamicSuffix, keeping the visible
+    // user message clean (no directive leaks into the bubble or replay history).
+    const replyLanguage = resolveReplyLanguage(trimmed);
     const { sid: startSid } = activeTarget();
     if (!startSid) { console.warn('[chat.sendMessage] no active session'); return; }
     const app = useAppStore.getState();
@@ -850,7 +856,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         const { traceparent } = beginChatTurn(activeAgent, startSid, useAppStore.getState().providerOverride ?? undefined);
         const r = await emitForgeaXMessage(startSid, expandPills(trimmed), {
           to: candidate,
-          payload: { agentId, clientMsgId, traceparent, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
+          payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
           handoff: 'steer',
         });
         if (!r.ok) throw new Error(r.error ?? 'emit failed');
@@ -891,7 +897,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         const { traceparent } = beginChatTurn(activeAgent, startSid, useAppStore.getState().providerOverride ?? undefined);
         const r = await emitForgeaXMessage(startSid, expandPills(trimmed), {
           to: candidate,
-          payload: { agentId, clientMsgId, traceparent, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
+          payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
         });
         if (!r.ok) throw new Error(r.error ?? 'emit failed');
         if (r.msgId) {
@@ -912,7 +918,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     try {
       res = await fetch('/api/cli/chat', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: expandPills(trimmed), agentId, threadId: startSid, sessionId: startSid, ...(turnOverride ? { providerOverride: turnOverride } : {}) }),
+        body: JSON.stringify({ message: expandPills(trimmed), agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(turnOverride ? { providerOverride: turnOverride } : {}) }),
         signal,
       });
     } catch (e) {

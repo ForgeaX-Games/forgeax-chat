@@ -21,6 +21,9 @@ interface Props {
   onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   onCompositionStart?: () => void;
   onCompositionEnd?: () => void;
+  /** Pasted image files (e.g. a screenshot on the clipboard). When present in
+   *  the clipboard we hand the files up rather than inserting text. */
+  onPasteFiles?: (files: File[]) => void;
   placeholder?: string;
   className?: string;
   disabled?: boolean;
@@ -114,7 +117,7 @@ function placeCaretAtEnd(root: HTMLElement): void {
 // === Component ===
 
 export const RichInput = forwardRef<RichInputHandle, Props>(function RichInput(
-  { value, onChange, onKeyDown, onCompositionStart, onCompositionEnd, placeholder, className, disabled },
+  { value, onChange, onKeyDown, onCompositionStart, onCompositionEnd, onPasteFiles, placeholder, className, disabled },
   ref,
 ) {
   const divRef = useRef<HTMLDivElement | null>(null);
@@ -227,6 +230,21 @@ export const RichInput = forwardRef<RichInputHandle, Props>(function RichInput(
   };
 
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    // Image paste (e.g. a screenshot on the clipboard) — the clipboard exposes
+    // it as file item(s), not as text/plain. Hand the files up so the composer
+    // can attach them; the default contenteditable behavior would drop them.
+    const imageFiles: File[] = [];
+    for (const it of Array.from(e.clipboardData.items)) {
+      if (it.kind === 'file' && it.type.startsWith('image/')) {
+        const f = it.getAsFile();
+        if (f) imageFiles.push(f);
+      }
+    }
+    if (imageFiles.length > 0 && onPasteFiles) {
+      e.preventDefault();
+      onPasteFiles(imageFiles);
+      return;
+    }
     // Strip rich formatting on paste — contenteditable's default is to keep
     // HTML which can pollute the editor with arbitrary styles. We want plain
     // text only; pills are inserted via the imperative API, never via paste.

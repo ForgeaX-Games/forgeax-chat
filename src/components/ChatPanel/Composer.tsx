@@ -961,6 +961,7 @@ export function Composer() {
         value={text}
         onChange={setText}
         onKeyDown={onKeyDown}
+        onPasteFiles={addFiles}
       />
       {images.length > 0 && (
         <div className="cb-img-strip" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '6px 8px' }}>
@@ -995,7 +996,7 @@ export function Composer() {
       />
       <div className="composer-bar">
         <div className="cb-left-group">
-          <button className="cb-btn" title={t('composer.imageUploadSoon')} type="button" onClick={() => imgInputRef.current?.click()}>
+          <button className="cb-btn" title={t('composer.imageUpload')} type="button" onClick={() => imgInputRef.current?.click()}>
             <Upload size={16} />
           </button>
           <div className="cb-at">
@@ -1306,7 +1307,7 @@ export function Composer() {
                   : t('composer.send')
               }
               type="button"
-              disabled={!text.trim() || !activeAgent || !activeSid}
+              disabled={(!text.trim() && images.length === 0) || !activeAgent || !activeSid}
               onClick={() => void onSubmit()}
             >
               <ArrowUp size={16} />

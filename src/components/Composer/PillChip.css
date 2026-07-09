@@ -63,6 +63,7 @@
 .kbl-pill-game   { border-left-color: var(--prim-color-green-400); }
 .kbl-pill-log    { border-left-color: var(--accent-error); }
 .kbl-pill-entity { border-left-color: var(--color-role-art, #c08cff); }
+.kbl-pill-paste  { border-left-color: var(--color-text-muted, #8a94a6); }
 
 .kbl-pill-tip {
   position: fixed;

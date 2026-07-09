@@ -6,7 +6,7 @@ import {
   accentForRoleTribe,
   resolveAvatarGlyphId,
 } from '@forgeax/interface/components/AgentAvatar/AgentAvatar';
-import { useAppStore } from '@forgeax/interface/store';
+import { useShellStore } from '@forgeax/interface/store';
 import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
 import { useChatStore, useActiveStreaming } from '../../session-store';
 
@@ -81,16 +81,16 @@ function initialFor(id: string): string {
 export function AgentSwitcher() {
   const { t } = useTranslation();
   const isStreaming = useActiveStreaming();
-  const setActiveEmitter = useAppStore((s) => s.setActiveEmitter);
-  const setTabAgent = useAppStore((s) => s.setTabAgent);
-  const activeSid = useAppStore((s) => s.activeSid);
+  const setActiveEmitter = useShellStore((s) => s.setActiveEmitter);
+  const setTabAgent = useShellStore((s) => s.setTabAgent);
+  const activeSid = useShellStore((s) => s.activeSid);
   // P3.86 — Bus deep-link slot: setPendingBusKindFilter('agent') + openSettings('plugins')
   // lands the player on Bus admin with the `agent` kind soloed, mirroring the
   // P3.80 cp-agent-bar-id / P3.72 ThreadsList Active emitter cell pattern.
   // No expand slot here: AgentSwitcher does not target a specific agent plugin
   // row — the entry point is the whole agent kind, so users see all 7 placeholder
   // + 1 bus agent rows at once instead of auto-expanding cc-coder.
-  const openOverlay = useAppStore((s) => s.openOverlay);
+  const openOverlay = useShellStore((s) => s.openOverlay);
   // P3.91 — per-placeholder deep-link slot. cli-idle placeholders (P3.18) used
   // to fire only a toast ("cli 未启动"). Now `ctrl/cmd+click` on a placeholder
   // routes to Bus admin: kind=agent solo, and if the placeholder maps to a bus
@@ -98,7 +98,7 @@ export function AgentSwitcher() {
   // for a single-row landing. Plain click keeps the toast — discoverable via
   // the new `· ctrl/⌘+click → Bus` hint suffix in `title`.
   // Active tab's bound agent — first-class key for highlight + chat routing.
-  const activeAgentId = useAppStore(
+  const activeAgentId = useShellStore(
     (s) => s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null,
   );
   const trackRef = useRef<HTMLDivElement>(null);
@@ -156,7 +156,7 @@ export function AgentSwitcher() {
         return;
       }
       try {
-        const { listSessionAgents } = await import('@forgeax/interface/lib/forgeax-bridge');
+        const { listSessionAgents } = await import('../../session-bridge');
         const items = await listSessionAgents(activeSid);
         if (cancelled) return;
         if (items.length === 0) {
@@ -188,7 +188,7 @@ export function AgentSwitcher() {
         });
         setAgents(list);
         setLastFetchAt(Date.now());
-        useAppStore.getState().setLiveAgents(activeSid, items.map((a) => ({
+        useShellStore.getState().setLiveAgents(activeSid, items.map((a) => ({
           path: a.path,
           display: a.display,
           parent: a.parent,
@@ -208,7 +208,7 @@ export function AgentSwitcher() {
         // styling already shows when an agentId isn't in the live list
         // (no avatar lights up as `is-active-emitter`).
         if (list.length > 0) {
-          const s = useAppStore.getState();
+          const s = useShellStore.getState();
           const tab = s.tabs.find((t) => t.sid === s.activeSid);
           const cur = tab?.agentId ?? null;
           if (s.activeSid && !cur) {
@@ -265,8 +265,8 @@ export function AgentSwitcher() {
     const justEnded = wasStreamingRef.current && !isStreaming;
     wasStreamingRef.current = isStreaming;
     const bursts: ReturnType<typeof setTimeout>[] = [];
-    const { activeSid: curSid } = useAppStore.getState();
-    const curAgent = curSid ? (useAppStore.getState().tabs.find((tb) => tb.sid === curSid)?.agentId ?? null) : null;
+    const { activeSid: curSid } = useShellStore.getState();
+    const curAgent = curSid ? (useShellStore.getState().tabs.find((tb) => tb.sid === curSid)?.agentId ?? null) : null;
     const last = curSid && curAgent ? useChatStore.getState().readMessages(curSid, curAgent).at(-1) : undefined;
     const erroredOut = last?.role === 'assistant' && last.status === 'error';
     if (justEnded && !document.hidden && !erroredOut) {

@@ -1,5 +1,7 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ExternalLink, ArrowDown, Undo2, ChevronDown } from 'lucide-react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ExternalLink, ArrowDown, Undo2, ChevronDown, X } from 'lucide-react';
+import { loadOnboarding, saveOnboarding } from '@forgeax/interface/components/Onboarding/types';
+import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
 import { ForgeCard } from './ForgeCard';
 import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
@@ -299,6 +301,34 @@ function SystemLine({ m }: { m: ChatMessage }) {
 export function ChatPanel() {
   const { t } = useTranslation();
   const messages = useActiveMessages();
+  // First-chat hint: after the onboarding tour ends, a brand-new user hasn't
+  // sent anything yet. Instead of a global floating nudge, this belongs to the
+  // chat's own empty state — a note above the composer + a highlighted input,
+  // dismissed on close or as soon as any message exists.
+  const [firstHintOpen, setFirstHintOpen] = useState(() => {
+    const s = loadOnboarding();
+    return s.done.tour && !s.done.firstChat;
+  });
+  const dismissFirstHint = useCallback(() => {
+    setFirstHintOpen(false);
+    const s = loadOnboarding();
+    if (!s.done.firstChat) saveOnboarding({ ...s, done: { ...s.done, firstChat: true } });
+  }, []);
+  const showFirstHint = firstHintOpen && messages.length === 0;
+  useEffect(() => {
+    if (firstHintOpen && messages.length > 0) dismissFirstHint();
+  }, [firstHintOpen, messages.length, dismissFirstHint]);
+  // ChatPanel mounts before the tour finishes, so its initial read of the
+  // onboarding state is stale. Re-read when the tour signals completion so the
+  // hint can appear this session without a reload.
+  useEffect(() => {
+    const onChanged = () => {
+      const s = loadOnboarding();
+      setFirstHintOpen(s.done.tour && !s.done.firstChat);
+    };
+    window.addEventListener(APP_EVENTS.onboardingChanged, onChanged);
+    return () => window.removeEventListener(APP_EVENTS.onboardingChanged, onChanged);
+  }, []);
   const threadRef = useRef<HTMLDivElement>(null);
   // Auto-scroll / "jump to latest" 状态机。
   //   - pinnedRef：是否「贴底跟随」。pinned 时新输出自动滚到底;非 pinned 时不
@@ -722,7 +752,24 @@ export function ChatPanel() {
       )}
 
       <PermissionPrompt />
-      <Composer />
+      {showFirstHint && (
+        <div className="cp-first-hint" role="note">
+          <div className="cp-first-hint-copy">
+            <span className="cp-first-hint-title">{t('onboarding.nudge.title')}</span>
+            <span className="cp-first-hint-text">{t('onboarding.nudge.body')}</span>
+          </div>
+          <button
+            type="button"
+            className="cp-first-hint-close"
+            aria-label={t('onboarding.nudge.gotIt')}
+            title={t('onboarding.nudge.gotIt')}
+            onClick={dismissFirstHint}
+          >
+            <X size={18} />
+          </button>
+        </div>
+      )}
+      <Composer highlight={showFirstHint} />
     </aside>
   );
 }

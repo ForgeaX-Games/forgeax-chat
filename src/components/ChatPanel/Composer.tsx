@@ -6,6 +6,8 @@ import { useTranslation, getLocale } from '@forgeax/interface/i18n';
 import { workbenchAgentsUrl } from '@forgeax/interface/lib/workbench-lang';
 import { useAppStore } from '@forgeax/interface/store';
 import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
+import { checkModelReady, resetActiveAgentModelToProviderDefault } from '@forgeax/interface/lib/model-route';
+import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
 import { useChatStore, useActiveStreaming } from '../../session-store';
 import { useModelLabel } from '@forgeax/interface/lib/model';
 import { resolveNaming } from '@forgeax/interface/lib/agent-name';
@@ -14,10 +16,9 @@ import { RichInput, type RichInputHandle } from '../Composer/RichInput';
 import { buildAssetPill, requestComposerInsert, useComposerPendingInsert, clearComposerPendingInsert } from '@forgeax/interface/lib/composer-bridge';
 import {
   getAgentModel,
-  listModels,
-  setAgentModels,
   type AgentModelState,
 } from '@forgeax/interface/lib/model-config';
+import { recordLastModel } from '@forgeax/interface/lib/model-prefs';
 import { ModelPicker } from '@forgeax/interface/components/ModelPicker';
 import ContextRing from './ContextRing';
 import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
@@ -110,6 +111,36 @@ const PROVIDER_DESC_I18N: Record<string, string> = {
   'codebuddy': 'composer.cliDescCodebuddy',
 };
 
+// Provider (model-source) switching is owned by Settings › Providers now — it's
+// the single surface that runs applyModelRoute (providerOverride + FORGEAX_MODEL
+// consistently). The in-composer CLI switcher (`.cb-cli`) is hidden to avoid a
+// second, parallel switch point. The switcher's state/effects (cliOpen, provider
+// fetch, keyboard nav) are kept intact — fetchProviders still runs on mount to
+// clear a stale persisted providerOverride — so this is a pure render gate; flip
+// to re-expose the in-chat switcher if that decision is ever reversed.
+const SHOW_CHAT_PROVIDER_SWITCHER = false;
+
+// Module cache of the last-known agent.json model per (sid + agentPath +
+// catalogProvider). A session switch can then paint the correct model instantly
+// from cache instead of flashing the global FORGEAX_MODEL label for one frame
+// while get_agent_model round-trips (the "先闪 opus 4.8 再显示真实值" bug).
+// Missing entry → we show a neutral '…' placeholder (never the wrong global
+// default) until the fetch resolves.
+//
+// The catalogProvider is part of the key ON PURPOSE: a provider switch (done in
+// Settings › Providers) resets each session's agent.json to the NEW provider's
+// default, so the same (sid, agent) now maps to a different model. Keying by
+// provider makes a switch a deliberate cache MISS → '…' → fetch the freshly
+// reset value, instead of a hit on the previous provider's stale model (the
+// "切了 provider 但模型还停在 gpt" regression).
+const agentModelCache = new Map<string, AgentModelState | null>();
+const CLI_CATALOG_IDS = new Set(['claude-code', 'codex', 'cursor-agent', 'codebuddy']);
+/** Catalog-provider id in effect for a providerOverride (null = native forgeax). */
+const catalogOf = (providerOverride: string | null): string | null =>
+  providerOverride && CLI_CATALOG_IDS.has(providerOverride) ? providerOverride : null;
+const agentModelKey = (sid: string, agentPath: string, providerId: string | null): string =>
+  `${sid}\u0000${agentPath}\u0000${providerId ?? 'forgeax'}`;
+
 // iter-107: enumerate the placeholder-button hint ids. Centralizes the
 // strings so typos become compile errors instead of silently breaking the
 // `hintFor === 'at'` checks, and makes "where can a future button slot in"
@@ -136,7 +167,7 @@ function compactProviderLabel(label: string, providerId: string | null): string 
   return label.replace(/\b(code|cli|agent)\b/gi, '').trim() || providerId;
 }
 
-export function Composer() {
+export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   const { t, i18n } = useTranslation();
   const [text, setText] = useState('');
   const sendMessage = useChatStore((s) => s.sendMessage);
@@ -201,6 +232,10 @@ export function Composer() {
   // ModelPicker 内部自己拉 list_models catalog（useModelCatalog hook,会跨
   // Composer / TopBar / ModelLab 共享 cache）—— 这里只持 agent 当前选择。
   const [agentModel, setAgentModel] = useState<AgentModelState | null>(null);
+  // true while get_agent_model is in flight for the CURRENT (sid, agent) with no
+  // cached value to paint yet → the picker shows '…' instead of the global
+  // FORGEAX_MODEL fallback, killing the opus flash on session switch.
+  const [agentModelLoading, setAgentModelLoading] = useState(false);
   // 2026-05-20 重做后 sid 真值住 store.activeSid —— 不再单独本地 state。
   // 旧 ensureForgeaXSid 单例已删，所有需要 sid 的调用直接用 activeSid。
   const forgeaxSid = activeSid;
@@ -280,18 +315,28 @@ export function Composer() {
   // forgeax 渠道（providerOverride === null/'forgeax'）+ 有 activeAgent + 有 sid
   // 时才发请求；第三方 cli 桥不读 agent.json，强行 get 会拿错语义。失败兜底
   // null，UI 用 useModelLabel() 字符串占位。
-  const fetchAgentModel = async (sid: string, agentPath: string) => {
-    try {
-      const m = await getAgentModel(sid, agentPath);
-      // race 兜底：fetch 期间 activeAgent / sid 已经切走，不更新 stale 数据。
+  const fetchAgentModel = async (sid: string, agentPath: string, providerId: string | null) => {
+    // Only commit the fetched value if the current (sid, agent, provider) is
+    // still what we fetched for — a session switch OR a provider switch mid-flight
+    // must not paint stale data.
+    const stillCurrent = (): boolean => {
       const cur = useAppStore.getState();
       const tab = cur.tabs.find((t) => t.sid === cur.activeSid);
-      if (tab?.agentId === agentPath && cur.activeSid === sid) {
+      return tab?.agentId === agentPath && cur.activeSid === sid && catalogOf(cur.providerOverride) === providerId;
+    };
+    try {
+      const m = await getAgentModel(sid, agentPath);
+      agentModelCache.set(agentModelKey(sid, agentPath, providerId), m);
+      if (stillCurrent()) {
         setAgentModel(m);
+        setAgentModelLoading(false);
       }
     } catch (err) {
       console.warn('[composer] get_agent_model failed', { sid, agentPath, err });
-      setAgentModel(null);
+      if (stillCurrent()) {
+        setAgentModel(null);
+        setAgentModelLoading(false);
+      }
     }
   };
   // P3.45 — fetch all kind=skill plugins, flatten each plugin's skills[] into
@@ -423,27 +468,45 @@ export function Composer() {
     setProviderOverride(nextProvider);
     setCliOpen(false);
 
-    if (!activeAgent || !forgeaxSid) return;
+    // Land the active agent on the new provider's default model. Shared with
+    // Settings › Providers via resetActiveAgentModelToProviderDefault so both
+    // switch surfaces behave identically (SSOT).
     void (async () => {
       try {
-        const catalog = await listModels(catalogProviderFor(nextProvider));
-        const nextModel = catalog.find((m) => !m.hidden)?.id ?? catalog[0]?.id;
-        if (!nextModel) return;
-        const res = await setAgentModels(forgeaxSid, activeAgent, [nextModel]);
-        const selected = res.selected ?? nextModel;
-        setAgentModel({ sid: forgeaxSid, agentPath: activeAgent, selected, chain: [selected], raw: [selected] });
+        const done = await resetActiveAgentModelToProviderDefault(catalogProviderFor(nextProvider));
+        if (done) {
+          const reset: AgentModelState = { sid: done.sid, agentPath: done.agentPath, selected: done.selected, chain: [done.selected], raw: [done.selected] };
+          setAgentModel(reset);
+          setAgentModelLoading(false);
+          agentModelCache.set(agentModelKey(done.sid, done.agentPath, catalogProviderFor(nextProvider)), reset);
+        }
       } catch (err) {
-        console.warn('[composer] switch provider default model failed', { provider: nextProvider, sid: forgeaxSid, agent: activeAgent, err });
+        console.warn('[composer] switch provider default model failed', { provider: nextProvider, err });
       }
     })();
-  }, [activeAgent, catalogProviderFor, forgeaxSid, providerOverride, setProviderOverride]);
+  }, [catalogProviderFor, providerOverride, setProviderOverride]);
   useEffect(() => {
     if (!canSwitchModel || !activeAgent || !forgeaxSid) {
       setAgentModel(null);
+      setAgentModelLoading(false);
       return;
     }
-    void fetchAgentModel(forgeaxSid, activeAgent);
-  }, [canSwitchModel, activeAgent, forgeaxSid]);
+    // Paint from cache instantly if we've seen this (sid, agent, provider)
+    // before; else clear to a loading placeholder (NOT the stale prev value or
+    // the global default) while we round-trip get_agent_model. Re-runs on a
+    // providerOverride change (via modelCatalogProviderId) so a Settings-driven
+    // provider switch refreshes the displayed model — that was the missing
+    // reactivity behind "切了 provider 但模型没变".
+    const cached = agentModelCache.get(agentModelKey(forgeaxSid, activeAgent, modelCatalogProviderId));
+    if (cached !== undefined) {
+      setAgentModel(cached);
+      setAgentModelLoading(false);
+    } else {
+      setAgentModel(null);
+      setAgentModelLoading(true);
+    }
+    void fetchAgentModel(forgeaxSid, activeAgent, modelCatalogProviderId);
+  }, [canSwitchModel, activeAgent, forgeaxSid, modelCatalogProviderId]);
 
   // Auto-close the dropdown if a stream starts while it's open. The override
   // wouldn't apply to the in-flight turn anyway, so showing a clickable list
@@ -788,6 +851,13 @@ export function Composer() {
     const t = text.trim();
     // 允许"只发图无文字"——但内核 user 文本不能为空,给个占位提示。
     if (!t && images.length === 0) return;
+    // First-chat interceptor (design §11): if there's no usable model path,
+    // don't send into a void — keep the typed text and open the connect prompt.
+    // ConnectModelPrompt re-fires APP_EVENTS.resumeSend once connected.
+    if (!(await checkModelReady())) {
+      window.dispatchEvent(new CustomEvent(APP_EVENTS.openConnectPrompt, { detail: { text: t } }));
+      return;
+    }
     if (isStreaming) {
       // Agent is mid-turn — queue client-side. It flushes as its own turn when
       // the current turn ends (sequential, one turn per queued message).
@@ -802,6 +872,17 @@ export function Composer() {
     setText('');
     await sendMessage(t || '(see attached image)', attachments ? { attachments } : undefined);
   };
+
+  // Resume the send the connect prompt intercepted: keep the ref pointing at the
+  // latest onSubmit so the (once-installed) listener always re-runs current logic
+  // — including a fresh checkModelReady, which now passes.
+  const onSubmitRef = useRef(onSubmit);
+  onSubmitRef.current = onSubmit;
+  useEffect(() => {
+    const onResume = () => { void onSubmitRef.current(); };
+    window.addEventListener(APP_EVENTS.resumeSend, onResume);
+    return () => window.removeEventListener(APP_EVENTS.resumeSend, onResume);
+  }, []);
 
   // Interrupt the running turn and send `text` immediately (handoff: steer).
   const onInterrupt = () => {
@@ -895,7 +976,8 @@ export function Composer() {
 
   return (
     <div
-      className={`composer${assetDragOver ? ' composer--asset-drop' : ''}`}
+      className={`composer${assetDragOver ? ' composer--asset-drop' : ''}${highlight ? ' composer--hint' : ''}`}
+      data-tour-id="composer"
       onDragOver={handleComposerDragOver}
       onDragLeave={handleComposerDragLeave}
       onDrop={handleComposerDrop}
@@ -1133,19 +1215,27 @@ export function Composer() {
             mode="single"
             variant="button"
             providerId={modelCatalogProviderId}
-            displayLabel={compactModelLabel(agentModel?.selected ?? modelLabel)}
+            displayLabel={agentModelLoading ? '…' : compactModelLabel(agentModel?.selected ?? modelLabel)}
             value={agentModel?.selected ?? null}
             onChange={(next) => {
               if (typeof next !== 'string') return;
+              // This is a HAND-PICK → remember it as this provider's "last model"
+              // so the next new session seeds onto it (not the fixed default).
+              recordLastModel(modelCatalogProviderId, next);
               // ModelPicker 已经替我们写过 agent.json（writeToAgent 传了 sid+agentPath）。
               // 这里只把 selected 同步到本地 agentModel state,避免按钮 label 闪回旧值。
-              setAgentModel((prev) =>
-                prev
-                  ? { ...prev, selected: next, chain: [next], raw: [next] }
-                  : forgeaxSid && activeAgent
-                    ? { sid: forgeaxSid, agentPath: activeAgent, selected: next, chain: [next], raw: [next] }
-                    : prev,
-              );
+              const nextState: AgentModelState | null =
+                forgeaxSid && activeAgent
+                  ? { sid: forgeaxSid, agentPath: activeAgent, selected: next, chain: [next], raw: [next] }
+                  : agentModel
+                    ? { ...agentModel, selected: next, chain: [next], raw: [next] }
+                    : null;
+              if (nextState) {
+                setAgentModel(nextState);
+                if (forgeaxSid && activeAgent) {
+                  agentModelCache.set(agentModelKey(forgeaxSid, activeAgent, modelCatalogProviderId), nextState);
+                }
+              }
             }}
             writeToAgent={
               canSwitchModel && activeAgent && forgeaxSid
@@ -1173,6 +1263,7 @@ export function Composer() {
         </div>
         <div className="cb-right-group">
           <ContextRing />
+          {SHOW_CHAT_PROVIDER_SWITCHER && (
           <div className="cb-cli">
             <button
               type="button"
@@ -1265,6 +1356,7 @@ export function Composer() {
               </div>
             )}
           </div>
+          )}
           {isStreaming ? (
             <>
               {text.trim() && canInterrupt && (

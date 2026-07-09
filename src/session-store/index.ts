@@ -53,17 +53,3 @@ export {
 } from './store';
 
 export { subscribeSessionStream } from './session-stream';
-
-export {
-  fetchSessionList,
-  createSession,
-  deleteSession,
-  emitForgeaXMessage,
-  listSessionAgents,
-  connectForgeaXWs,
-  disconnectForgeaXWs,
-  onSessionEvent,
-  type SessionMeta,
-  type SessionEvent,
-  type ForgeaXAgentNode,
-} from '../session-bridge';

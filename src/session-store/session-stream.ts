@@ -6,20 +6,20 @@
  *  rewind state) is chat-private and lives in `useChatStore`. Registry-runtime
  *  facts the event also carries — live agent tree (`setLiveAgents`) and the
  *  file-activity ledger (`pushFileTouch` / `updateFileTouchStatus`) — stay in
- *  L1's `useShellStore`; this module writes both stores from one dispatch.
+ *  L1's `useAppStore`; this module writes both stores from one dispatch.
  *
  *  Moved out of `@forgeax/interface/src/lib` in R4: once messages left the L1
  *  store, the event→message translator had to follow (L1 may not import chat).
  */
 import {
-  useShellStore,
+  useAppStore,
   type ChatMessage,
   type SystemDirection,
   type SystemLevel,
   type ToolCall,
 } from '@forgeax/interface/store';
-import { onSessionEvent, type SessionEvent } from '../session-bridge';
-import { ratioFromUsage } from '../event-engine/turn-accumulator';
+import { onSessionEvent, type SessionEvent } from '@forgeax/interface/lib/forgeax-bridge';
+import { ratioFromUsage } from '@forgeax/interface/lib/event-engine/turn-accumulator';
 import { chatFirstToken, chatTurnEnd } from '@forgeax/interface/lib/trace';
 import { t } from '@/i18n';
 import { appendChatSegment, isOwnUserInput, upsertToolSegment, useChatStore } from './store';
@@ -85,7 +85,7 @@ function extractFileTouch(
     if (typeof filePath === 'string' && filePath) {
       const name = filePath.split('/').pop() ?? filePath;
       const op = toolName === 'read_file' ? 'read' : toolName === 'edit_file' ? 'edit' : toolName === 'apply_patch' ? 'patch' : 'write';
-      useShellStore.getState().pushFileTouch(sid, agentPath, { callId, path: filePath, name, op, ts, status: 'running' });
+      useAppStore.getState().pushFileTouch(sid, agentPath, { callId, path: filePath, name, op, ts, status: 'running' });
     }
     return;
   }
@@ -95,7 +95,7 @@ function extractFileTouch(
       for (const e of edits as Array<{ file_path?: string }>) {
         if (typeof e.file_path === 'string' && e.file_path) {
           const name = e.file_path.split('/').pop() ?? e.file_path;
-          useShellStore.getState().pushFileTouch(sid, agentPath, { callId, path: e.file_path, name, op: 'edit', ts, status: 'running' });
+          useAppStore.getState().pushFileTouch(sid, agentPath, { callId, path: e.file_path, name, op: 'edit', ts, status: 'running' });
         }
       }
     }
@@ -158,53 +158,6 @@ function dropPendingDelta(sid: string, callId: string): void {
   pendingDeltas.delete(`${sid}:${callId}`);
 }
 
-// ─── stream text/thinking micro-batch ────────────────────────────────────
-// forgeax-core 原生路径的 text chunk 是真 token 级(实测 p50 间隔 13ms、每块 ~2 字符);
-// 逐条 patch 会让每个 chunk 都触发一次 store 更新 + Markdown 全量重渲染,主线程被打满,
-// 观感反而"一坨一坨"。与 tool_call_delta 同款 rAF 合帧:一帧内的 chunk 合成一次 patch。
-// 顺序敏感事件(tool_call 的 at 锚点 / turnEnd 收口等)到达时由 dispatch 顶部同步冲刷保序。
-
-interface PendingStreamText {
-  sid: string;
-  agentId: string;
-  msgId: string;
-  chunks: Array<{ kind: 'text' | 'thinking'; ts: number; text: string }>;
-}
-
-const pendingStreamText = new Map<string, PendingStreamText>();
-let streamTextRafId: number | null = null;
-
-function flushPendingStreamText(): void {
-  if (streamTextRafId !== null) {
-    cancelAnimationFrame(streamTextRafId);
-    streamTextRafId = null;
-  }
-  if (pendingStreamText.size === 0) return;
-  const batch = [...pendingStreamText.values()];
-  pendingStreamText.clear();
-  for (const p of batch) {
-    patchMsg(p.sid, p.agentId, p.msgId, (m) => {
-      let text = m.text;
-      let thinking = m.thinking ?? '';
-      let segments = m.segments ?? [];
-      for (const ch of p.chunks) {
-        if (ch.kind === 'text') text += ch.text;
-        else thinking += ch.text;
-        segments = appendChatSegment(segments, { kind: ch.kind, ts: ch.ts, text: ch.text });
-      }
-      return { ...m, text, ...(thinking ? { thinking } : {}), segments, status: 'streaming' };
-    });
-  }
-}
-
-function enqueueStreamText(sid: string, agentId: string, msgId: string, kind: 'text' | 'thinking', ts: number, text: string): void {
-  const key = `${sid}:${agentId}:${msgId}`;
-  const p = pendingStreamText.get(key);
-  if (p) p.chunks.push({ kind, ts, text });
-  else pendingStreamText.set(key, { sid, agentId, msgId, chunks: [{ kind, ts, text }] });
-  if (streamTextRafId === null) streamTextRafId = requestAnimationFrame(flushPendingStreamText);
-}
-
 // ─── helpers ─────────────────────────────────────────────────────────────
 
 function findStreamingAsst(
@@ -239,7 +192,7 @@ function spawnStreamingAsst(sid: string, agentId: string, ts: number): ChatMessa
 }
 
 function activeAgentForSid(sid: string): string | null {
-  return useShellStore.getState().tabs.find((tb) => tb.sid === sid)?.agentId ?? null;
+  return useAppStore.getState().tabs.find((tb) => tb.sid === sid)?.agentId ?? null;
 }
 
 function pushSystemMessage(
@@ -303,13 +256,6 @@ function dispatch(evt: SessionEvent): void {
   const ts = event.ts ?? Date.now();
   const emitter = emitterId || (typeof event.to === 'string' ? event.to : null);
 
-  // 保序:除 text/thinking chunk 本身外,任何事件处理前先冲刷合帧缓冲——tool_call 的
-  // `at: m.text.length` 锚点、turnEnd 的 done 收口都依赖「已到的文本先落」。
-  {
-    const chunkType = type === 'stream:llm' ? (payload as StreamLlmPayload).chunk?.type : undefined;
-    if (chunkType !== 'text' && chunkType !== 'thinking') flushPendingStreamText();
-  }
-
   if (payload.error && type !== 'hook:toolResult' && type !== 'agent_crash' && type !== 'hook:turnEnd') {
     pushSystemMessage(sid, emitter, { text: String(payload.error), level: 'error', source: emitterId ? `${emitterId}(${type})` : type, from: emitterId, ts });
     return;
@@ -325,7 +271,7 @@ function dispatch(evt: SessionEvent): void {
     const content = typeof payload.content === 'string' ? payload.content : '';
     if (!content) return;
     const tabAgent = activeAgentForSid(sid);
-    if (useShellStore.getState().tabs.findIndex((tb) => tb.sid === sid) < 0) return;
+    if (useAppStore.getState().tabs.findIndex((tb) => tb.sid === sid) < 0) return;
     const fromAgent = typeof emitterId === 'string' && emitterId.length > 0 ? emitterId : null;
     const toAgent = typeof event.to === 'string' && event.to.length > 0 ? event.to : null;
     const isInterAgent = event.source === 'agent' && fromAgent && toAgent;
@@ -395,14 +341,14 @@ function dispatch(evt: SessionEvent): void {
       const txt = chunk.text ?? '';
       if (!txt) return;
       chatFirstToken(emitter);
-      enqueueStreamText(sid, emitter, ctx.msg.id, 'text', ts, txt);
+      patchMsg(sid, emitter, ctx.msg.id, (m) => ({ ...m, text: m.text + txt, segments: appendChatSegment(m.segments ?? [], { kind: 'text', ts, text: txt }), status: 'streaming' }));
       return;
     }
     if (chunk.type === 'thinking') {
       const txt = chunk.text ?? '';
       if (!txt) return;
       chatFirstToken(emitter);
-      enqueueStreamText(sid, emitter, ctx.msg.id, 'thinking', ts, txt);
+      patchMsg(sid, emitter, ctx.msg.id, (m) => ({ ...m, thinking: (m.thinking ?? '') + txt, segments: appendChatSegment(m.segments ?? [], { kind: 'thinking', ts, text: txt }), status: 'streaming' }));
       return;
     }
     if (chunk.type === 'tool_call') {
@@ -465,7 +411,7 @@ function dispatch(evt: SessionEvent): void {
       toolCalls: m.toolCalls.map(apply),
       segments: (m.segments ?? []).map((s) => (s.kind === 'tool' ? { ...s, tool: apply(s.tool) } : s)),
     }));
-    if (callId) useShellStore.getState().updateFileTouchStatus(sid, emitter, callId, p.error ? 'error' : 'done');
+    if (callId) useAppStore.getState().updateFileTouchStatus(sid, emitter, callId, p.error ? 'error' : 'done');
     return;
   }
 
@@ -521,7 +467,7 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'agent_added') {
     const p = payload as { path?: string; display?: string; parent?: string; depth?: number };
     if (p.path) {
-      const s = useShellStore.getState();
+      const s = useAppStore.getState();
       const prev = s.liveAgents[sid] ?? [];
       if (!prev.some((a) => a.path === p.path)) {
         s.setLiveAgents(sid, [...prev, { path: p.path, display: p.display ?? p.path, parent: p.parent ?? null, running: false, depth: p.depth ?? (p.parent ? 2 : 1) }]);
@@ -532,7 +478,7 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'agent_removed') {
     const p = payload as { path?: string };
     if (p.path) {
-      const s = useShellStore.getState();
+      const s = useAppStore.getState();
       const prev = s.liveAgents[sid] ?? [];
       s.setLiveAgents(sid, prev.filter((a) => a.path !== p.path));
     }

@@ -7,9 +7,9 @@ import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
 import { ChatAgentCapsule } from './ChatAgentCapsule';
 import { RewindConfirmDialog, RewindBanner, DirtyNoticeBar, RewindInlineEditor, BubbleEditInline } from './RewindControls';
-import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
+import { AgentAvatarVideo } from '@forgeax/interface/components/AgentAvatarVideo/AgentAvatarVideo';
 import { useAgentNames, shortAgentId } from './useAgentNames';
-import { useShellStore } from '@forgeax/interface/store';
+import { useAppStore } from '@forgeax/interface/store';
 import {
   useChatStore,
   useActiveMessages,
@@ -432,8 +432,8 @@ export function ChatPanel() {
   // 气泡（store.ts ~1680）；如果 messages 已有，说明正在直播，不能 clobber。
   // 持久化 tab 刷新场景 messages=[]，gate 开门重放。
   // 2026-05-20 重做：sid === threadId（一一对应），WAL replay 直接用 activeSid。
-  const activeSid = useShellStore((s) => s.activeSid);
-  const activeAgentId = useShellStore(
+  const activeSid = useAppStore((s) => s.activeSid);
+  const activeAgentId = useAppStore(
     (s) => s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null,
   );
   const loadSession = useChatStore((s) => s.loadSession);
@@ -474,7 +474,7 @@ export function ChatPanel() {
   // "切 session 无效"). Forget keys whose sid has left the tab list so a
   // recreated tab replays from WAL afresh. (sid is a UUID — no ':' — so the
   // substring before the first ':' is the sid.)
-  const tabSidsKey = useShellStore((s) => s.tabs.map((t) => t.sid).join('\u0000'));
+  const tabSidsKey = useAppStore((s) => s.tabs.map((t) => t.sid).join('\u0000'));
   useEffect(() => {
     const present = new Set(tabSidsKey ? tabSidsKey.split('\u0000') : []);
     for (const key of [...loadedKeysRef.current]) {
@@ -574,7 +574,7 @@ export function ChatPanel() {
         <button
           className="cp-window-toggle"
           onClick={() =>
-            void useShellStore.getState().detachSurface(
+            void useAppStore.getState().detachSurface(
               { kind: 'panel', id: 'chat' },
               { title: t('chat.windowTitle') },
             )

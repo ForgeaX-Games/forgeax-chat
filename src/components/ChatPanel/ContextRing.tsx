@@ -1,4 +1,4 @@
-import { useShellStore } from '@forgeax/interface/store';
+import { useAppStore } from '@forgeax/interface/store';
 import { useActiveContextPct } from '../../session-store';
 
 function ringColor(pct: number): string {
@@ -14,7 +14,7 @@ const SIZE = (R + STROKE) * 2;
 const CIRCUMFERENCE = 2 * Math.PI * R;
 
 export default function ContextRing() {
-  const activeSid = useShellStore((s) => s.activeSid);
+  const activeSid = useAppStore((s) => s.activeSid);
   const contextPct = useActiveContextPct();
 
   if (!activeSid || contextPct <= 0) return null;

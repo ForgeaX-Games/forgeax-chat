@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
-import { useShellStore } from '@forgeax/interface/store';
+import { useAppStore } from '@forgeax/interface/store';
 import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
 import type { SubAgentRun } from '../../session-store';
 import { ProviderBadgePill } from '@forgeax/interface/lib/provider-badge';
-import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
+import { AgentAvatarVideo } from '@forgeax/interface/components/AgentAvatarVideo/AgentAvatarVideo';
 import { ForgeText } from './message-parts/ForgeText';
 import { ToolChipRow } from './message-parts/ToolChipRow';
 import { KcCopyBtn } from './message-parts/KcCopyBtn';
@@ -62,7 +62,7 @@ export function SubAgentCard({ run, parentAgentId }: { run: SubAgentRun; parentA
   const [open, setOpen] = useState(run.status === 'streaming');
   // P3.77 — mirror ForgeCard's provider-pill deep-link. SubAgentCard header
   // is also a <button>, so the pill renders as span-with-role inside.
-  const openOverlay = useShellStore((s) => s.openOverlay);
+  const openOverlay = useAppStore((s) => s.openOverlay);
   const onProviderBusDeepLink = (pluginId: string) => {
     emitDeepLink('bus:filter-kind', 'cli-provider');
     emitDeepLink('bus:expand-plugin', pluginId);

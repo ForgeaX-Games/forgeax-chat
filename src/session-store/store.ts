@@ -1,7 +1,7 @@
 /** `@forgeax/chat` conversation store (R4 — message content owned by chat).
  *
  *  This is the real home of the *message-content* domain extracted from
- *  `@forgeax/interface`'s monolithic `useShellStore`. The session REGISTRY
+ *  `@forgeax/interface`'s monolithic `useAppStore`. The session REGISTRY
  *  (`tabs` / `activeSid` / agent binding) and agent-runtime state stay in L1;
  *  this store owns only what is chat-private: the conversation messages, their
  *  streaming/replay pipeline, the client-side send queue, and rewind UI state.
@@ -23,13 +23,13 @@
  *  L1 COORDINATION
  *  ---------------
  *  Registry facts (active sid, a tab's pinned agentId, the per-tab provider
- *  override) are read on demand from `useShellStore.getState()`. This store never
+ *  override) are read on demand from `useAppStore.getState()`. This store never
  *  writes the registry; the registry never writes messages.
  */
 import { create } from 'zustand';
 import { t } from '@/i18n';
 import {
-  useShellStore,
+  useAppStore,
   type ChatMessage,
   type ChatSegment,
   type SubAgentRun,
@@ -38,12 +38,12 @@ import {
 import { parseSse } from '@forgeax/interface/lib/sse';
 import { expandPills } from '@forgeax/interface/lib/composer-bridge';
 import { resolveReplyLanguage } from '@forgeax/interface/lib/reply-language';
-import { TurnAccumulator } from '../event-engine/turn-accumulator';
+import { TurnAccumulator } from '@forgeax/interface/lib/event-engine/turn-accumulator';
 import {
   parseEventLines,
   trimToCompactBoundary,
-} from '../event-engine/event-replay';
-import { applyRewindMask, findPendingRewind } from '../event-engine/rewind-mask';
+} from '@forgeax/interface/lib/event-engine/event-replay';
+import { applyRewindMask, findPendingRewind } from '@forgeax/interface/lib/event-engine/rewind-mask';
 import {
   buildMainCallbacks,
   buildSubCallbacks,
@@ -51,8 +51,8 @@ import {
   makeInMemEffects,
   rendererToolCallToLegacy,
   type MessageEffects,
-} from '../event-engine/message-builder';
-import type { StoredEvent, ToolCallMessage } from '../event-engine/types';
+} from '@forgeax/interface/lib/event-engine/message-builder';
+import type { StoredEvent, ToolCallMessage } from '@forgeax/interface/lib/event-engine/types';
 
 // ── Local types (chat-owned) ────────────────────────────────────────────────
 
@@ -388,7 +388,7 @@ interface ChatStoreState {
 
 /** Active `(sid, agentId)` resolved from L1's registry. */
 function activeTarget(): { sid: string | null; agentId: string | null } {
-  const s = useShellStore.getState();
+  const s = useAppStore.getState();
   const sid = s.activeSid;
   const agentId = sid ? (s.tabs.find((t) => t.sid === sid)?.agentId ?? null) : null;
   return { sid, agentId };
@@ -420,7 +420,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // Mirror the per-(sid, agentId) busy flag into L1 so registry surfaces
     // (SessionSwitcher / AgentsPanel) can render a spinner without importing
     // chat message state. L1 owns the flag's storage; chat owns its truth.
-    useShellStore.getState().setAgentBusy(sid, agentId, val);
+    useAppStore.getState().setAgentBusy(sid, agentId, val);
     set((s) => {
       const conv = s.bySid[sid] ?? EMPTY_CONV;
       return {
@@ -731,7 +731,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const replyLanguage = resolveReplyLanguage(trimmed);
     const { sid: startSid } = activeTarget();
     if (!startSid) { console.warn('[chat.sendMessage] no active session'); return; }
-    const app = useShellStore.getState();
+    const app = useAppStore.getState();
     const startTab = app.tabs.find((tb) => tb.sid === startSid);
     const sysAgent = startTab?.agentId ?? '__none__';
     const pushSys = (txt: string): void =>
@@ -848,12 +848,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       const steerUserMsg: ChatMessage = { id: newId(), role: 'user', text: trimmed, toolCalls: [], status: 'done', ts: Date.now() };
       get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, steerUserMsg]);
       try {
-        const { emitForgeaXMessage } = await import('../session-bridge');
+        const { emitForgeaXMessage } = await import('@forgeax/interface/lib/forgeax-bridge');
         const candidate = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : undefined;
         const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         markEmittedClientMsg(clientMsgId);
         const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
-        const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
+        const { traceparent } = beginChatTurn(activeAgent, startSid, useAppStore.getState().providerOverride ?? undefined);
         const r = await emitForgeaXMessage(startSid, expandPills(trimmed), {
           to: candidate,
           payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
@@ -878,7 +878,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
     // Optimistic push into the target agent's slot + auto-title.
     if (startTab && !startTab.displayName) {
-      useShellStore.getState().renameTab(startSid, expandPills(trimmed).slice(0, 40).replace(/\s+/g, ' '));
+      useAppStore.getState().renameTab(startSid, expandPills(trimmed).slice(0, 40).replace(/\s+/g, ' '));
     }
     get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, userMsg, asstMsg]);
     setStreaming(true);
@@ -889,12 +889,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const isForgeaXNative = turnOverride === null || turnOverride === 'forgeax';
     if (isForgeaXNative) {
       try {
-        const { emitForgeaXMessage } = await import('../session-bridge');
+        const { emitForgeaXMessage } = await import('@forgeax/interface/lib/forgeax-bridge');
         const candidate = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : undefined;
         const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         markEmittedClientMsg(clientMsgId);
         const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
-        const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
+        const { traceparent } = beginChatTurn(activeAgent, startSid, useAppStore.getState().providerOverride ?? undefined);
         const r = await emitForgeaXMessage(startSid, expandPills(trimmed), {
           to: candidate,
           payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
@@ -1167,7 +1167,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   applyRewindEvent: (sid, kind, payload) => {
     const conv = get().bySid[sid];
     if (!conv) return;
-    const agentId = useShellStore.getState().tabs.find((tb) => tb.sid === sid)?.agentId ?? null;
+    const agentId = useAppStore.getState().tabs.find((tb) => tb.sid === sid)?.agentId ?? null;
     if (kind === 'done') {
       const msgId = String(payload.msgId ?? '');
       if (msgId && agentId) {
@@ -1224,10 +1224,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 // agent is active) with this store's per-(sid,agentId) buckets.
 
 function useActiveSid(): string | null {
-  return useShellStore((s) => s.activeSid);
+  return useAppStore((s) => s.activeSid);
 }
 function useActiveAgentId(): string | null {
-  return useShellStore((s) => (s.activeSid ? s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null : null));
+  return useAppStore((s) => (s.activeSid ? s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null : null));
 }
 
 /** The visible message thread for the active (sid, agentId). */
@@ -1280,7 +1280,7 @@ export function isOwnUserInput(clientMsgId: string | undefined): boolean {
 
 // ── registry GC: when L1 drops a session tab, tear down its chat-side state ──
 let _prevSids: string[] = [];
-useShellStore.subscribe((s) => {
+useAppStore.subscribe((s) => {
   const sids = s.tabs.map((tb) => tb.sid);
   if (sids.length === _prevSids.length && sids.every((x, i) => x === _prevSids[i])) return;
   const removed = _prevSids.filter((sid) => !sids.includes(sid));

@@ -2,54 +2,6 @@ import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef } f
 import { parseSegments, type PillPayload, encodePill } from '@forgeax/interface/lib/composer-bridge';
 import './RichInput.css';
 
-// === Pasted-text folding (the reference agent CLI style: "[Pasted text #N +M lines]") ===
-//
-// A big paste would otherwise flood the composer with hundreds of lines. Instead
-// we collapse it into a compact pill chip and keep the FULL text inside the
-// pill's `detail`, which `expandPills()` (session-store submit path) restores
-// verbatim before the message reaches the model. This reuses the existing pill
-// machinery, so there's no separate side-store to keep in sync — the value
-// string stays the single source of truth.
-//
-// Trigger mirrors the reference agent CLI: paste is folded when it exceeds a character
-// budget OR spans more lines than we want to show inline.
-const PASTE_FOLD_CHAR_THRESHOLD = 800;
-const PASTE_FOLD_MAX_LINES = 6;
-
-/** Count added lines the way the reference agent CLI does: "a\nb\nc" → 2 (newline count). */
-function pastedTextNumLines(text: string): number {
-  return (text.match(/\r\n|\r|\n/g) || []).length;
-}
-
-/** Build a folded-paste pill. `detail` holds the original text so it expands
- *  back to the raw paste on send; `display` is the compact chip label. */
-function buildPastedTextPill(text: string, id: number): PillPayload {
-  const numLines = pastedTextNumLines(text);
-  const display = numLines === 0 ? `Pasted text #${id}` : `Pasted text #${id} +${numLines} lines`;
-  const previewLines = text.split(/\r\n|\r|\n/).slice(0, 6);
-  const preview = previewLines.join('\n') + (previewLines.length < text.split(/\r\n|\r|\n/).length ? '\n…' : '');
-  return {
-    kind: 'paste',
-    display,
-    icon: '📋',
-    // On send this is substituted back in place of the chip → model sees raw text.
-    detail: text,
-    tooltip: { title: `📋 ${display}`, lines: [`${text.length} chars`, '---', preview] },
-  };
-}
-
-/** Next paste id for the current buffer: 1 + the max existing "Pasted text #N"
- *  chip in `root`. Numbering restarts per message (buffer clears on send), and
- *  never collides within a message. */
-function nextPastedTextId(root: HTMLElement): number {
-  let max = 0;
-  root.querySelectorAll<HTMLElement>('[data-pill="1"][data-pill-kind="paste"]').forEach((el) => {
-    const m = /Pasted text #(\d+)/.exec(el.querySelector('.kbl-pill-label')?.textContent ?? '');
-    if (m) max = Math.max(max, Number(m[1]));
-  });
-  return max + 1;
-}
-
 export interface RichInputHandle {
   focus(): void;
   blur(): void;
@@ -299,24 +251,6 @@ export const RichInput = forwardRef<RichInputHandle, Props>(function RichInput(
     e.preventDefault();
     const text = e.clipboardData.getData('text/plain');
     if (!text) return;
-
-    // Big paste → fold into a "[Pasted text #N +M lines]" chip (the reference agent CLI
-    // style). The full text rides inside the pill's `detail`, so expandPills()
-    // on send restores it verbatim. A trailing space lets the caret land on
-    // plain text after the chip.
-    const numLines = pastedTextNumLines(text);
-    if (text.length > PASTE_FOLD_CHAR_THRESHOLD || numLines > PASTE_FOLD_MAX_LINES) {
-      const id = divRef.current ? nextPastedTextId(divRef.current) : 1;
-      const payload = buildPastedTextPill(text, id);
-      const token = encodePill(payload);
-      const chip = buildChipNode(payload, token);
-      const frag = document.createDocumentFragment();
-      frag.appendChild(chip);
-      frag.appendChild(document.createTextNode(' '));
-      insertNodeAtCaret(frag);
-      return;
-    }
-
     const parts = text.split('\n');
     const frag = document.createDocumentFragment();
     for (let i = 0; i < parts.length; i++) {

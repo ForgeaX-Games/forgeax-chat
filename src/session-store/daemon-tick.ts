@@ -9,7 +9,7 @@
  *  This opens its OWN ws connection (server broadcasts to all clients), so the
  *  chat bundle owns its daemon-tick wiring end-to-end without an L1 callback.
  */
-import { useAppStore, type ChatMessage } from '@forgeax/interface/store';
+import { useShellStore, type ChatMessage } from '@forgeax/interface/store';
 import { useChatStore } from './store';
 
 const _tickMsgIdByTickId = new Map<string, string>();
@@ -20,7 +20,7 @@ export function _daemonTickMapCount(): number {
 }
 
 function activeAgentForSid(sid: string): string | null {
-  return useAppStore.getState().tabs.find((tb) => tb.sid === sid)?.agentId ?? null;
+  return useShellStore.getState().tabs.find((tb) => tb.sid === sid)?.agentId ?? null;
 }
 
 function handleDaemonTick(msg: unknown): void {
@@ -29,7 +29,7 @@ function handleDaemonTick(msg: unknown): void {
   if (!m.threadId || !m.tickId) return;
   if (m.type !== 'daemon-tick-start' && m.type !== 'daemon-tick-event' && m.type !== 'daemon-tick-end') return;
   const sid = m.threadId;
-  if (useAppStore.getState().tabs.findIndex((tb) => tb.sid === sid) < 0) return;
+  if (useShellStore.getState().tabs.findIndex((tb) => tb.sid === sid) < 0) return;
   const agentId = activeAgentForSid(sid);
   if (!agentId) return;
   const tickKey = `${sid}::${m.tickId}`;
@@ -76,7 +76,7 @@ function handleDaemonTick(msg: unknown): void {
 
 // Drop orphan tick entries when a session tab is removed (memleak case-12).
 let _prevSids: string[] = [];
-useAppStore.subscribe((s) => {
+useShellStore.subscribe((s) => {
   const sids = s.tabs.map((tb) => tb.sid);
   if (sids.length === _prevSids.length && sids.every((x, i) => x === _prevSids[i])) return;
   const removed = _prevSids.filter((sid) => !sids.includes(sid));

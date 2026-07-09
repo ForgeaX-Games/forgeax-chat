@@ -3,6 +3,19 @@
   display: flex; flex-direction: column;
   overflow: hidden;
   position: relative;
+  height: 100%;
+}
+
+/* cp-body: the actual flex column that hosts the ChatAgentCapsule + scrolling
+ * thread + Composer. Fills remaining panel height so the thread flex:1's
+ * fill logic actually has room to expand and the Composer sticks to bottom
+ * (rather than floating right below cp-empty). min-height:0 lets the child
+ * overflow-y scroll instead of ballooning the parent. */
+.cp-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* Windowing — pop chat out into its own OS window (Tauri shell only). */

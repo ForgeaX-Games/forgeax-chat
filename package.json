@@ -4,7 +4,7 @@
   "private": false,
   "license": "Apache-2.0",
   "type": "module",
-  "description": "forgeax chat L2 app — the Forge chat surface (ChatPanel / Composer / message rendering). State (sessions / messages / agents) lives in @forgeax/interface's L1 session store; this package is the UI over it.",
+  "description": "forgeax chat L2 app — the Forge chat surface, composer, message rendering, and chat/session ownership.",
   "repository": {
     "type": "git",
     "url": "https://github.com/ForgeaX-Games/forgeax-studio.git",
@@ -13,6 +13,7 @@
   "homepage": "https://github.com/ForgeaX-Games/forgeax-studio/tree/main/packages/chat",
   "exports": {
     ".": "./src/index.ts",
+    "./event-engine/*": "./src/event-engine/*.ts",
     "./session-store": "./src/session-store/index.ts",
     "./*": "./src/*.ts",
     "./package.json": "./package.json"
@@ -24,7 +25,9 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@forgeax/design": "workspace:*",
     "@forgeax/interface": "workspace:*",
+    "@forgeax/ai-workbench": "workspace:*",
     "lucide-react": "^0.460.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

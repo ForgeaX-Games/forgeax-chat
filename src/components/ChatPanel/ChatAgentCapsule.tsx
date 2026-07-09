@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from '@forgeax/interface/i18n';
 import { workbenchAgentsUrl } from '@forgeax/interface/lib/workbench-lang';
-import { useAppStore } from '@forgeax/interface/store';
+import { useShellStore } from '@forgeax/interface/store';
 import { useBusSnapshot } from '@forgeax/interface/lib/use-bus-snapshot';
 import { publish } from '@forgeax/interface/lib/bus';
 import { useActiveStreamingByAgent } from '../../session-store';
-import { onSessionEvent } from '@forgeax/interface/lib/forgeax-bridge';
-import { AgentAvatarVideo } from '@forgeax/interface/components/AgentAvatarVideo/AgentAvatarVideo';
-import { resolveNaming } from '@forgeax/interface/lib/agent-name';
+import { onSessionEvent } from '../../session-bridge';
+import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
+import { resolveNaming } from '@forgeax/ai-workbench/lib/agent-name';
 
 type WorkbenchAgent = {
   id: string;
@@ -130,9 +130,9 @@ function initialFor(id: string): string {
  */
 export function ChatAgentCapsule() {
   const { t, i18n } = useTranslation();
-  const activeSid = useAppStore((s) => s.activeSid);
-  const tabs = useAppStore((s) => s.tabs);
-  const setTabAgent = useAppStore((s) => s.setTabAgent);
+  const activeSid = useShellStore((s) => s.activeSid);
+  const tabs = useShellStore((s) => s.tabs);
+  const setTabAgent = useShellStore((s) => s.setTabAgent);
   // ① agent 安装偏好来自 settings（bus 'prefs:agents'）—— chat 只读，零 import settings。
   const prefs = useBusSnapshot('prefs:agents') as
     | { uninstalledAgentIds?: string[]; defaultBootstrapAgent?: string | null }

@@ -23,7 +23,7 @@ import { subscribeFileActivityStream } from '@forgeax/interface/lib/file-activit
 import { subscribePermissionStream } from '@forgeax/interface/lib/permission-stream';
 import { subscribePerceptionStream } from '@forgeax/interface/lib/perception-stream';
 import { syncBrowserPrefsFromServer, startBrowserPrefsSync } from '@forgeax/interface/lib/browser-prefs-sync';
-import { useAppStore } from '@forgeax/interface/store';
+import { useShellStore } from '@forgeax/interface/store';
 import { installHealthBridge } from '@forgeax/interface/components/StatusBar/healthBridge';
 import { subscribeSessionStream, subscribeDaemonTick } from './session-store';
 import { ChatPanel } from './components/ChatPanel/ChatPanel';
@@ -60,10 +60,10 @@ function boot(): void {
   subscribePermissionStream();
   subscribePerceptionStream();
   subscribeSessionStream();
-  void useAppStore.getState().initSessions();
+  void useShellStore.getState().initSessions();
 
   if (import.meta.env.DEV) {
-    (window as unknown as Record<string, unknown>)['__dev'] = useAppStore;
+    (window as unknown as Record<string, unknown>)['__dev'] = useShellStore;
   }
   (window as unknown as { __forgeaxBoot?: { done?: () => void } }).__forgeaxBoot?.done?.();
 

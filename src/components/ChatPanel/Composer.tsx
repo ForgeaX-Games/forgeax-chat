@@ -4,13 +4,13 @@ import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { AtSign, SquareChartGantt, Upload, ChevronDown, ArrowUp, Unplug, Square, Zap, Pencil, Trash2 } from 'lucide-react';
 import { useTranslation, getLocale } from '@forgeax/interface/i18n';
 import { workbenchAgentsUrl } from '@forgeax/interface/lib/workbench-lang';
-import { useAppStore } from '@forgeax/interface/store';
+import { useShellStore } from '@forgeax/interface/store';
 import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
 import { checkModelReady, resetActiveAgentModelToProviderDefault } from '@forgeax/interface/lib/model-route';
 import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
 import { useChatStore, useActiveStreaming } from '../../session-store';
 import { useModelLabel } from '@forgeax/interface/lib/model';
-import { resolveNaming } from '@forgeax/interface/lib/agent-name';
+import { resolveNaming } from '@forgeax/ai-workbench/lib/agent-name';
 import { listBusPlugins, pickLang, type BusPluginInfo } from '@forgeax/interface/lib/bus-api';
 import { RichInput, type RichInputHandle } from '../Composer/RichInput';
 import { buildAssetPill, requestComposerInsert, useComposerPendingInsert, clearComposerPendingInsert } from '@forgeax/interface/lib/composer-bridge';
@@ -179,15 +179,15 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   const dequeueMessage = useChatStore((s) => s.dequeueMessage);
   const clearQueue = useChatStore((s) => s.clearQueue);
   const queuedMessages = useChatStore((s) => s.queuedMessages);
-  const providerOverride = useAppStore((s) => s.providerOverride);
-  const setProviderOverride = useAppStore((s) => s.setProviderOverride);
+  const providerOverride = useShellStore((s) => s.providerOverride);
+  const setProviderOverride = useShellStore((s) => s.setProviderOverride);
   // Derive from active tab's agent binding (first-class key, post-PR #9).
   // null when the active tab hasn't been pinned yet (fresh tab pre-
   // AgentSwitcher fetch).
-  const activeAgent = useAppStore(
+  const activeAgent = useShellStore(
     (s) => s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null,
   );
-  const activeSid = useAppStore((s) => s.activeSid);
+  const activeSid = useShellStore((s) => s.activeSid);
   // P8 — while a claude-code permission card is up the turn is *blocked waiting
   // on the user*, not idle. Sending now would cancel that turn (SIGTERM →
   // `claude exited 143`) yet leave the card answering a dead turn. So we gate
@@ -208,7 +208,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   // Reuses the pendingBusExpandId pipeline (P2.7f Sidebar / P3.32 AgentsPanel /
   // P3.34 ChatPanel agent bar). Set BEFORE switching mode so BusAdminPanel's
   // mount-time consumer reads non-null on first render.
-  const openOverlay = useAppStore((s) => s.openOverlay);
+  const openOverlay = useShellStore((s) => s.openOverlay);
   // 2026-05-20 — cb-mbsel deep-link 到 BusAdmin kind=model-binding 的入口
   // 删除（mb popover 现在是真模型选择器，不再混 bus 数据源）。R5/P2 起深链走
   // bus（emitDeepLink('bus:filter-kind'|'bus:expand-plugin')），不再占 store slot。
@@ -287,7 +287,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
       // typo'd at write-time, etc.), reset to auto. Without this the user
       // would see an "unknown providerOverride" error on every turn and
       // have to manually fix it via the dropdown.
-      const persisted = useAppStore.getState().providerOverride;
+      const persisted = useShellStore.getState().providerOverride;
       if (persisted && list.length > 0 && !list.some((p) => p.id === persisted)) {
         console.warn(`[composer] cleared stale providerOverride="${persisted}" (not in registered providers: ${list.map((p) => p.id).join(',')})`);
         setProviderOverride(null);
@@ -320,7 +320,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
     // still what we fetched for — a session switch OR a provider switch mid-flight
     // must not paint stale data.
     const stillCurrent = (): boolean => {
-      const cur = useAppStore.getState();
+      const cur = useShellStore.getState();
       const tab = cur.tabs.find((t) => t.sid === cur.activeSid);
       return tab?.agentId === agentPath && cur.activeSid === sid && catalogOf(cur.providerOverride) === providerId;
     };

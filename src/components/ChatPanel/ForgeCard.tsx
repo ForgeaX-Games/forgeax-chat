@@ -2,12 +2,12 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { Brain, ChevronDown, ChevronUp, CheckCircle2, Loader2, Clock, AlertCircle } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
 import agentIcon from '@forgeax/interface/assets/icons/agent-icon.png';
-import { useAppStore } from '@forgeax/interface/store';
+import { useShellStore } from '@forgeax/interface/store';
 import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
 import type { ToolCall, SubAgentRun, ChatSegment } from '../../session-store';
 import { ProviderBadgePill } from '@forgeax/interface/lib/provider-badge';
 import { useDownsampledImage } from './useDownsampledImage';
-import { AgentAvatarVideo } from '@forgeax/interface/components/AgentAvatarVideo/AgentAvatarVideo';
+import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
 import { ForgeText } from './message-parts/ForgeText';
 import { ToolChipRow } from './message-parts/ToolChipRow';
 import { AskUserCard } from './message-parts/AskUserCard';
@@ -80,7 +80,7 @@ function formatCost(usd: number): string {
 // the pendingBusKindFilter + pendingBusExpandId pipeline (P3.65/67/68) so a
 // player one-clicks from any chat message to that cli's plugin row in Bus.
 function useProviderBusDeepLink(): (pluginId: string) => void {
-  const openOverlay = useAppStore((s) => s.openOverlay);
+  const openOverlay = useShellStore((s) => s.openOverlay);
   return (pluginId: string) => {
     emitDeepLink('bus:filter-kind', 'cli-provider');
     emitDeepLink('bus:expand-plugin', pluginId);

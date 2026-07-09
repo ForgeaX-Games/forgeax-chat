@@ -11,7 +11,7 @@
 import { useEffect, useState, type ReactElement } from 'react';
 import { ShieldAlert, HelpCircle, Check, X, Loader2 } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
-import { useAppStore } from '@forgeax/interface/store';
+import { useShellStore } from '@forgeax/interface/store';
 import { usePendingPermission, clearPendingPermission } from '@forgeax/interface/lib/permission-stream';
 
 interface AskQuestion {
@@ -30,7 +30,7 @@ function readQuestions(input: unknown): AskQuestion[] {
 
 export function PermissionPrompt(): ReactElement | null {
   const { t } = useTranslation();
-  const activeSid = useAppStore((s) => s.activeSid);
+  const activeSid = useShellStore((s) => s.activeSid);
   const pending = usePendingPermission(activeSid);
   const [busy, setBusy] = useState(false);
   // AskUserQuestion: chosen labels per question index.

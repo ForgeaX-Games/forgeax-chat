@@ -11,7 +11,7 @@ import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
 import { useChatStore, useActiveStreaming } from '../../session-store';
 import { useModelLabel } from '@forgeax/interface/lib/model';
 import { resolveNaming } from '@forgeax/ai-workbench/lib/agent-name';
-import { listBusPlugins, pickLang, type BusPluginInfo } from '@forgeax/interface/lib/bus-api';
+import { listExtensions, pickLang, type ExtensionInfo } from '@forgeax/interface/lib/extension-api';
 import { RichInput, type RichInputHandle } from '../Composer/RichInput';
 import { buildAssetPill, requestComposerInsert, useComposerPendingInsert, clearComposerPendingInsert } from '@forgeax/interface/lib/composer-bridge';
 import {
@@ -79,10 +79,10 @@ const BUS_CLI_ID_PREFIX = '@forgeax-plugin/cli-';
 
 // P2.7g — entry in the bus cli-provider map. Holds enough of the plugin
 // manifest to render a description mini-strip under each dropdown row. We
-// keep the full BusPluginInfo so future extensions (manifest version /
+// keep the full ExtensionInfo so future extensions (manifest version /
 // experimental flag etc.) don't need another refetch.
 interface BusCliEntry {
-  full: BusPluginInfo;
+  full: ExtensionInfo;
   descZh: string;
 }
 
@@ -298,7 +298,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   // bus pill + description mini-strip; the dropdown still works.
   const fetchBusCliInfo = async () => {
     try {
-      const resp = await listBusPlugins('cli-provider');
+      const resp = await listExtensions('cli-provider');
       const next = new Map<string, BusCliEntry>();
       for (const item of resp.items) {
         if (!item.id.startsWith(BUS_CLI_ID_PREFIX)) continue;
@@ -344,7 +344,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   // back to its legacy 即将上线 hint behaviour.
   const fetchBusSkills = async () => {
     try {
-      const resp = await listBusPlugins('skill');
+      const resp = await listExtensions('skill');
       const rows: BusSkillRow[] = [];
       for (const item of resp.items) {
         const skills = item.skills ?? [];

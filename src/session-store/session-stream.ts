@@ -18,11 +18,20 @@ import {
   type SystemLevel,
   type ToolCall,
 } from '@forgeax/interface/store';
-import { onSessionEvent, type SessionEvent } from '../session-bridge';
+import {
+  onSessionEvent,
+  onTurnSnapshot,
+  onResumeGap,
+  gateSessionEvent,
+  noteAppliedSeq,
+  releaseGapBuffer,
+  type SessionEvent,
+  type TurnSnapshotFrame,
+} from '../session-bridge';
 import { ratioFromUsage } from '../event-engine/turn-accumulator';
 import { chatFirstToken, chatTurnEnd } from '@forgeax/interface/lib/trace';
 import { t } from '@/i18n';
-import { appendChatSegment, isOwnUserInput, upsertToolSegment, useChatStore } from './store';
+import { appendChatSegment, isOwnUserInput, isCliSseTurnActive, upsertToolSegment, useChatStore } from './store';
 
 // ─── server event payload shapes ─────────────────────────────────────────
 
@@ -224,7 +233,7 @@ function patchMsg(sid: string, agentId: string, msgId: string, mut: (m: ChatMess
   useChatStore.getState().patchMessages(sid, agentId, (msgs) => msgs.map((m) => (m.id === msgId ? mut(m) : m)));
 }
 
-function spawnStreamingAsst(sid: string, agentId: string, ts: number): ChatMessage {
+function spawnStreamingAsst(sid: string, agentId: string, ts: number, anchor?: string): ChatMessage {
   const msg: ChatMessage = {
     id: `s-${ts}-${Math.random().toString(36).slice(2, 8)}`,
     role: 'assistant',
@@ -233,9 +242,84 @@ function spawnStreamingAsst(sid: string, agentId: string, ts: number): ChatMessa
     status: 'streaming',
     ts,
     providerId: 'forgeax',
+    ...(anchor ? { msgId: anchor } : {}),
   };
   useChatStore.getState().patchMessages(sid, agentId, (msgs) => [...msgs, msg]);
   return msg;
+}
+
+// ─── 多 tab 同步:流式消息身份锚 + per-step seal(方案 §3.4 / D4)─────────────
+//
+// 锚 = `live:<emitterId>:<turnStartTs>`(hook:turnStart 的 event.ts),所有 tab 与
+// turn-snapshot 看到同一值 → 同一条流式消息跨端对齐。仅用于在途定位,不持久化。
+// seal = 已被 hook:assistantMessage 封口的 text/thinking 前缀长度;一个 turn 内
+// assistantMessage 发多条(tool-loop 每 step 一条),reconcile 只修封口后的尾部。
+
+function liveAnchor(emitterId: string, turnStartTs: number): string {
+  return `live:${emitterId}:${turnStartTs}`;
+}
+
+const _seals = new Map<string, { text: number; thinking: number }>();
+
+function sealKey(sid: string, agentId: string, localMsgId: string): string {
+  return `${sid}:${agentId}:${localMsgId}`;
+}
+
+/** 从 hook:assistantMessage payload 提取权威 text/thinking。
+ *  形状兼容:原生路径 `llmMessage`,cli 桥 `msg`(event-formatter 同款兼容)。 */
+function extractAuthoritative(payload: Record<string, unknown>): { text: string; thinking: string } | null {
+  const raw = (payload.llmMessage ?? payload.msg) as { content?: unknown; thinking?: unknown } | undefined;
+  if (!raw || typeof raw !== 'object') return null;
+  let text = '';
+  const content = raw.content;
+  if (typeof content === 'string') text = content;
+  else if (Array.isArray(content)) {
+    text = (content as Array<{ type?: string; text?: string }>)
+      .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text as string)
+      .join('');
+  }
+  const thinking = typeof raw.thinking === 'string' ? raw.thinking : '';
+  if (!text && !thinking) return null;
+  return { text, thinking };
+}
+
+/** per-step 收口 reconcile:对 seal 之后的未封口尾部做「一致免改 / 缺失补齐 /
+ *  不一致替换」,然后推进 seal。任何丢帧在下一个 step 封口时被修正。 */
+function reconcileAssistantStep(
+  sid: string,
+  agentId: string,
+  msg: ChatMessage,
+  step: { text: string; thinking: string },
+  ts: number,
+): void {
+  const key = sealKey(sid, agentId, msg.id);
+  const seal = _seals.get(key) ?? { text: 0, thinking: 0 };
+  patchMsg(sid, agentId, msg.id, (m) => {
+    let text = m.text;
+    let thinking = m.thinking ?? '';
+    let segments = m.segments ?? [];
+    if (step.thinking) {
+      const tail = thinking.slice(seal.thinking);
+      if (tail !== step.thinking) {
+        thinking = thinking.slice(0, seal.thinking) + step.thinking;
+        const missing = step.thinking.startsWith(tail) ? step.thinking.slice(tail.length) : step.thinking;
+        if (missing) segments = appendChatSegment(segments, { kind: 'thinking', ts, text: missing });
+      }
+    }
+    if (step.text) {
+      const tail = text.slice(seal.text);
+      if (tail !== step.text) {
+        text = text.slice(0, seal.text) + step.text;
+        const missing = step.text.startsWith(tail) ? step.text.slice(tail.length) : step.text;
+        if (missing) segments = appendChatSegment(segments, { kind: 'text', ts, text: missing });
+      }
+    }
+    seal.text = text.length;
+    seal.thinking = thinking.length;
+    return { ...m, text, ...(thinking ? { thinking } : {}), segments };
+  });
+  _seals.set(key, seal);
 }
 
 function activeAgentForSid(sid: string): string | null {
@@ -299,6 +383,11 @@ function readableSummary(payload: Record<string, unknown>): string {
 function dispatch(evt: SessionEvent): void {
   const { sid, emitterId, event } = evt;
   const type = event.type;
+
+  // 幂等闸(方案 §3.5):重复/回放重叠帧按 (sgen, seq) 丢弃 —— G3 的 race
+  // 从时序问题退化为按 seq 过滤。无 seq 的旧事件按现状路径处理。
+  if (!gateSessionEvent(sid, event.sgen, event.seq)) return;
+
   const payload = (event.payload ?? {}) as Record<string, unknown>;
   const ts = event.ts ?? Date.now();
   const emitter = emitterId || (typeof event.to === 'string' ? event.to : null);
@@ -370,13 +459,16 @@ function dispatch(evt: SessionEvent): void {
 
   if (type === 'hook:turnStart') {
     if (!emitter) return;
+    const anchor = liveAnchor(emitter, event.ts);
     let ctx = findStreamingAsst(sid, emitter);
     if (!ctx) {
-      const msg = spawnStreamingAsst(sid, emitter, ts);
+      const msg = spawnStreamingAsst(sid, emitter, ts, anchor);
       ctx = { sid, agentId: emitter, msg };
     } else {
-      patchMsg(sid, emitter, ctx.msg.id, (m) => ({ ...m, ts }));
+      // 领养:发送 tab 的乐观占位 / 已存在的流式气泡接上服务端身份锚(§3.4)。
+      patchMsg(sid, emitter, ctx.msg.id, (m) => ({ ...m, ts, msgId: anchor }));
     }
+    _seals.set(sealKey(sid, emitter, ctx.msg.id), { text: 0, thinking: 0 });
     useChatStore.getState().setStreaming(sid, emitter, true);
     return;
   }
@@ -386,6 +478,9 @@ function dispatch(evt: SessionEvent): void {
     const chunk = p.chunk;
     if (!chunk) return;
     if (!emitter) return;
+    // 发送 tab 去重(R1-b 对偶):cli 桥把 token 转发为 stream:llm 后,发起 turn 的
+    // tab 已经在从自己的 /api/cli/chat SSE 渲染同一份文本 —— WS 这份丢弃。
+    if ((chunk.type === 'text' || chunk.type === 'thinking') && isCliSseTurnActive(sid, emitter)) return;
     let ctx = findStreamingAsst(sid, emitter);
     if (!ctx) {
       const msg = spawnStreamingAsst(sid, emitter, ts);
@@ -481,6 +576,12 @@ function dispatch(evt: SessionEvent): void {
         return { ...m, status: 'done', durationMs };
       });
     }
+    // 清掉本 turn 的封口游标 —— 按 (sid,emitter) 前缀全清,不依赖收尾时 findStreamingAsst
+    // 命中的还是 turnStart 那个 localMsgId:该气泡可能已被 reconcile 换了 id,或 snapshot
+    // (applyTurnSnapshot)用别的 id 建过键,delete-by-exact-id 会落空 → 逐 turn 残留累积
+    // (key 含唯一 localMsgId,永不复用)。一个 agent 同刻只跑一个 turn,前缀清扫只清本 turn。
+    const sealPrefix = `${sid}:${emitter}:`;
+    for (const k of _seals.keys()) if (k.startsWith(sealPrefix)) _seals.delete(k);
     chatTurnEnd(emitter, !p.error, p.error);
     useChatStore.getState().setStreaming(sid, emitter, false);
     if (!p.error && !p.aborted) useChatStore.getState().flushQueuedForAgent(sid, emitter);
@@ -488,6 +589,16 @@ function dispatch(evt: SessionEvent): void {
   }
 
   if (type === 'hook:assistantMessage') {
+    // per-step 收口 reconcile(D4):权威文本修正未封口尾部 —— cli 桥旁观 tab
+    // (直播期间没有 stream:llm 的场景)正是靠这里把整段文本补上。
+    if (emitter && !isCliSseTurnActive(sid, emitter)) {
+      const step = extractAuthoritative(payload);
+      if (step) {
+        const ctx = findStreamingAsst(sid, emitter) ??
+          { sid, agentId: emitter, msg: spawnStreamingAsst(sid, emitter, ts) };
+        reconcileAssistantStep(sid, emitter, ctx.msg, step, ts);
+      }
+    }
     const usage = payload.usage as { inputTokens?: number; outputTokens?: number } | undefined;
     const model = payload.model as string | undefined;
     if (usage && model) {
@@ -551,9 +662,78 @@ function dispatch(evt: SessionEvent): void {
   pushSystemMessage(sid, targetSlot, { text, direction, source: emitterId ? `${event.source ?? emitterId}(${type})` : `${event.source ?? type}`, from: emitterId, to, ts });
 }
 
+// ─── turn-snapshot / resume-gap(中途加入 + 断线续传,方案 §3.2/§3.3)──────────
+
+/** 中途加入补齐:按锚 upsert 一条 streaming 消息,text/thinking/toolCalls 整体
+ *  set + seal 基线。段序是近似(thinking→text→tools),收口 reconcile / 刷新后
+ *  WAL 回放保证最终一致(方案 §10.4)。 */
+function applyTurnSnapshot(frame: TurnSnapshotFrame): void {
+  const { sid, emitterId, payload: p } = frame;
+  if (!emitterId) return;
+  noteAppliedSeq(sid, p.sgen, p.seq);
+
+  const anchor = liveAnchor(emitterId, p.startedAt);
+  const toolCalls: ToolCall[] = (p.toolCalls ?? []).map((tc) => ({
+    callId: tc.callId,
+    name: tc.name,
+    args: tc.args ?? {},
+    status: tc.status === 'error' ? 'error' : tc.status === 'done' ? 'done' : 'running',
+  }));
+  let segments: ChatMessage['segments'] = [];
+  if (p.thinking) segments = appendChatSegment(segments ?? [], { kind: 'thinking', ts: p.startedAt, text: p.thinking });
+  if (p.text) segments = appendChatSegment(segments ?? [], { kind: 'text', ts: p.startedAt, text: p.text });
+  for (const tc of toolCalls) segments = upsertToolSegment(segments ?? [], p.startedAt, tc);
+
+  const store = useChatStore.getState();
+  const msgs = store.readMessages(sid, emitterId);
+  const existing = msgs.find((m) => m.msgId === anchor) ?? findStreamingAsst(sid, emitterId)?.msg;
+  let localId: string;
+  if (existing) {
+    localId = existing.id;
+    patchMsg(sid, emitterId, existing.id, (m) => ({
+      ...m,
+      msgId: anchor,
+      ts: p.startedAt,
+      text: p.text,
+      ...(p.thinking ? { thinking: p.thinking } : {}),
+      toolCalls,
+      segments,
+      status: 'streaming',
+    }));
+  } else {
+    const msg: ChatMessage = {
+      id: `s-${p.startedAt}-${Math.random().toString(36).slice(2, 8)}`,
+      role: 'assistant',
+      text: p.text,
+      ...(p.thinking ? { thinking: p.thinking } : {}),
+      toolCalls,
+      segments,
+      status: 'streaming',
+      ts: p.startedAt,
+      providerId: 'forgeax',
+      msgId: anchor,
+    };
+    store.patchMessages(sid, emitterId, (prev) => [...prev, msg]);
+    localId = msg.id;
+  }
+  _seals.set(sealKey(sid, emitterId, localId), { text: p.sealedTextLen, thinking: p.sealedThinkingLen });
+  store.setStreaming(sid, emitterId, true);
+}
+
+/** 断线超窗/server 换代:全量恢复(强制 WAL 重放,绕过 slot 保护)→ 放行缓冲帧。 */
+function handleResumeGap(frame: { sid: string }): void {
+  const { sid } = frame;
+  const agent = activeAgentForSid(sid);
+  const done = (): void => releaseGapBuffer(sid);
+  if (!agent) { done(); return; }
+  void useChatStore.getState().loadSession(sid, agent, { force: true }).then(done, done);
+}
+
 // ─── public boot hook ─────────────────────────────────────────────────────
 
 /** Boot 时调一次。重复调安全（按 key 注册，HMR 重载会覆盖旧 dispatch）。 */
 export function subscribeSessionStream(): void {
   onSessionEvent('session-stream', dispatch);
+  onTurnSnapshot('session-stream', applyTurnSnapshot);
+  onResumeGap('session-stream', handleResumeGap);
 }

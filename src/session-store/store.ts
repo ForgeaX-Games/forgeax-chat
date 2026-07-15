@@ -361,7 +361,7 @@ interface ChatStoreState {
   sendMessage: (text: string, opts?: SendMessageOpts) => Promise<void>;
 
   // ── WAL / replay history ──
-  loadSession: (sid: string, agentPath: string) => Promise<void>;
+  loadSession: (sid: string, agentPath: string, opts?: { force?: boolean }) => Promise<void>;
   loadThreadHistory: (threadId: string) => Promise<void>;
 
   // ── checkpoint rewind ──
@@ -432,7 +432,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     });
   },
 
-  loadSession: async (sid: string, agentPath: string) => {
+  loadSession: async (sid: string, agentPath: string, opts?: { force?: boolean }) => {
     // forgeax: each (sid, agentPath) has its own ledger
     //   `<sid>/agents/<agentPath>/events/events-N.jsonl` + blobs/.
     if (!sid || !agentPath) return;
@@ -440,13 +440,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       // Defense in depth: don't clobber a slot whose tail assistant is in a
       // non-terminal (streaming/error) state — in-memory is more recent than
       // the WAL (broken model / abort wrote user_input but no assistant_complete).
+      // 多 tab 同步:带身份锚(`live:` msgId)的在途流式气泡走 merge 保留(下方
+      // commit),不再挡整个回放 —— 否则中途加入的 tab 看不到历史;`force` 供
+      // resume-gap 全量恢复(server 已声明本地态陈旧)。
       const slotSnap = get().bySid[sid]?.messagesByAgent[agentPath] ?? [];
       const nonDaemon = slotSnap.filter((m) => !m.id.startsWith('daemon-tick-'));
       const tailAsst = [...nonDaemon].reverse().find((m) => m.role === 'assistant');
+      const tailAnchored = typeof tailAsst?.msgId === 'string' && tailAsst.msgId.startsWith('live:');
       const slotHasUnpersistedAsst =
         nonDaemon.length > 0 && tailAsst !== undefined &&
         (tailAsst.status === 'streaming' || tailAsst.status === 'error');
-      if (slotHasUnpersistedAsst) return;
+      if (slotHasUnpersistedAsst && !opts?.force && !(tailAsst.status === 'streaming' && tailAnchored)) return;
 
       const ndjson = await fetchSessionEventsNdjson(sid, agentPath);
       const rawEvents = parseEventLines(ndjson);
@@ -513,14 +517,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       finalizeStreamingStatus(messages);
 
       // Commit to bySid[sid].messagesByAgent[agentPath], preserving live
-      // daemon-tick-* bubbles already in the slot.
+      // daemon-tick-* bubbles + 带锚的在途流式气泡 (multi-tab §5.3) already in the slot.
       set((s) => {
         const conv = s.bySid[sid] ?? EMPTY_CONV;
         const prev = conv.messagesByAgent[agentPath] ?? [];
         const liveDaemonMsgs = prev.filter((mm) => mm.id.startsWith('daemon-tick-'));
-        const merged = liveDaemonMsgs.length === 0
+        const liveStreaming = prev.filter((mm) =>
+          mm.status === 'streaming' && typeof mm.msgId === 'string' && mm.msgId.startsWith('live:'));
+        const keep = [...liveDaemonMsgs, ...liveStreaming];
+        const merged = keep.length === 0
           ? messages
-          : [...messages, ...liveDaemonMsgs].sort((a, b) => a.ts - b.ts);
+          : [...messages, ...keep].sort((a, b) => a.ts - b.ts);
         return {
           bySid: {
             ...s.bySid,
@@ -532,6 +539,22 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           },
         };
       });
+
+      // 多 tab 同步:回放后把 cursor 回填到「与当前连接同代的最大 seq」,让直播帧
+      // 与回放重叠的部分被 seq 闸丢弃(方案 §3.5)。
+      try {
+        const { currentWsSgen, noteAppliedSeq } = await import('../session-bridge');
+        const wsSgen = currentWsSgen(sid);
+        if (wsSgen) {
+          let maxSeq = 0;
+          for (const ev of rawEvents) {
+            const evSgen = (ev as { sgen?: unknown }).sgen;
+            const evSeq = (ev as { seq?: unknown }).seq;
+            if (evSgen === wsSgen && typeof evSeq === 'number' && evSeq > maxSeq) maxSeq = evSeq;
+          }
+          if (maxSeq > 0) noteAppliedSeq(sid, wsSgen, maxSeq);
+        }
+      } catch { /* bridge unavailable (tests) — cursor backfill is best-effort */ }
     } catch (e) {
       console.warn('[chat.loadSession] failed', (e as Error).message);
     }
@@ -915,6 +938,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     }
 
     let res: Response;
+    // R1-b 对偶(多 tab 同步 §5.4):cli 桥会把 token 广播成 stream:llm,发起 turn 的
+    // 本 tab 已经在从 SSE 渲染同一份文本 —— 标记存续期,session-stream 丢 WS 那份。
+    markCliSseActive(startSid, activeAgent);
     try {
       res = await fetch('/api/cli/chat', {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -922,6 +948,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         signal,
       });
     } catch (e) {
+      clearCliSseActive(startSid, activeAgent);
       if ((e as Error).name === 'AbortError' || signal.aborted) {
         patchAsst((m) => (m.status === 'streaming' ? { ...m, status: 'done' } : m));
       } else {
@@ -930,12 +957,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       setStreaming(false); _abortByTab.delete(startSid); return;
     }
     if (!res.ok) {
+      clearCliSseActive(startSid, activeAgent);
       let body: { error?: string; hint?: string } = {};
       try { body = await res.json(); } catch { /* ignore */ }
       patchAsst((m) => ({ ...m, status: 'error', errorMessage: body.error ? `${res.status} ${body.error}${body.hint ? ` — ${body.hint}` : ''}` : `HTTP ${res.status}` }));
       setStreaming(false); _abortByTab.delete(startSid); return;
     }
     if (!res.body) {
+      clearCliSseActive(startSid, activeAgent);
       patchAsst((m) => ({ ...m, status: 'error', errorMessage: 'empty response body' }));
       setStreaming(false); _abortByTab.delete(startSid); return;
     }
@@ -1101,6 +1130,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         patchAsst((m) => ({ ...m, status: 'error', errorMessage: `stream error: ${(e as Error).message}` }));
       }
     } finally {
+      clearCliSseActive(startSid, activeAgent);
       flushSseTextBuf();
       flushSseDeltaBuf();
       mainAcc.flush();
@@ -1276,6 +1306,21 @@ export function markEmittedClientMsg(clientMsgId: string): void {
 export function isOwnUserInput(clientMsgId: string | undefined): boolean {
   if (!clientMsgId) return false;
   return _emittedClientMsgIds.includes(clientMsgId);
+}
+
+// ── cli-SSE turn dedupe (sendMessage cli 路径 → session-stream 丢 WS 副本) ────
+// cli 桥把 token 广播成 stream:llm(多 tab 同步 R1-b)后,发起 turn 的 tab 会同时
+// 从自己的 /api/cli/chat SSE 和 WS 收到同一份文本;SSE 存续期间置此标志,
+// session-stream 对该 (sid, agent) 丢弃 WS 的 text/thinking 与收口 reconcile。
+const _cliSseTurns = new Set<string>();
+export function markCliSseActive(sid: string, agentId: string): void {
+  _cliSseTurns.add(`${sid}::${agentId}`);
+}
+export function clearCliSseActive(sid: string, agentId: string): void {
+  _cliSseTurns.delete(`${sid}::${agentId}`);
+}
+export function isCliSseTurnActive(sid: string, agentId: string): boolean {
+  return _cliSseTurns.has(`${sid}::${agentId}`);
 }
 
 // ── registry GC: when L1 drops a session tab, tear down its chat-side state ──

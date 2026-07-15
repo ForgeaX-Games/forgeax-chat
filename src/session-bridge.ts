@@ -44,7 +44,36 @@ export interface SessionEvent {
     payload: Record<string, unknown>;
     to?: string;
     ts: number;
+    /** 多 tab 同步(§3.1):server EventBus 打的 per-session 单调序号 + 会话代。 */
+    seq?: number;
+    sgen?: string;
   };
+}
+
+/** 中途加入补齐帧(§3.2)—— server LiveTurnTracker 的在途 turn 快照。 */
+export interface TurnSnapshotFrame {
+  type: "turn-snapshot";
+  sid: string;
+  emitterId: string;
+  payload: {
+    turn: number;
+    startedAt: number;
+    seq: number;
+    sgen: string;
+    text: string;
+    thinking: string;
+    sealedTextLen: number;
+    sealedThinkingLen: number;
+    toolCalls: Array<{ callId: string; name: string; args?: unknown; status: "running" | "done" | "error" }>;
+  };
+}
+
+/** 断线续传超窗/换代(§3.3)—— 客户端需走全量恢复。 */
+export interface ResumeGapFrame {
+  type: "resume-gap";
+  sid: string;
+  sgen: string;
+  from: number;
 }
 
 export interface ForgeaXAgentNode {
@@ -167,10 +196,14 @@ export async function listSessionAgents(sid: string): Promise<ForgeaXAgentNode[]
 // ─── WebSocket bridge ────────────────────────────────────────────────────
 
 type SessionEventHandler = (event: SessionEvent) => void;
+type TurnSnapshotHandler = (frame: TurnSnapshotFrame) => void;
+type ResumeGapHandler = (frame: ResumeGapFrame) => void;
 let _ws: WebSocket | null = null;
 // handler 按 key 注册（不是匿名 Set），HMR 重载 session-stream.ts 时新 dispatch
 // 覆盖旧的，避免一份 event 被多份残留 handler 重复处理。
 const _wsHandlers = new Map<string, SessionEventHandler>();
+const _snapshotHandlers = new Map<string, TurnSnapshotHandler>();
+const _gapHandlers = new Map<string, ResumeGapHandler>();
 let _reconnectTimer: number | null = null;
 let _reconnectDelay = 1_000;  // 1s → 2 → 4 → 8 ... cap 30s
 const RECONNECT_MAX_MS = 30_000;
@@ -182,9 +215,70 @@ let _attachedSid: string | null = null;
  *  按这个值升级，避免 reconnect 跑回旧 sid。 */
 let _desiredSid: string | null = null;
 
+// ─── 多 tab 同步:per-sid cursor (sgen, lastAppliedSeq) + resume-gap 缓冲 ────
+//
+// cursor 是「本 tab 已应用到哪」的水位:dispatch 每应用一条带 seq 的事件就推进;
+// WAL 回放 / turn-snapshot 应用后由调用方 noteAppliedSeq 回填。重连 URL 带
+// since=<seq>&sgen=,server 从 ring buffer 补发;换代(sgen 变)= 全量恢复。
+
+interface SessionCursor { sgen: string; seq: number; }
+const _cursors = new Map<string, SessionCursor>();
+/** 最近一次 hello 帧报的 server 会话代(per sid)。 */
+const _helloSgen = new Map<string, string>();
+/** resume-gap 期间缓冲的帧:全量恢复(WAL 重放)完成前不应用,避免被回放覆盖。 */
+const _gapBuffers = new Map<string, Array<SessionEvent | TurnSnapshotFrame>>();
+
+/** dispatch 入口幂等闸(§3.5):true = 应用,false = 重复帧丢弃。顺手推进 cursor。 */
+export function gateSessionEvent(sid: string, sgen?: string, seq?: number): boolean {
+  if (typeof seq !== "number" || typeof sgen !== "string") return true; // 无 seq 旧事件,现状路径
+  const cur = _cursors.get(sid);
+  if (!cur || cur.sgen !== sgen) { _cursors.set(sid, { sgen, seq }); return true; } // 换代即换 cursor
+  if (seq <= cur.seq) return false;
+  cur.seq = seq;
+  return true;
+}
+
+/** WAL 回放 / 快照应用后回填水位(只升不降;sgen 不同则换代)。 */
+export function noteAppliedSeq(sid: string, sgen: string, seq: number): void {
+  const cur = _cursors.get(sid);
+  if (!cur || cur.sgen !== sgen) { _cursors.set(sid, { sgen, seq }); return; }
+  if (seq > cur.seq) cur.seq = seq;
+}
+
+/** 当前连接的 server 会话代(来自 hello 帧);loadSession 回放后按它筛 WAL 行回填 cursor。 */
+export function currentWsSgen(sid: string): string | null {
+  return _helloSgen.get(sid) ?? null;
+}
+
+/** resume-gap 全量恢复完成 → 按序放行缓冲帧(经 gate 幂等去重)。 */
+export function releaseGapBuffer(sid: string): void {
+  const buffered = _gapBuffers.get(sid);
+  _gapBuffers.delete(sid);
+  if (!buffered) return;
+  for (const frame of buffered) _routeFrame(frame);
+}
+
+function _routeFrame(frame: SessionEvent | TurnSnapshotFrame): void {
+  if (frame.type === "session-event") {
+    _wsHandlers.forEach((h) => {
+      try { h(frame); }
+      catch (err) { console.warn("[forgeax-bridge] handler threw", err); }
+    });
+  } else {
+    _snapshotHandlers.forEach((h) => {
+      try { h(frame); }
+      catch (err) { console.warn("[forgeax-bridge] snapshot handler threw", err); }
+    });
+  }
+}
+
 function wsUrl(sid: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/ws?sid=${encodeURIComponent(sid)}`;
+  let url = `${proto}//${location.host}/ws?sid=${encodeURIComponent(sid)}`;
+  // 断线续传(§3.3):有 cursor 才带 since —— 首连/换 sid 走全量(hello + 快照)。
+  const cur = _cursors.get(sid);
+  if (cur) url += `&since=${cur.seq}&sgen=${encodeURIComponent(cur.sgen)}`;
+  return url;
 }
 
 function _connectOnce(sid: string): void {
@@ -215,15 +309,29 @@ function _connectOnce(sid: string): void {
     if (_ws !== ws) return;  // late message from an orphaned socket — drop
     let obj: unknown;
     try { obj = JSON.parse(m.data as string); } catch { return; }
-    if (
-      typeof obj === "object" && obj !== null &&
-      (obj as { type?: string }).type === "session-event"
-    ) {
-      const e = obj as SessionEvent;
-      _wsHandlers.forEach((h) => {
-        try { h(e); }
-        catch (err) { console.warn("[forgeax-bridge] handler threw", err); }
+    if (typeof obj !== "object" || obj === null) return;
+    const frame = obj as { type?: string; sid?: string };
+
+    if (frame.type === "hello" && typeof frame.sid === "string") {
+      const sgen = (frame as { sgen?: string }).sgen;
+      if (typeof sgen === "string") _helloSgen.set(frame.sid, sgen);
+      return;
+    }
+    if (frame.type === "resume-gap" && typeof frame.sid === "string") {
+      // 后续帧先缓冲,等全量恢复(WAL 重放)完成再放行 —— 否则回放 commit 会覆盖它们。
+      _gapBuffers.set(frame.sid, []);
+      const gap = frame as ResumeGapFrame;
+      _gapHandlers.forEach((h) => {
+        try { h(gap); }
+        catch (err) { console.warn("[forgeax-bridge] gap handler threw", err); }
       });
+      return;
+    }
+    if (frame.type === "session-event" || frame.type === "turn-snapshot") {
+      const e = frame as SessionEvent | TurnSnapshotFrame;
+      const buffered = _gapBuffers.get(e.sid);
+      if (buffered) { buffered.push(e); return; }
+      _routeFrame(e);
     }
   });
   ws.addEventListener("close", () => {
@@ -291,6 +399,18 @@ export function disconnectForgeaXWs(): void {
 export function onSessionEvent(key: string, handler: SessionEventHandler): () => void {
   _wsHandlers.set(key, handler);
   return () => { _wsHandlers.delete(key); };
+}
+
+/** turn-snapshot 帧(中途加入补齐)。注册语义同 onSessionEvent。 */
+export function onTurnSnapshot(key: string, handler: TurnSnapshotHandler): () => void {
+  _snapshotHandlers.set(key, handler);
+  return () => { _snapshotHandlers.delete(key); };
+}
+
+/** resume-gap 帧(超窗/换代 → 调用方负责全量恢复后 releaseGapBuffer)。 */
+export function onResumeGap(key: string, handler: ResumeGapHandler): () => void {
+  _gapHandlers.set(key, handler);
+  return () => { _gapHandlers.delete(key); };
 }
 
 export function getForgeaXWsStatus(): { connected: boolean; sid: string | null } {

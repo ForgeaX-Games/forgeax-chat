@@ -42,9 +42,9 @@ interface AgentItem {
   // existing `.as-hint` toast ("cli daemon 未启动") instead of switching.
   placeholder?: boolean;
   // P3.91 — if the placeholder maps to a bus-registered plugin (cc-coder
-  // today, via the `agents_from_bus[]` payload), keep its pluginId so the
+  // today, via the `agents_from_bus[]` payload), keep its extensionId so the
   // ctrl/cmd+click deep-link can land on that specific row in Bus admin.
-  busPluginId?: string;
+  busExtensionId?: string;
 }
 
 // P3.18 — role-tribe key extraction (mirrors AgentsPanel/Sidebar.tsx roleKey).
@@ -376,7 +376,7 @@ export function AgentSwitcher() {
             const dl = e.ctrlKey || e.metaKey;
             if (dl) {
               emitDeepLink('bus:filter-kind', 'agent');
-              if (a.busPluginId) emitDeepLink('bus:expand-plugin', a.busPluginId);
+              if (a.busExtensionId) emitDeepLink('bus:expand-plugin', a.busExtensionId);
               openOverlay('settings', 'plugins');
               return;
             }
@@ -385,15 +385,15 @@ export function AgentSwitcher() {
               id: a.id,
               left: rect.left + rect.width / 2,
               top: rect.top,
-              text: a.busPluginId ? t('agentSwitcher.hintBusExpand') : t('agentSwitcher.hintBusList'),
+              text: a.busExtensionId ? t('agentSwitcher.hintBusExpand') : t('agentSwitcher.hintBusList'),
             });
           };
           return (
             <button
               key={a.id}
-              className={`as-avatar-btn ${isActive && !a.placeholder ? 'active is-active-emitter' : ''} ${a.placeholder ? 'placeholder' : ''} ${a.placeholder && a.busPluginId ? 'has-bus' : ''}`}
+              className={`as-avatar-btn ${isActive && !a.placeholder ? 'active is-active-emitter' : ''} ${a.placeholder ? 'placeholder' : ''} ${a.placeholder && a.busExtensionId ? 'has-bus' : ''}`}
               data-role={roleKey(a.role)}
-              data-bus-plugin-id={a.placeholder ? (a.busPluginId ?? '') : undefined}
+              data-bus-plugin-id={a.placeholder ? (a.busExtensionId ?? '') : undefined}
               onClick={a.placeholder
                 ? onPlaceholderClick
                 : () => {
@@ -412,7 +412,7 @@ export function AgentSwitcher() {
                     void setActiveEmitter(a.id);
                   }}
               title={a.placeholder
-                ? `${t('agentSwitcher.titlePlaceholder', { id: a.id, role: a.role })}${a.busPluginId ? t('agentSwitcher.titlePlaceholderExpand', { busPluginId: a.busPluginId }) : t('agentSwitcher.titlePlaceholderAgentKind')}`
+                ? `${t('agentSwitcher.titlePlaceholder', { id: a.id, role: a.role })}${a.busExtensionId ? t('agentSwitcher.titlePlaceholderExpand', { busExtensionId: a.busExtensionId }) : t('agentSwitcher.titlePlaceholderAgentKind')}`
                 : t('agentSwitcher.titleAgent', { id: a.id, role: a.role })}
               aria-label={a.id}
             >

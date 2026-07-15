@@ -47,7 +47,7 @@ interface CliProviderInfo {
 // it surfaces real bus skill triggers and lets the player insert them at the
 // textarea cursor without typing the full slash path.
 interface BusSkillRow {
-  pluginId: string;
+  extensionId: string;
   displayName: string;
   descZh: string;
   skillId: string;
@@ -69,7 +69,7 @@ interface AgentMentionRow {
   inBus: boolean;
   // P3.48 — bus plugin id (e.g. `@forgeax-plugin/agent-cc-coder`) when inBus,
   // enabling per-row Bus admin deep-link via pendingBusExpandId pipeline.
-  busPluginId?: string;
+  busExtensionId?: string;
 }
 
 // P2.7d — bus cli-provider ids follow `@forgeax-plugin/cli-{providerId}` (see
@@ -351,7 +351,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
         for (const s of skills) {
           if (!s.trigger) continue;
           rows.push({
-            pluginId: item.id,
+            extensionId: item.id,
             displayName: pickLang(item.displayName, getLocale(), item.id),
             descZh: pickLang(item.description, getLocale(), ''),
             skillId: s.id,
@@ -368,7 +368,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
             if (!cmd.hasExecute) continue;
             if (cmd.name.startsWith('_error:')) continue;
             rows.push({
-              pluginId: 'server',
+              extensionId: 'server',
               displayName: cmd.name,
               descZh: cmd.description,
               skillId: cmd.name,
@@ -391,11 +391,11 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
       if (!res.ok) throw new Error(`GET /api/workbench/agents → ${res.status}`);
       const data = (await res.json()) as {
         agents?: Array<{ id: string; name: string; naming?: { title: string; sub: string }; role: string; avatar: string; isMain: boolean }>;
-        agents_from_bus?: Array<{ id: string; name: string; naming?: { title: string; sub: string }; role: string; avatar: string; pluginId?: string }>;
+        agents_from_bus?: Array<{ id: string; name: string; naming?: { title: string; sub: string }; role: string; avatar: string; extensionId?: string }>;
       };
-      const busPluginIds = new Map<string, string>();
+      const busExtensionIds = new Map<string, string>();
       for (const a of data.agents_from_bus ?? []) {
-        if (a.pluginId) busPluginIds.set(a.id, a.pluginId);
+        if (a.extensionId) busExtensionIds.set(a.id, a.extensionId);
       }
       const rows: AgentMentionRow[] = [];
       const seen = new Set<string>();
@@ -407,8 +407,8 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
           role: a.role,
           avatar: a.avatar,
           isMain: !!a.isMain,
-          inBus: busPluginIds.has(a.id),
-          busPluginId: busPluginIds.get(a.id),
+          inBus: busExtensionIds.has(a.id),
+          busExtensionId: busExtensionIds.get(a.id),
         });
         seen.add(a.id);
       }
@@ -422,7 +422,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
           avatar: a.avatar,
           isMain: false,
           inBus: true,
-          busPluginId: a.pluginId,
+          busExtensionId: a.extensionId,
         });
       }
       setAgentMentions(rows);
@@ -792,17 +792,17 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   // pendingBusExpandId pipeline (P2.7f) shared with cb-mbsel-arrow / wb-* tab
   // placeholder / AgentsPanel bus pill / cli dropdown so popover deep-links
   // feel identical across all surfaces.
-  const openInBusAdmin = (pluginId: string) => {
-    emitDeepLink('bus:expand-plugin', pluginId);
+  const openInBusAdmin = (extensionId: string) => {
+    emitDeepLink('bus:expand-plugin', extensionId);
     openOverlay('settings', 'plugins');
     setAtOpen(false);
     setSlashOpen(false);
   };
-  const onArrowKey = (e: React.KeyboardEvent<HTMLSpanElement>, pluginId: string) => {
+  const onArrowKey = (e: React.KeyboardEvent<HTMLSpanElement>, extensionId: string) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       e.stopPropagation();
-      openInBusAdmin(pluginId);
+      openInBusAdmin(extensionId);
     }
   };
 
@@ -1127,15 +1127,15 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
                     <span className="cb-at-name">{resolveNaming(a).title}</span>
                     <span className="cb-at-role">{resolveNaming(a).sub || a.role}</span>
                     {a.inBus && <span className="cb-at-bus-pill" aria-label="bus host">bus</span>}
-                    {a.inBus && a.busPluginId && (
+                    {a.inBus && a.busExtensionId && (
                       <span
                         className="cb-at-arrow"
                         role="button"
                         tabIndex={0}
-                        aria-label={t('composer.viewInBusAria', { plugin: a.busPluginId })}
-                        title={t('composer.viewInBusTitle', { plugin: a.busPluginId })}
-                        onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(a.busPluginId!); }}
-                        onKeyDown={(e) => onArrowKey(e, a.busPluginId!)}
+                        aria-label={t('composer.viewInBusAria', { plugin: a.busExtensionId })}
+                        title={t('composer.viewInBusTitle', { plugin: a.busExtensionId })}
+                        onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(a.busExtensionId!); }}
+                        onKeyDown={(e) => onArrowKey(e, a.busExtensionId!)}
                       >→</span>
                     )}
                   </button>
@@ -1173,15 +1173,15 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
                 </div>
                 {filteredSkills.map((s, i) => (
                   <button
-                    key={`${s.pluginId}:${s.skillId}`}
+                    key={`${s.extensionId}:${s.skillId}`}
                     type="button"
                     role="menuitem"
                     className={`cb-slash-item${slashFocused === i ? ' is-active' : ''}`}
                     onMouseEnter={() => setSlashFocused(i)}
                     title={
                       s.descZh
-                        ? t('composer.slashItemDescTitle', { name: s.displayName, plugin: s.pluginId, desc: s.descZh, trigger: s.trigger })
-                        : t('composer.slashItemTitle', { name: s.displayName, plugin: s.pluginId, trigger: s.trigger })
+                        ? t('composer.slashItemDescTitle', { name: s.displayName, plugin: s.extensionId, desc: s.descZh, trigger: s.trigger })
+                        : t('composer.slashItemTitle', { name: s.displayName, plugin: s.extensionId, trigger: s.trigger })
                     }
                     onClick={() => insertSkillTrigger(s.trigger)}
                   >
@@ -1196,10 +1196,10 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
                       className="cb-slash-arrow"
                       role="button"
                       tabIndex={0}
-                      aria-label={t('composer.viewInBusAria', { plugin: s.pluginId })}
-                      title={t('composer.viewInBusTitle', { plugin: s.pluginId })}
-                      onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(s.pluginId); }}
-                      onKeyDown={(e) => onArrowKey(e, s.pluginId)}
+                      aria-label={t('composer.viewInBusAria', { plugin: s.extensionId })}
+                      title={t('composer.viewInBusTitle', { plugin: s.extensionId })}
+                      onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(s.extensionId); }}
+                      onKeyDown={(e) => onArrowKey(e, s.extensionId)}
                     >→</span>
                   </button>
                 ))}

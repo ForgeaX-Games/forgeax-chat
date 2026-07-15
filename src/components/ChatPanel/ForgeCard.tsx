@@ -79,11 +79,11 @@ function formatCost(usd: number): string {
 // admin panel for the cli-provider plugin that produced this turn. Reuses
 // the pendingBusKindFilter + pendingBusExpandId pipeline (P3.65/67/68) so a
 // player one-clicks from any chat message to that cli's plugin row in Bus.
-function useProviderBusDeepLink(): (pluginId: string) => void {
+function useProviderBusDeepLink(): (extensionId: string) => void {
   const openOverlay = useShellStore((s) => s.openOverlay);
-  return (pluginId: string) => {
+  return (extensionId: string) => {
     emitDeepLink('bus:filter-kind', 'cli-provider');
-    emitDeepLink('bus:expand-plugin', pluginId);
+    emitDeepLink('bus:expand-plugin', extensionId);
     openOverlay('settings', 'plugins');
   };
 }

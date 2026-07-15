@@ -63,9 +63,9 @@ export function SubAgentCard({ run, parentAgentId }: { run: SubAgentRun; parentA
   // P3.77 — mirror ForgeCard's provider-pill deep-link. SubAgentCard header
   // is also a <button>, so the pill renders as span-with-role inside.
   const openOverlay = useShellStore((s) => s.openOverlay);
-  const onProviderBusDeepLink = (pluginId: string) => {
+  const onProviderBusDeepLink = (extensionId: string) => {
     emitDeepLink('bus:filter-kind', 'cli-provider');
-    emitDeepLink('bus:expand-plugin', pluginId);
+    emitDeepLink('bus:expand-plugin', extensionId);
     openOverlay('settings', 'plugins');
   };
   const resolveName = useAgentNames();

@@ -6,13 +6,22 @@
  *    {allow:true, answers:{[question]:label}},server 经 MCP 注入 updatedInput.answers
  *    给模型(否则只拿到 allow 会得到"没有答案")。
  *
- *  不点就一直挂着(server 10min 超时 fail-closed=拒绝);turn 中止会自动清卡。 */
+ *  不点就一直挂着(server 10min 超时 fail-closed=拒绝);turn 中止会自动清卡。
+ *
+ *  长命令默认折叠:展开后仍限高可滚,收起按钮永远贴在命令块下方(Allow/Deny 上方),
+ *  避免整段命令把审批按钮顶出视口后无法收回。 */
 
 import { useEffect, useState, type ReactElement } from 'react';
 import { ShieldAlert, HelpCircle, Check, X, Loader2 } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
 import { useShellStore } from '@forgeax/interface/store';
 import { usePendingPermission, clearPendingPermission } from '@forgeax/interface/lib/permission-stream';
+
+/** Preview budget for the folded command body. Past this → show expand/collapse. */
+const CMD_PREVIEW_CHARS = 360;
+const CMD_PREVIEW_LINES = 6;
+/** Even when expanded, never let the command body eat the chat panel. */
+const CMD_EXPANDED_MAX_HEIGHT = 'min(40vh, 280px)';
 
 interface AskQuestion {
   question: string;
@@ -28,6 +37,19 @@ function readQuestions(input: unknown): AskQuestion[] {
   return qs.filter((q): q is AskQuestion => !!q && typeof q === 'object' && typeof (q as AskQuestion).question === 'string');
 }
 
+function isLongCommand(cmd: string): boolean {
+  return cmd.length > CMD_PREVIEW_CHARS || cmd.split('\n').length > CMD_PREVIEW_LINES;
+}
+
+function foldCommand(cmd: string): string {
+  const lines = cmd.split('\n');
+  if (lines.length > CMD_PREVIEW_LINES) {
+    return `${lines.slice(0, CMD_PREVIEW_LINES).join('\n')}\n…`;
+  }
+  if (cmd.length > CMD_PREVIEW_CHARS) return `${cmd.slice(0, CMD_PREVIEW_CHARS)}…`;
+  return cmd;
+}
+
 export function PermissionPrompt(): ReactElement | null {
   const { t } = useTranslation();
   const activeSid = useShellStore((s) => s.activeSid);
@@ -37,8 +59,15 @@ export function PermissionPrompt(): ReactElement | null {
   const [picks, setPicks] = useState<Record<number, string[]>>({});
   // 「记住本会话」勾选(仅 trust-gate ask 卡 canRemember 时可见)。
   const [remember, setRemember] = useState(false);
+  // Long command body fold — reset per request so a new prompt starts collapsed.
+  const [cmdExpanded, setCmdExpanded] = useState(false);
 
-  useEffect(() => { setPicks({}); setBusy(false); setRemember(false); }, [pending?.reqId]);
+  useEffect(() => {
+    setPicks({});
+    setBusy(false);
+    setRemember(false);
+    setCmdExpanded(false);
+  }, [pending?.reqId]);
 
   if (!activeSid || !pending) return null;
 
@@ -81,6 +110,9 @@ export function PermissionPrompt(): ReactElement | null {
   };
 
   const accent = askable ? 'var(--color-kind-cli-provider, #6db3f2)' : 'var(--color-status-amber, #d8a200)';
+  const command = pending.command || pending.toolName;
+  const cmdFoldable = !askable && isLongCommand(command);
+  const cmdFolded = cmdFoldable && !cmdExpanded;
 
   return (
     <div
@@ -152,7 +184,26 @@ export function PermissionPrompt(): ReactElement | null {
             display: 'block', padding: '6px 8px', borderRadius: 6,
             background: 'var(--color-bg-base, #0e0e0e)', color: 'var(--color-text-primary, #ddd)',
             wordBreak: 'break-all', whiteSpace: 'pre-wrap',
-          }}>{pending.command || pending.toolName}</code>
+            ...(cmdExpanded && cmdFoldable
+              ? { maxHeight: CMD_EXPANDED_MAX_HEIGHT, overflow: 'auto' }
+              : null),
+          }}>{cmdFolded ? foldCommand(command) : command}</code>
+          {cmdFoldable && (
+            <button
+              type="button"
+              onClick={() => setCmdExpanded((v) => !v)}
+              style={{
+                alignSelf: 'center', cursor: 'pointer',
+                padding: '3px 12px', borderRadius: 12, fontSize: 11, fontWeight: 600,
+                border: '1px solid rgba(216, 162, 0, 0.4)',
+                background: 'rgba(216, 162, 0, 0.12)', color: accent,
+              }}
+            >
+              {cmdExpanded
+                ? t('permission.collapse')
+                : t('permission.expand', { count: command.length })}
+            </button>
+          )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end' }}>
             {pending.canRemember && (
               <label style={{ marginRight: 'auto', display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, opacity: 0.85, cursor: 'pointer' }}>

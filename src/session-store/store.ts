@@ -866,9 +866,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     };
     const setStreaming = (val: boolean): void => get().setStreaming(startSid, activeAgent, val);
 
+    // Composer may fold big pastes into paste-pills; expand before display + send
+    // so the transcript shows the original text (model already receives expandPills).
+    const displayText = expandPills(trimmed);
+
     // ── Interrupt-send (steer) ──
     if (opts?.handoff === 'steer') {
-      const steerUserMsg: ChatMessage = { id: newId(), role: 'user', text: trimmed, toolCalls: [], status: 'done', ts: Date.now() };
+      const steerUserMsg: ChatMessage = { id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now() };
       get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, steerUserMsg]);
       try {
         const { emitForgeaXMessage } = await import('../session-bridge');
@@ -877,7 +881,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         markEmittedClientMsg(clientMsgId);
         const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
-        const r = await emitForgeaXMessage(startSid, expandPills(trimmed), {
+        const r = await emitForgeaXMessage(startSid, displayText, {
           to: candidate,
           payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
           handoff: 'steer',
@@ -891,7 +895,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       return;
     }
 
-    const userMsg: ChatMessage = { id: newId(), role: 'user', text: trimmed, toolCalls: [], status: 'done', ts: Date.now() };
+    const userMsg: ChatMessage = { id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now() };
     const asstMsg: ChatMessage = { id: newId(), role: 'assistant', text: '', toolCalls: [], status: 'streaming', ts: Date.now() };
     const old = _abortByTab.get(startSid);
     if (old) old.abort();
@@ -901,7 +905,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
     // Optimistic push into the target agent's slot + auto-title.
     if (startTab && !startTab.displayName) {
-      useShellStore.getState().renameTab(startSid, expandPills(trimmed).slice(0, 40).replace(/\s+/g, ' '));
+      useShellStore.getState().renameTab(startSid, displayText.slice(0, 40).replace(/\s+/g, ' '));
     }
     get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, userMsg, asstMsg]);
     setStreaming(true);
@@ -918,7 +922,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         markEmittedClientMsg(clientMsgId);
         const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
-        const r = await emitForgeaXMessage(startSid, expandPills(trimmed), {
+        const r = await emitForgeaXMessage(startSid, displayText, {
           to: candidate,
           payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
         });
@@ -944,7 +948,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     try {
       res = await fetch('/api/cli/chat', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: expandPills(trimmed), agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(turnOverride ? { providerOverride: turnOverride } : {}) }),
+        body: JSON.stringify({ message: displayText, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(turnOverride ? { providerOverride: turnOverride } : {}) }),
         signal,
       });
     } catch (e) {

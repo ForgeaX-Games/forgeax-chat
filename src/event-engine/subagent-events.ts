@@ -1,7 +1,7 @@
 /**
  * Subagent event handling — formatters and accumulator helpers for subagent
  * lifecycle events (launched, task, result, error). Ported verbatim from
- * forgeax-cli's `src/channels/ink-renderer/lib/subagent-events.ts`; only
+ * @forgeax/orchestrator's `src/channels/ink-renderer/lib/subagent-events.ts`; only
  * import paths and quote style changed.
  *
  * Rendering is driven entirely by subagent_launched / subagent_result /

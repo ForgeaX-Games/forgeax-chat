@@ -1,5 +1,5 @@
 /**
- * Renderer event-engine types — ported from forgeax-cli's
+ * Renderer event-engine types — ported from @forgeax/orchestrator's
  * `src/channels/ink-renderer/types.ts`. Trimmed to the data model only;
  * ink-specific types (InputSegment / OverlayRequest / SlashCommand /
  * RendererCallbacks / RendererDataSource) are dropped because the web UI
@@ -12,7 +12,7 @@
  * TurnAccumulator.feed(storedEvent).
  */
 
-// ── StoredEvent — raw EventBus event shape (forgeax-cli native) ──
+// ── StoredEvent — raw EventBus event shape (@forgeax/orchestrator native) ──
 
 export interface StoredEvent {
   type: string;

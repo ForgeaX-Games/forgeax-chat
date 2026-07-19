@@ -2,7 +2,7 @@
  * TurnAccumulator — pure-logic state machine for building CompletedTurn[]
  * from a stream of StoredEvent records.
  *
- * Ported from forgeax-cli's `src/channels/ink-renderer/lib/turn-accumulator.ts`
+ * Ported from @forgeax/orchestrator's `src/channels/ink-renderer/lib/turn-accumulator.ts`
  * with one web adaptation: the original ContextRing dependency (an ink-only
  * ANSI status bar widget) is replaced by a small inline `ratioFromAssistantMessage`
  * helper backed by a hardcoded model→contextWindow map. The UI calls

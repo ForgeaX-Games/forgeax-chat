@@ -43,6 +43,7 @@ import {
   parseEventLines,
   trimToCompactBoundary,
 } from '../event-engine/event-replay';
+import { hydrateLedgerBlobs } from '../event-engine/ledger-blob-hydration';
 import { applyRewindMask, findPendingRewind } from '../event-engine/rewind-mask';
 import {
   buildMainCallbacks,
@@ -66,6 +67,10 @@ export interface QueuedMessage {
 export interface SendMessageOpts {
   handoff?: 'steer';
   attachments?: Array<Record<string, unknown>>;
+  /** Internal target pin used after async preparation and queue flushes. */
+  target?: { sid: string; agentId: string };
+  /** Internal acceptance callback; invoked after the pinned target is validated. */
+  onAccepted?: () => void;
 }
 
 /** checkpoint 软回退挂起态(Cursor 语义)。非 null = 被回退段置灰显示中。 */
@@ -117,8 +122,12 @@ function newId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
-/** Per-sid AbortController for the in-flight cli-provider SSE fetch. */
-const _abortByTab = new Map<string, AbortController>();
+/** Per-sid owner of the in-flight turn controller. */
+interface TurnController {
+  controller: AbortController;
+  agentId: string;
+}
+const _abortByTab = new Map<string, TurnController>();
 
 /** EventSource tails opened by loadThreadHistory for runs still streaming. */
 const _tailsByTab = new Map<string, Set<EventSource>>();
@@ -339,6 +348,23 @@ async function fetchSessionEventsNdjson(sid: string, agentPath: string): Promise
   }
 }
 
+async function fetchSessionBlob(sid: string, agentPath: string, sha256: string): Promise<Uint8Array> {
+  const response = await fetch('/api/commands/fetch_blob/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ args: [sid, agentPath, sha256] }),
+  });
+  if (!response.ok) throw new Error(`fetch_blob returned ${response.status}`);
+  const raw = (await response.json()) as {
+    data?: { data?: string };
+    result?: { ok?: boolean; data?: { data?: string } };
+  };
+  const base64 = raw.result?.data?.data ?? raw.data?.data;
+  if (!base64) throw new Error('fetch_blob returned no data');
+  const binary = atob(base64);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
 // ── Store shape ──────────────────────────────────────────────────────────────
 
 interface ChatStoreState {
@@ -454,6 +480,18 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
       const ndjson = await fetchSessionEventsNdjson(sid, agentPath);
       const rawEvents = parseEventLines(ndjson);
+      await hydrateLedgerBlobs(
+        rawEvents,
+        (blob) => fetchSessionBlob(sid, agentPath, blob.sha256),
+        {
+          onError: (blob, error) => {
+            console.warn(
+              `[chat.loadSession] failed to hydrate blob sid=${sid} agent=${agentPath} sha=${blob.sha256}`,
+              error instanceof Error ? error.message : String(error),
+            );
+          },
+        },
+      );
       const pendingRw = findPendingRewind(rawEvents);
       const events = trimToCompactBoundary(
         applyRewindMask(rawEvents, pendingRw ? { keepBoundaryVisible: pendingRw.boundaryId } : {}),
@@ -706,15 +744,18 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
   flushQueuedForAgent: (sid, agentId) => {
     const key = `${sid}::${agentId}`;
-    const cur = get().queuedMessages[key] ?? [];
-    if (cur.length === 0) return;
-    const [head, ...rest] = cur;
-    set((s) => ({ queuedMessages: { ...s.queuedMessages, [key]: rest } }));
-    // Re-send through the normal path. flushQueuedForAgent only fires from a
-    // natural turnEnd (session-stream), at which point the agent is no longer
-    // streaming, so sendMessage starts a fresh turn — strictly sequential,
-    // one-turn-per-message processing.
-    void get().sendMessage(head.text);
+    const head = get().queuedMessages[key]?.[0];
+    if (!head) return;
+    // Keep the item until sendMessage validates and accepts the pinned target.
+    // Invalid/stale targets therefore leave the queue intact for recovery.
+    void get().sendMessage(head.text, {
+      target: { sid, agentId },
+      onAccepted: () => set((s) => {
+        const cur = s.queuedMessages[key] ?? [];
+        if (cur[0]?.id !== head.id) return {};
+        return { queuedMessages: { ...s.queuedMessages, [key]: cur.slice(1) } };
+      }),
+    });
   },
 
   cancelStream: () => {
@@ -723,7 +764,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const conv = get().bySid[sid];
 
     const c = _abortByTab.get(sid);
-    if (c) { c.abort(); _abortByTab.delete(sid); }
+    if (c) c.controller.abort();
 
     const runId = conv?.runId ?? null;
     if (runId) {
@@ -752,11 +793,18 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // directive into composeTurnRequest's dynamicSuffix, keeping the visible
     // user message clean (no directive leaks into the bubble or replay history).
     const replyLanguage = resolveReplyLanguage(trimmed);
-    const { sid: startSid } = activeTarget();
+    const target = opts?.target ?? activeTarget();
+    const startSid = target.sid;
     if (!startSid) { console.warn('[chat.sendMessage] no active session'); return; }
     const app = useShellStore.getState();
     const startTab = app.tabs.find((tb) => tb.sid === startSid);
-    const sysAgent = startTab?.agentId ?? '__none__';
+    const targetAgent = target.agentId ?? startTab?.agentId ?? null;
+    if (opts?.target && (!startTab || startTab.agentId !== targetAgent)) {
+      console.warn('[chat.sendMessage] target no longer owns session', opts.target);
+      return;
+    }
+    opts?.onAccepted?.();
+    const sysAgent = targetAgent ?? '__none__';
     const pushSys = (txt: string): void =>
       get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
         id: newId(), role: 'system', text: txt, toolCalls: [], status: 'done', ts: Date.now(),
@@ -848,7 +896,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // Resolve the chat target — @mention overrides the tab's pinned agent.
     const mentionMatch = trimmed.match(/^@([a-zA-Z][a-zA-Z0-9_-]{0,39})\s+/);
     const mentionedAgent = mentionMatch?.[1];
-    const agentId = mentionedAgent ?? startTab?.agentId ?? null;
+    const agentId = mentionedAgent ?? targetAgent;
     if (!agentId) { pushSys(t('store.noAgentSelected')); return; }
     const activeAgent = agentId;
 
@@ -866,9 +914,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     };
     const setStreaming = (val: boolean): void => get().setStreaming(startSid, activeAgent, val);
 
+    // Composer may fold big pastes into paste-pills; expand before display + send
+    // so the transcript shows the original text (model already receives expandPills).
+    const displayText = expandPills(trimmed);
+
     // ── Interrupt-send (steer) ──
     if (opts?.handoff === 'steer') {
-      const steerUserMsg: ChatMessage = { id: newId(), role: 'user', text: trimmed, toolCalls: [], status: 'done', ts: Date.now() };
+      const steerUserMsg: ChatMessage = { id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now() };
       get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, steerUserMsg]);
       try {
         const { emitForgeaXMessage } = await import('../session-bridge');
@@ -877,7 +929,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         markEmittedClientMsg(clientMsgId);
         const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
-        const r = await emitForgeaXMessage(startSid, expandPills(trimmed), {
+        const r = await emitForgeaXMessage(startSid, displayText, {
           to: candidate,
           payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
           handoff: 'steer',
@@ -891,17 +943,27 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       return;
     }
 
-    const userMsg: ChatMessage = { id: newId(), role: 'user', text: trimmed, toolCalls: [], status: 'done', ts: Date.now() };
+    const userMsg: ChatMessage = { id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now() };
     const asstMsg: ChatMessage = { id: newId(), role: 'assistant', text: '', toolCalls: [], status: 'streaming', ts: Date.now() };
     const old = _abortByTab.get(startSid);
-    if (old) old.abort();
+    if (old) {
+      old.controller.abort();
+      get().setStreaming(startSid, old.agentId, false);
+    }
     const aborter = new AbortController();
-    _abortByTab.set(startSid, aborter);
+    const turnController: TurnController = { controller: aborter, agentId: activeAgent };
+    _abortByTab.set(startSid, turnController);
     const signal = aborter.signal;
+    const ownsAborter = (): boolean => _abortByTab.get(startSid) === turnController;
+    const finishTurn = (): void => {
+      if (!ownsAborter()) return;
+      _abortByTab.delete(startSid);
+      setStreaming(false);
+    };
 
     // Optimistic push into the target agent's slot + auto-title.
     if (startTab && !startTab.displayName) {
-      useShellStore.getState().renameTab(startSid, expandPills(trimmed).slice(0, 40).replace(/\s+/g, ' '));
+      useShellStore.getState().renameTab(startSid, displayText.slice(0, 40).replace(/\s+/g, ' '));
     }
     get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, userMsg, asstMsg]);
     setStreaming(true);
@@ -918,7 +980,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         markEmittedClientMsg(clientMsgId);
         const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
-        const r = await emitForgeaXMessage(startSid, expandPills(trimmed), {
+        const r = await emitForgeaXMessage(startSid, displayText, {
           to: candidate,
           payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
         });
@@ -931,9 +993,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         patchAsst((m) => ({ ...m, providerId: m.providerId ?? 'forgeax' }));
       } catch (err) {
         patchAsst((m) => ({ ...m, status: 'error', errorMessage: `forgeax emit failed: ${(err as Error).message}` }));
-        setStreaming(false);
+        finishTurn();
       }
-      _abortByTab.delete(startSid);
+      if (ownsAborter()) _abortByTab.delete(startSid);
       return;
     }
 
@@ -944,7 +1006,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     try {
       res = await fetch('/api/cli/chat', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: expandPills(trimmed), agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(turnOverride ? { providerOverride: turnOverride } : {}) }),
+        body: JSON.stringify({ message: displayText, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
         signal,
       });
     } catch (e) {
@@ -954,19 +1016,19 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       } else {
         patchAsst((m) => ({ ...m, status: 'error', errorMessage: `network error: ${(e as Error).message}` }));
       }
-      setStreaming(false); _abortByTab.delete(startSid); return;
+      finishTurn(); return;
     }
     if (!res.ok) {
       clearCliSseActive(startSid, activeAgent);
       let body: { error?: string; hint?: string } = {};
       try { body = await res.json(); } catch { /* ignore */ }
       patchAsst((m) => ({ ...m, status: 'error', errorMessage: body.error ? `${res.status} ${body.error}${body.hint ? ` — ${body.hint}` : ''}` : `HTTP ${res.status}` }));
-      setStreaming(false); _abortByTab.delete(startSid); return;
+      finishTurn(); return;
     }
     if (!res.body) {
       clearCliSseActive(startSid, activeAgent);
       patchAsst((m) => ({ ...m, status: 'error', errorMessage: 'empty response body' }));
-      setStreaming(false); _abortByTab.delete(startSid); return;
+      finishTurn(); return;
     }
 
     const isMain = (eid: unknown): boolean => !eid || eid === agentId || (agentId === 'forgeax' && eid === 'admin');
@@ -1137,8 +1199,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       for (const acc of subAccs.values()) acc.flush();
       patchAsst((m) => (m.status === 'streaming' ? { ...m, status: 'done' } : m));
       for (const eid of subAccs.keys()) patchSub(eid, (r) => (r.status === 'streaming' ? { ...r, status: 'done' } : r));
-      _abortByTab.delete(startSid);
-      setStreaming(false);
+      finishTurn();
     }
   },
 
@@ -1312,15 +1373,19 @@ export function isOwnUserInput(clientMsgId: string | undefined): boolean {
 // cli 桥把 token 广播成 stream:llm(多 tab 同步 R1-b)后,发起 turn 的 tab 会同时
 // 从自己的 /api/cli/chat SSE 和 WS 收到同一份文本;SSE 存续期间置此标志,
 // session-stream 对该 (sid, agent) 丢弃 WS 的 text/thinking 与收口 reconcile。
-const _cliSseTurns = new Set<string>();
+const _cliSseTurns = new Map<string, number>();
 export function markCliSseActive(sid: string, agentId: string): void {
-  _cliSseTurns.add(`${sid}::${agentId}`);
+  const key = `${sid}::${agentId}`;
+  _cliSseTurns.set(key, (_cliSseTurns.get(key) ?? 0) + 1);
 }
 export function clearCliSseActive(sid: string, agentId: string): void {
-  _cliSseTurns.delete(`${sid}::${agentId}`);
+  const key = `${sid}::${agentId}`;
+  const remaining = (_cliSseTurns.get(key) ?? 0) - 1;
+  if (remaining > 0) _cliSseTurns.set(key, remaining);
+  else _cliSseTurns.delete(key);
 }
 export function isCliSseTurnActive(sid: string, agentId: string): boolean {
-  return _cliSseTurns.has(`${sid}::${agentId}`);
+  return (_cliSseTurns.get(`${sid}::${agentId}`) ?? 0) > 0;
 }
 
 // ── registry GC: when L1 drops a session tab, tear down its chat-side state ──
@@ -1333,7 +1398,7 @@ useShellStore.subscribe((s) => {
   if (removed.length === 0) return;
   for (const sid of removed) {
     const c = _abortByTab.get(sid);
-    if (c) { c.abort(); _abortByTab.delete(sid); }
+    if (c) c.controller.abort();
     closeThreadHistoryTails(sid);
     useChatStore.setState((cs) => {
       if (!(sid in cs.bySid)) {

@@ -1,5 +1,5 @@
 // Minimal markdown renderer for assistant text. No external deps; handles the
-// patterns that appear in forgeax-cli output: bold/italic, inline code, fenced
+// patterns that appear in @forgeax/orchestrator output: bold/italic, inline code, fenced
 // code blocks, headings, ordered/unordered lists, blockquotes, links, hr.
 // When the agent emits richer markdown we'll graduate to react-markdown — until
 // then, the goal is "make `**bold**` actually bold" without pulling in a tree.
@@ -80,7 +80,7 @@ function parseTableAligns(sepRow: string): Array<'left'|'center'|'right'> {
 }
 
 // Heuristic: detect "self-correction / second thought" paragraphs that
-// forgeax-cli produces between hook:assistantMessage steps. Two tiers reduce
+// @forgeax/orchestrator produces between hook:assistantMessage steps. Two tiers reduce
 // false positives: STRONG markers ("我错了", "let me redo", "ごめん") are
 // high-confidence alone; SOFT markers ("其实", "等等", "espera,") need
 // corroboration ("错", "重新", "equivoqué", etc.) in the first 200 chars,

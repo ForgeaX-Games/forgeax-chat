@@ -38,6 +38,23 @@ function buildPastedTextPill(text: string, id: number): PillPayload {
   };
 }
 
+/** Build a pill for a text file dropped/pasted into the composer. Same
+ *  machinery as the folded-paste pill, but labeled with the filename and with
+ *  `detail` prefixed by a file header so the model knows where the text came
+ *  from. `expandPills()` on send restores the whole thing verbatim. */
+export function buildPastedFilePill(name: string, text: string): PillPayload {
+  const numLines = text.split(/\r\n|\r|\n/).length;
+  const previewLines = text.split(/\r\n|\r|\n/).slice(0, 6);
+  const preview = previewLines.join('\n') + (previewLines.length < numLines ? '\n…' : '');
+  return {
+    kind: 'paste',
+    display: `${name} (${numLines} lines)`,
+    icon: '📄',
+    detail: `[Attached file: ${name}]\n${text}`,
+    tooltip: { title: `📄 ${name}`, lines: [`${text.length} chars`, '---', preview] },
+  };
+}
+
 /** Next paste id for the current buffer: 1 + the max existing "Pasted text #N"
  *  chip in `root`. Numbering restarts per message (buffer clears on send), and
  *  never collides within a message. */
@@ -69,8 +86,9 @@ interface Props {
   onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   onCompositionStart?: () => void;
   onCompositionEnd?: () => void;
-  /** Pasted image files (e.g. a screenshot on the clipboard). When present in
-   *  the clipboard we hand the files up rather than inserting text. */
+  /** Pasted files (a screenshot, or a file copied in the OS file manager).
+   *  When file items are present in the clipboard we hand them up rather than
+   *  inserting text — the composer classifies image vs text vs unsupported. */
   onPasteFiles?: (files: File[]) => void;
   placeholder?: string;
   className?: string;
@@ -278,19 +296,20 @@ export const RichInput = forwardRef<RichInputHandle, Props>(function RichInput(
   };
 
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
-    // Image paste (e.g. a screenshot on the clipboard) — the clipboard exposes
-    // it as file item(s), not as text/plain. Hand the files up so the composer
-    // can attach them; the default contenteditable behavior would drop them.
-    const imageFiles: File[] = [];
+    // File paste (a screenshot on the clipboard, or a file copied in the OS
+    // file manager) — the clipboard exposes it as file item(s), not text/plain.
+    // Hand the files up so the composer can attach them; the default
+    // contenteditable behavior would drop them.
+    const pastedFiles: File[] = [];
     for (const it of Array.from(e.clipboardData.items)) {
-      if (it.kind === 'file' && it.type.startsWith('image/')) {
+      if (it.kind === 'file') {
         const f = it.getAsFile();
-        if (f) imageFiles.push(f);
+        if (f) pastedFiles.push(f);
       }
     }
-    if (imageFiles.length > 0 && onPasteFiles) {
+    if (pastedFiles.length > 0 && onPasteFiles) {
       e.preventDefault();
-      onPasteFiles(imageFiles);
+      onPasteFiles(pastedFiles);
       return;
     }
     // Strip rich formatting on paste — contenteditable's default is to keep

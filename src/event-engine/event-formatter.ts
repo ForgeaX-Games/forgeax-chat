@@ -2,7 +2,7 @@
  * Event formatter — converts StoredEvent records into RendererMessage objects.
  * Uses a registry pattern instead of a monolithic switch-case.
  *
- * Ported from forgeax-cli's `src/channels/ink-renderer/lib/event-formatter.ts`
+ * Ported from @forgeax/orchestrator's `src/channels/ink-renderer/lib/event-formatter.ts`
  * with the following web-platform adaptations:
  *
  *  - Stripped `node:fs` / `node:path` / `node:crypto` deps + the entire
@@ -193,7 +193,7 @@ registerFormatter('hook:assistantMessage', (event) => {
   const msg = extractLLMMessage(p);
   if (!msg) return null;
   const text = extractMessageBodyText(msg).trim();
-  const thinking = msg.thinking?.trim() ?? '';
+  const thinking = typeof msg.thinking === 'string' ? msg.thinking.trim() : '';
   if (!text && !thinking) return null;
   return {
     kind: 'assistant_complete',

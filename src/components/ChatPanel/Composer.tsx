@@ -12,7 +12,7 @@ import { useChatStore, useActiveStreaming } from '../../session-store';
 import { useModelLabel } from '@forgeax/interface/lib/model';
 import { resolveNaming } from '@forgeax/ai-workbench/lib/agent-name';
 import { listExtensions, pickLang, type ExtensionInfo } from '@forgeax/interface/lib/extension-api';
-import { RichInput, type RichInputHandle } from '../Composer/RichInput';
+import { RichInput, buildPastedFilePill, type RichInputHandle } from '../Composer/RichInput';
 import { buildAssetPill, requestComposerInsert, useComposerPendingInsert, clearComposerPendingInsert } from '@forgeax/interface/lib/composer-bridge';
 import {
   getAgentModel,
@@ -147,6 +147,33 @@ const agentModelKey = (sid: string, agentPath: string, providerId: string | null
 // obvious. Keep these short — they only flow through component-local state.
 const CB_HINT = { AT: 'at', SLASH: 'slash', IMG: 'img' } as const;
 type CbHintId = typeof CB_HINT[keyof typeof CB_HINT];
+
+// ── 文件粘贴/拖拽/选择:文本类文件判定 ──
+// 图片和 PDF 走 attachments(kind:'image'/'document' → 内核组 image/document block),
+// 文本文件走"读内容折成 chip"路径,其余任意格式(Excel/zip 等)也不拒收——标成
+// kind:'file' 附件,编排层落盘 uploads/ 换成路径注记,由 agent 用工具解析。
+// MIME 常缺(拖拽本地 .ts/.toml 等浏览器给空 type),所以 MIME 判不出时兜底看扩展名。
+const ATTACH_FILE_MAX_BYTES = 2 * 1024 * 1024;
+const ATTACH_FILE_MAX_LABEL = '2MB';
+const TEXT_MIME_SET = new Set([
+  'application/json', 'application/xml', 'application/javascript', 'application/typescript',
+  'application/x-yaml', 'application/yaml', 'application/toml', 'application/sql',
+  'application/x-sh', 'application/xhtml+xml', 'image/svg+xml',
+]);
+const TEXT_FILE_EXTS = [
+  'txt', 'md', 'markdown', 'json', 'jsonc', 'json5', 'yaml', 'yml', 'toml', 'xml', 'html', 'htm',
+  'css', 'scss', 'less', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'py', 'rb', 'go', 'rs', 'java',
+  'kt', 'c', 'h', 'cpp', 'hpp', 'cc', 'cs', 'swift', 'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat',
+  'sql', 'csv', 'tsv', 'ini', 'cfg', 'conf', 'env', 'log', 'svg', 'vue', 'svelte', 'astro', 'lua',
+  'php', 'pl', 'r', 'dart', 'scala', 'clj', 'ex', 'exs', 'erl', 'hs', 'zig', 'gd', 'glsl', 'wgsl',
+  'vert', 'frag', 'gitignore', 'dockerfile', 'makefile', 'lock', 'patch', 'diff',
+];
+const TEXT_EXT_RE = new RegExp(`\\.(${TEXT_FILE_EXTS.join('|')})$`, 'i');
+function isTextLikeFile(f: File): boolean {
+  if (f.type.startsWith('text/')) return true;
+  if (TEXT_MIME_SET.has(f.type)) return true;
+  return TEXT_EXT_RE.test(f.name);
+}
 
 function compactModelLabel(label: string): string {
   const trimmed = label.trim();
@@ -599,33 +626,184 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
     return () => clearTimeout(id);
   }, [hintFor]);
 
-  // ── 多模态:暂存待发送的图片(file picker / 粘贴)。发送时随 sendMessage 的
-  //   attachments 传给 forgeax-core 内核;发送后清空。data 用 base64(无 dataUrl 前缀)。
-  const [images, setImages] = useState<Array<{ id: string; name: string; data: string; mediaType: string }>>([]);
+  // ── 多模态:暂存待发送的附件(file picker / 粘贴 / 拖拽)。发送时随 sendMessage 的
+  //   attachments 传出:kind:'image' → image block,kind:'document' → PDF document block
+  //   (均由 forgeax-core 内核 facade 组块);kind:'file' = 其余任意格式,编排层落盘
+  //   uploads/ 换成路径注记,agent 用工具解析。发送后清空。data 用 base64(无 dataUrl 前缀)。
+  //   文本类文件不走附件:读内容折成文件 chip(expandPills 发送时原文还原给模型)。
+  //   唯一拒收理由 = 超过 2MB,给 3s「内容太大」提示,不静默吞。
+  type PendingAttachment = { id: string; name: string; data: string; mediaType: string; kind: 'image' | 'document' | 'file'; ownerGeneration: number };
+  type FileReadResult =
+    | { attachment: PendingAttachment }
+    | { pill: ReturnType<typeof buildPastedFilePill> }
+    | { error: string };
+  type ComposerOwner = { sid: string; agentId: string; generation: number };
+  const [attached, setAttached] = useState<PendingAttachment[]>([]);
+  const attachedRef = useRef<PendingAttachment[]>([]);
+  const pendingFileReadsRef = useRef<Map<Promise<void>, number>>(new Map());
+  const fileReadCommitQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const ownerRef = useRef<ComposerOwner | null>(null);
+  const textOwnerGenerationRef = useRef<number | null>(null);
+  const connectResumeOwnerRef = useRef<ComposerOwner | null>(null);
+  const mountedRef = useRef(true);
+  const submitPreparingRef = useRef(false);
+  const [pendingFileReadCount, setPendingFileReadCount] = useState(0);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (ownerRef.current) ownerRef.current = { ...ownerRef.current, generation: ownerRef.current.generation + 1 };
+    };
+  }, []);
+  const currentOwner = (): ComposerOwner | null => {
+    const shell = useShellStore.getState();
+    const sid = shell.activeSid;
+    const agentId = sid ? (shell.tabs.find((tab) => tab.sid === sid)?.agentId ?? null) : null;
+    if (!sid || !agentId) return null;
+    const previous = ownerRef.current;
+    if (!previous || previous.sid !== sid || previous.agentId !== agentId) {
+      ownerRef.current = { sid, agentId, generation: (previous?.generation ?? 0) + 1 };
+    }
+    return ownerRef.current;
+  };
+  const ownsComposer = (owner: ComposerOwner): boolean => {
+    if (!mountedRef.current) return false;
+    const current = currentOwner();
+    return !!current
+      && current.sid === owner.sid
+      && current.agentId === owner.agentId
+      && current.generation === owner.generation;
+  };
+  const bindTextToCurrentOwner = (value: string) => {
+    const owner = currentOwner();
+    textOwnerGenerationRef.current = value && owner ? owner.generation : null;
+    setText(value);
+  };
+  const updatePendingFileReadCount = () => {
+    if (!mountedRef.current) return;
+    const owner = currentOwner();
+    const count = owner
+      ? Array.from(pendingFileReadsRef.current.values()).filter((generation) => generation === owner.generation).length
+      : 0;
+    setPendingFileReadCount(count);
+  };
+  useEffect(() => {
+    const owner = currentOwner();
+    attachedRef.current = owner
+      ? attachedRef.current.filter((item) => item.ownerGeneration === owner.generation)
+      : [];
+    setAttached(attachedRef.current);
+    // The input is a single visible composer, so owner switches discard its
+    // serialized pills/text rather than allowing them into another target.
+    ref.current?.setValue('');
+    textOwnerGenerationRef.current = null;
+    setText('');
+    connectResumeOwnerRef.current = null;
+    updatePendingFileReadCount();
+  }, [activeSid, activeAgent]);
+  const [fileNotice, setFileNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!fileNotice) return;
+    const id = setTimeout(() => setFileNotice(null), 3000);
+    return () => clearTimeout(id);
+  }, [fileNotice]);
   const imgInputRef = useRef<HTMLInputElement | null>(null);
-  const addFiles = (files: FileList | File[] | null) => {
-    if (!files) return;
-    for (const f of Array.from(files)) {
-      if (!f.type.startsWith('image/')) continue;
+  const readAttachment = (f: File, kind: PendingAttachment['kind'], fallbackType: string, ownerGeneration: number): Promise<FileReadResult> => (
+    new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
         const res = typeof reader.result === 'string' ? reader.result : '';
         const comma = res.indexOf(',');
         const data = comma >= 0 ? res.slice(comma + 1) : res; // 剥 dataUrl 前缀,只留 base64
-        setImages((prev) => [
-          ...prev,
-          { id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name: f.name, data, mediaType: f.type || 'image/png' },
-        ]);
+        resolve({
+          attachment: {
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: f.name,
+            data,
+            mediaType: f.type || fallbackType,
+            kind,
+            ownerGeneration,
+          },
+        });
       };
+      reader.onerror = () => reject(reader.error ?? new Error(`Failed to read ${f.name}`));
+      reader.onabort = () => reject(new Error(`Reading ${f.name} was aborted`));
       reader.readAsDataURL(f);
+    })
+  );
+  const addFiles = (files: FileList | File[] | null) => {
+    if (!files) return;
+    const owner = currentOwner();
+    if (!owner) return;
+    const reads: Array<Promise<FileReadResult>> = [];
+    for (const f of Array.from(files)) {
+      // 所有类型先走同一份单文件上限,再决定读取方式。
+      if (f.size > ATTACH_FILE_MAX_BYTES) {
+        setFileNotice(t('composer.fileTooLarge', { name: f.name, limit: ATTACH_FILE_MAX_LABEL }));
+        continue;
+      }
+      let read: Promise<FileReadResult>;
+      // SVG is image/* but the image block only takes raster formats — it's XML,
+      // so route it down the text path.
+      if (f.type.startsWith('image/') && f.type !== 'image/svg+xml') {
+        read = readAttachment(f, 'image', 'image/png', owner.generation);
+      } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
+        read = readAttachment(f, 'document', 'application/pdf', owner.generation);
+      } else if (isTextLikeFile(f)) {
+        read = f.text().then((text) => ({ pill: buildPastedFilePill(f.name, text) }));
+      } else {
+        // 其余任意格式(Excel/zip/音频…)不拒收:kind:'file' 附件,编排层落盘换路径注记。
+        read = readAttachment(f, 'file', 'application/octet-stream', owner.generation);
+      }
+      reads.push(read.catch((err) => {
+        console.warn('[composer] file read failed', { name: f.name, err });
+        return { error: f.name };
+      }));
     }
+    if (reads.length === 0) return;
+
+    // Commit one accepted selection in source order. Submission drains every
+    // registered batch before it snapshots text and attachments for this turn.
+    const resultsReady = Promise.all(reads);
+    const batch = fileReadCommitQueueRef.current.then(async () => {
+      const results = await resultsReady;
+      if (!ownsComposer(owner)) return;
+      const nextAttachments: PendingAttachment[] = [];
+      for (const result of results) {
+        if ('error' in result) {
+          setFileNotice(t('settings.readFailed', { error: result.error }));
+        } else if ('pill' in result) {
+          textOwnerGenerationRef.current = owner.generation;
+          ref.current?.insertPill(result.pill);
+        } else {
+          nextAttachments.push(result.attachment);
+        }
+      }
+      if (nextAttachments.length > 0) {
+        attachedRef.current = [...attachedRef.current, ...nextAttachments];
+        setAttached(attachedRef.current);
+      }
+    });
+    fileReadCommitQueueRef.current = batch.catch(() => undefined);
+    pendingFileReadsRef.current.set(batch, owner.generation);
+    updatePendingFileReadCount();
+    const finishBatch = () => {
+      pendingFileReadsRef.current.delete(batch);
+      updatePendingFileReadCount();
+    };
+    void batch.then(finishBatch, finishBatch);
   };
-  const removeImage = (id: string) => setImages((prev) => prev.filter((i) => i.id !== id));
-  /** 把暂存图片转成 sendMessage 的 attachments(kind:'image')。 */
-  const takeAttachments = (): Array<Record<string, unknown>> | undefined => {
-    if (images.length === 0) return undefined;
-    const atts = images.map((i) => ({ kind: 'image', mediaType: i.mediaType, data: i.data }));
-    setImages([]);
+  const removeAttached = (id: string) => {
+    attachedRef.current = attachedRef.current.filter((i) => i.id !== id);
+    setAttached(attachedRef.current);
+  };
+  /** 把暂存附件转成 sendMessage 的 attachments。name 供编排层落盘 kind:'file' 用。 */
+  const takeAttachments = (owner: ComposerOwner): Array<Record<string, unknown>> | undefined => {
+    const owned = attachedRef.current.filter((item) => item.ownerGeneration === owner.generation);
+    if (owned.length === 0) return undefined;
+    const atts = owned.map((i) => ({ kind: i.kind, name: i.name, mediaType: i.mediaType, data: i.data }));
+    attachedRef.current = attachedRef.current.filter((item) => item.ownerGeneration !== owner.generation);
+    setAttached(attachedRef.current);
     return atts;
   };
 
@@ -847,30 +1025,84 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   // bridge has no equivalent, so only offer it on the native path.
   const canInterrupt = isStreaming && (providerOverride === null || providerOverride === 'forgeax');
 
-  const onSubmit = async () => {
-    const t = text.trim();
-    // 允许"只发图无文字"——但内核 user 文本不能为空,给个占位提示。
-    if (!t && images.length === 0) return;
-    // First-chat interceptor (design §11): if there's no usable model path,
-    // don't send into a void — keep the typed text and open the connect prompt.
-    // ConnectModelPrompt re-fires APP_EVENTS.resumeSend once connected.
-    if (!(await checkModelReady())) {
-      window.dispatchEvent(new CustomEvent(APP_EVENTS.openConnectPrompt, { detail: { text: t } }));
-      return;
+  const drainPendingFileReads = async (owner: ComposerOwner): Promise<boolean> => {
+    while (ownsComposer(owner)) {
+      const pending = Array.from(pendingFileReadsRef.current.entries())
+        .filter(([, generation]) => generation === owner.generation)
+        .map(([promise]) => promise);
+      if (pending.length === 0) return true;
+      await Promise.all(pending);
     }
-    if (isStreaming) {
-      // Agent is mid-turn — queue client-side. It flushes as its own turn when
-      // the current turn ends (sequential, one turn per queued message).
-      // 注:排队消息暂不带图(图随当前输入即时发);有图时直接发不入队。
-      if (images.length === 0) {
-        enqueueMessage(t);
+    return false;
+  };
+  const onSubmit = async (expectedOwner?: ComposerOwner) => {
+    // Submission preparation is single-flight: repeated Enter/clicks cannot split
+    // or duplicate one composer transaction while its files are still resolving.
+    if (submitPreparingRef.current) return;
+    const owner = currentOwner();
+    if (!owner || (expectedOwner && !ownsComposer(expectedOwner))) return;
+    submitPreparingRef.current = true;
+    try {
+      if (!(await drainPendingFileReads(owner))) return;
+      // 文件读取会插入 pill / 附件,因此 await 后从 imperative ref 和同步 ref 取最新值,
+      // 不使用 await 前 render 的陈旧闭包。
+      let currentText = ref.current?.getValue() ?? text;
+      if (currentText && textOwnerGenerationRef.current !== owner.generation) {
+        ref.current?.setValue('');
+        textOwnerGenerationRef.current = null;
         setText('');
+        currentText = '';
+      }
+      let t = currentText.trim();
+      // 允许"只发附件无文字"——但内核 user 文本不能为空,给个占位提示。
+      if (!t && !attachedRef.current.some((item) => item.ownerGeneration === owner.generation)) return;
+      // First-chat interceptor (design §11): if there's no usable model path,
+      // don't send into a void — keep the typed text and open the connect prompt.
+      // ConnectModelPrompt re-fires APP_EVENTS.resumeSend once connected.
+      if (!(await checkModelReady())) {
+        if (ownsComposer(owner)) {
+          connectResumeOwnerRef.current = owner;
+          window.dispatchEvent(new CustomEvent(APP_EVENTS.openConnectPrompt, { detail: { text: t } }));
+        }
         return;
       }
+      // Files may be accepted while model readiness is pending; drain to a stable
+      // empty set before taking the final text/attachment snapshot.
+      if (!(await drainPendingFileReads(owner))) return;
+      currentText = ref.current?.getValue() ?? currentText;
+      if (currentText && textOwnerGenerationRef.current !== owner.generation) return;
+      t = currentText.trim();
+      if (!t && !attachedRef.current.some((item) => item.ownerGeneration === owner.generation)) return;
+
+      const isTargetStreaming = Boolean(
+        useChatStore.getState().bySid[owner.sid]?.streamingByAgent[owner.agentId],
+      );
+      if (!ownsComposer(owner)) return;
+      if (isTargetStreaming) {
+        // Agent is mid-turn — queue client-side. It flushes as its own turn when
+        // the current turn ends (sequential, one turn per queued message).
+        // 注:排队消息暂不带附件(附件随当前输入即时发);有附件时直接发不入队。
+        if (!attachedRef.current.some((item) => item.ownerGeneration === owner.generation)) {
+          enqueueMessage(t);
+          setText('');
+          return;
+        }
+      }
+      const attachments = takeAttachments(owner);
+      ref.current?.setValue('');
+      textOwnerGenerationRef.current = null;
+      setText('');
+      // Claim is complete once dispatch has synchronously captured the target.
+      // Do not hold the preparation mutex through the streamed response.
+      const send = sendMessage(t || '(see attached file)', {
+        ...(attachments ? { attachments } : {}),
+        target: { sid: owner.sid, agentId: owner.agentId },
+      });
+      submitPreparingRef.current = false;
+      void send.catch((err) => console.warn('[composer] send failed', err));
+    } finally {
+      submitPreparingRef.current = false;
     }
-    const attachments = takeAttachments();
-    setText('');
-    await sendMessage(t || '(see attached image)', attachments ? { attachments } : undefined);
   };
 
   // Resume the send the connect prompt intercepted: keep the ref pointing at the
@@ -879,7 +1111,11 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   const onSubmitRef = useRef(onSubmit);
   onSubmitRef.current = onSubmit;
   useEffect(() => {
-    const onResume = () => { void onSubmitRef.current(); };
+    const onResume = () => {
+      const owner = connectResumeOwnerRef.current;
+      connectResumeOwnerRef.current = null;
+      if (owner) void onSubmitRef.current(owner);
+    };
     window.addEventListener(APP_EVENTS.resumeSend, onResume);
     return () => window.removeEventListener(APP_EVENTS.resumeSend, onResume);
   }, []);
@@ -950,7 +1186,11 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   }, []);
 
   const handleComposerDragOver = (e: React.DragEvent) => {
-    if (pendingDragAsset.current) {
+    // Two drag sources land here: Content Browser assets (announced via
+    // postMessage, no dataTransfer) and OS files (dataTransfer type "Files").
+    // Without preventDefault the browser rejects the drop — and for OS files
+    // then navigates the whole app away to open the file.
+    if (pendingDragAsset.current || e.dataTransfer.types.includes('Files')) {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
       setAssetDragOver(true);
@@ -959,19 +1199,25 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   const handleComposerDragLeave = () => setAssetDragOver(false);
   const handleComposerDrop = (e: React.DragEvent) => {
     setAssetDragOver(false);
-    const ref = pendingDragAsset.current;
-    if (!ref) return;
-    e.preventDefault();
-    e.stopPropagation();
-    pendingDragAsset.current = null;
-    const insert = requestComposerInsert;
-    insert(buildAssetPill({
-      guid: ref.guid,
-      name: ref.name,
-      assetKind: ref.kind,
-      packPath: ref.path,
-      payload: ref.payload,
-    }));
+    const assetRef = pendingDragAsset.current;
+    if (assetRef) {
+      e.preventDefault();
+      e.stopPropagation();
+      pendingDragAsset.current = null;
+      requestComposerInsert(buildAssetPill({
+        guid: assetRef.guid,
+        name: assetRef.name,
+        assetKind: assetRef.kind,
+        packPath: assetRef.path,
+        payload: assetRef.payload,
+      }));
+      return;
+    }
+    if (e.dataTransfer.files.length > 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      addFiles(e.dataTransfer.files);
+    }
   };
 
   return (
@@ -1041,23 +1287,33 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
               : 'Type your game idea... [Enter] to send · [Ctrl/Shift+Enter] for a new line.'
         }
         value={text}
-        onChange={setText}
+        onChange={bindTextToCurrentOwner}
         onKeyDown={onKeyDown}
         onPasteFiles={addFiles}
       />
-      {images.length > 0 && (
+      {fileNotice && (
+        <div className="cb-hint" role="status" style={{ padding: '4px 10px' }}>{fileNotice}</div>
+      )}
+      {attached.length > 0 && (
         <div className="cb-img-strip" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '6px 8px' }}>
-          {images.map((img) => (
-            <div key={img.id} style={{ position: 'relative', width: 56, height: 56, borderRadius: 6, overflow: 'hidden', border: '1px solid var(--color-border, #444)' }}>
-              <img
-                src={`data:${img.mediaType};base64,${img.data}`}
-                alt={img.name}
-                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              />
+          {attached.map((att) => (
+            <div key={att.id} title={att.name} style={{ position: 'relative', width: att.kind === 'image' ? 56 : 'auto', height: 56, borderRadius: 6, overflow: 'hidden', border: '1px solid var(--color-border, #444)' }}>
+              {att.kind === 'image' ? (
+                <img
+                  src={`data:${att.mediaType};base64,${att.data}`}
+                  alt={att.name}
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, height: '100%', padding: '0 20px 0 8px', fontSize: 11 }}>
+                  <span style={{ fontSize: 18 }}>{att.kind === 'document' ? '📄' : '📎'}</span>
+                  <span style={{ maxWidth: 96, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.name}</span>
+                </div>
+              )}
               <button
                 type="button"
-                aria-label="remove image"
-                onClick={() => removeImage(img.id)}
+                aria-label="remove attachment"
+                onClick={() => removeAttached(att.id)}
                 style={{
                   position: 'absolute', top: 1, right: 1, width: 16, height: 16, lineHeight: '14px',
                   borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 11,
@@ -1071,7 +1327,6 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
       <input
         ref={imgInputRef}
         type="file"
-        accept="image/*"
         multiple
         style={{ display: 'none' }}
         onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
@@ -1399,7 +1654,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
                   : t('composer.send')
               }
               type="button"
-              disabled={(!text.trim() && images.length === 0) || !activeAgent || !activeSid}
+              disabled={(!text.trim() && attached.length === 0 && pendingFileReadCount === 0) || !activeAgent || !activeSid}
               onClick={() => void onSubmit()}
             >
               <ArrowUp size={16} />

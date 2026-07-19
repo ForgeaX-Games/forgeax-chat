@@ -2,7 +2,7 @@
  * Event replay — parse JSONL event streams and rebuild CompletedTurn[]
  * by feeding events through the shared TurnAccumulator.
  *
- * cp'd from forgeax-cli src/channels/ink-renderer/lib/event-replay.ts
+ * cp'd from @forgeax/orchestrator src/channels/ink-renderer/lib/event-replay.ts
  * (`.js` extension dropped to match local module resolution; otherwise
  * unchanged) plus an additional `trimToCompactBoundary` helper that
  * mirrors framework `applyCompactTruncation` semantics for the UI:

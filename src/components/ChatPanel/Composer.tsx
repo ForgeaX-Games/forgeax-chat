@@ -17,6 +17,8 @@ import { RichInput, buildPastedFilePill, type RichInputHandle } from '../Compose
 import { buildAssetPill, requestComposerInsert, useComposerPendingInsert, clearComposerPendingInsert } from '@forgeax/interface/lib/composer-bridge';
 import {
   getAgentModel,
+  listModels,
+  setAgentModels,
   type AgentModelState,
 } from '@forgeax/interface/lib/model-config';
 import { recordLastModel } from '@forgeax/interface/lib/model-prefs';
@@ -360,9 +362,26 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
     };
     try {
       const m = await getAgentModel(sid, agentPath);
-      agentModelCache.set(agentModelKey(sid, agentPath, providerId), m);
+      let nextModel = m;
+      try {
+        // Provider switches can leave agent.json pointing at a model id that the
+        // new driver catalog cannot run. Snap to the catalog default immediately.
+        const catalog = await listModels(providerId);
+        const selectedInCatalog = !!m.selected && catalog.some((entry) => entry.id === m.selected);
+        if (!selectedInCatalog && catalog.length > 0 && stillCurrent()) {
+          const fallback = catalog.find((entry) => !entry.hidden)?.id ?? catalog[0]?.id;
+          if (fallback) {
+            const res = await setAgentModels(sid, agentPath, [fallback]);
+            const selected = res.selected ?? fallback;
+            nextModel = { sid, agentPath, selected, chain: [selected], raw: [selected] };
+          }
+        }
+      } catch (catalogErr) {
+        console.warn('[composer] reconcile agent model catalog failed', { sid, agentPath, providerId, err: catalogErr });
+      }
+      agentModelCache.set(agentModelKey(sid, agentPath, providerId), nextModel);
       if (stillCurrent()) {
-        setAgentModel(m);
+        setAgentModel(nextModel);
         setAgentModelLoading(false);
       }
     } catch (err) {

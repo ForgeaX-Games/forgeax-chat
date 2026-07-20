@@ -32,7 +32,7 @@ export function PillChip({ payload, editable = false }: Props) {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <span className="kbl-pill-icon" aria-hidden="true">{payload.icon ?? '🔖'}</span>
+      {payload.icon && <span className="kbl-pill-icon" aria-hidden="true">{payload.icon}</span>}
       <span className="kbl-pill-label">{payload.display}</span>
       {hovered && pos && (
         <span

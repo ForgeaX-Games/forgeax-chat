@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ExternalLink, ArrowDown, Undo2, ChevronDown, X } from 'lucide-react';
 import { loadOnboarding, saveOnboarding } from '@forgeax/interface/components/Onboarding/types';
 import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
@@ -19,8 +20,9 @@ import {
   useActiveCheckpointMsgIds,
 } from '../../session-store';
 import type { ChatMessage } from '../../session-store';
-import { parseSegments } from '@forgeax/interface/lib/composer-bridge';
+import { parseDisplaySegments } from '@forgeax/interface/lib/composer-bridge';
 import { PillChip } from '../Composer/PillChip';
+import type { ChatAttachment } from '@forgeax/interface/store';
 import { getWindowManager, decodeSurfaceFromLocation } from '@forgeax/interface/lib/platform';
 import { useTranslation, t } from '@forgeax/interface/i18n';
 import './ChatPanel.css';
@@ -68,13 +70,116 @@ function countUnits(msgs: ChatMessage[]): number {
 }
 
 function PillText({ text }: { text: string }) {
-  const segs = parseSegments(text);
+  const segs = parseDisplaySegments(text);
   return (
     <>
       {segs.map((s, i) =>
         s.kind === 'text'
           ? <Fragment key={i}>{s.text}</Fragment>
           : <PillChip key={i} payload={s.payload} />,
+      )}
+    </>
+  );
+}
+
+function attachmentSrc(att: ChatAttachment, sid: string | null): string | null {
+  if (att.data) {
+    if (att.data.startsWith('data:')) return att.data;
+    const media = att.mediaType || 'image/png';
+    return `data:${media};base64,${att.data}`;
+  }
+  // History reload: ledger keeps path-only refs under <session>/uploads/.
+  const fileName = (att.path ? att.path.split(/[/\\]/).pop() : att.name) || '';
+  if (!sid || !fileName) return null;
+  return `/api/sessions/${encodeURIComponent(sid)}/uploads/${encodeURIComponent(fileName)}`;
+}
+
+/** Inline attachment strip — square thumbs; click opens a window-level lightbox. */
+function UserAttachments({ attachments, sid }: { attachments: ChatAttachment[]; sid: string | null }) {
+  const [preview, setPreview] = useState<{ src: string; alt: string } | null>(null);
+
+  useEffect(() => {
+    if (!preview) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setPreview(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [preview]);
+
+  return (
+    <>
+      <div className="user-att-strip">
+        {attachments.map((att, i) => {
+          const key = `${att.name ?? att.path ?? att.kind}-${i}`;
+          if (att.kind === 'image') {
+            const src = attachmentSrc(att, sid);
+            if (!src) {
+              return (
+                <span key={key} className="user-att-file" title={att.name || att.path || 'image'}>
+                  <span aria-hidden="true">🖼</span>
+                  <span className="user-att-file-name">{att.name || 'image'}</span>
+                </span>
+              );
+            }
+            const alt = att.name || 'image';
+            return (
+              <button
+                key={key}
+                type="button"
+                className="user-att-img-wrap"
+                title={alt}
+                aria-label={alt}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  setPreview({ src, alt });
+                }}
+              >
+                <img className="user-att-img" src={src} alt={alt} draggable={false} />
+              </button>
+            );
+          }
+          return (
+            <span key={key} className="user-att-file" title={att.name || att.path}>
+              <span aria-hidden="true">{att.kind === 'document' ? '📄' : '📎'}</span>
+              <span className="user-att-file-name">{att.name || att.kind}</span>
+            </span>
+          );
+        })}
+      </div>
+      {preview && createPortal(
+        <div
+          className="user-att-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label={preview.alt}
+          onClick={() => setPreview(null)}
+        >
+          <button
+            type="button"
+            className="user-att-lightbox-close"
+            aria-label="Close"
+            onClick={(e) => { e.stopPropagation(); setPreview(null); }}
+          >
+            <X size={18} strokeWidth={2} />
+          </button>
+          <img
+            className="user-att-lightbox-img"
+            src={preview.src}
+            alt={preview.alt}
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>,
+        document.body,
       )}
     </>
   );
@@ -675,7 +780,15 @@ export function ChatPanel() {
                       : undefined}
                     title={canRewindHere && !pendingRewind && !chatStreaming ? t('chat.editMessage') : undefined}
                   >
-                    <PillText text={m.text} />
+                    <PillText text={
+                      m.attachments?.length
+                      && (m.text === '(see attached file)' || !m.text.trim())
+                        ? ''
+                        : m.text
+                    } />
+                    {m.attachments && m.attachments.length > 0 && (
+                      <UserAttachments attachments={m.attachments} sid={activeSid} />
+                    )}
                     {canRewindHere && (
                       <button
                         type="button"

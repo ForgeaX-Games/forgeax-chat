@@ -12,6 +12,7 @@ import { useChatStore, useActiveStreaming } from '../../session-store';
 import { useModelLabel } from '@forgeax/interface/lib/model';
 import { resolveNaming } from '@forgeax/ai-workbench/lib/agent-name';
 import { listExtensions, pickLang, type ExtensionInfo } from '@forgeax/interface/lib/extension-api';
+import { buildSlashPill, encodePill } from '@forgeax/interface/lib/composer-bridge';
 import { RichInput, buildPastedFilePill, type RichInputHandle } from '../Composer/RichInput';
 import { buildAssetPill, requestComposerInsert, useComposerPendingInsert, clearComposerPendingInsert } from '@forgeax/interface/lib/composer-bridge';
 import {
@@ -46,12 +47,18 @@ interface CliProviderInfo {
 // Until P3.45 the Sparkles button was a permanent 即将上线 placeholder; now
 // it surfaces real bus skill triggers and lets the player insert them at the
 // textarea cursor without typing the full slash path.
+//
+// Source of truth is GET /api/skills (all kinds: skill/agent/workbench), NOT
+// listExtensions('skill') — that only returns kind=skill plugins and drops
+// the majority of slash-triggered skills declared on agent/workbench packs.
 interface BusSkillRow {
   extensionId: string;
   displayName: string;
   descZh: string;
   skillId: string;
   trigger: string;
+  /** Distinguishes bus skills from server builtin commands in the slash menu. */
+  source: 'skill' | 'command';
 }
 
 // P3.46 — agent mention row for the @ menu. Mirrors the P3.45 Sparkles popover
@@ -366,25 +373,38 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
       }
     }
   };
-  // P3.45 — fetch all kind=skill plugins, flatten each plugin's skills[] into
-  // single rows. Failure / empty → null, which collapses the Sparkles button
-  // back to its legacy 即将上线 hint behaviour.
+  // P3.45 — fetch the canonical skill registry (GET /api/skills), then merge
+  // server commands. Failure / empty → null, which collapses the Sparkles
+  // button back to its legacy 即将上线 hint behaviour.
   const fetchBusSkills = async () => {
     try {
-      const resp = await listExtensions('skill');
       const rows: BusSkillRow[] = [];
-      for (const item of resp.items) {
-        const skills = item.skills ?? [];
-        for (const s of skills) {
-          if (!s.trigger) continue;
-          rows.push({
-            extensionId: item.id,
-            displayName: pickLang(item.displayName, getLocale(), item.id),
-            descZh: pickLang(item.description, getLocale(), ''),
-            skillId: s.id,
-            trigger: s.trigger,
-          });
-        }
+      const seenTriggers = new Set<string>();
+      const skillResp = await fetch('/api/skills');
+      if (!skillResp.ok) throw new Error(`GET /api/skills → ${skillResp.status}`);
+      const { skills } = (await skillResp.json()) as {
+        skills?: Array<{
+          id: string;
+          extensionId: string;
+          displayName?: { zh?: string; en?: string; ja?: string } | string;
+          description?: { zh?: string; en?: string; ja?: string } | string;
+          triggers?: Array<{ kind: string; command?: string }>;
+        }>;
+      };
+      for (const s of skills ?? []) {
+        const slash = s.triggers?.find((t) => t.kind === 'slash' && t.command);
+        if (!slash?.command) continue;
+        const trigger = slash.command.startsWith('/') ? slash.command : `/${slash.command}`;
+        if (seenTriggers.has(trigger)) continue;
+        seenTriggers.add(trigger);
+        rows.push({
+          extensionId: s.extensionId,
+          displayName: pickLang(s.displayName, getLocale(), s.id),
+          descZh: pickLang(s.description, getLocale(), ''),
+          skillId: s.id,
+          trigger,
+          source: 'skill',
+        });
       }
       // Merge server commands (e.g. /compact) into the slash popover alongside bus skills.
       try {
@@ -394,12 +414,16 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
           for (const cmd of commands ?? []) {
             if (!cmd.hasExecute) continue;
             if (cmd.name.startsWith('_error:')) continue;
+            const trigger = `/${cmd.name}`;
+            if (seenTriggers.has(trigger)) continue;
+            seenTriggers.add(trigger);
             rows.push({
               extensionId: 'server',
               displayName: cmd.name,
               descZh: cmd.description,
               skillId: cmd.name,
-              trigger: `/${cmd.name}`,
+              trigger,
+              source: 'command',
             });
           }
         }
@@ -718,7 +742,18 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
         resolve({
           attachment: {
             id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            name: f.name,
+            // Clipboard screenshots often arrive as "" or a colliding "image.png".
+            // Stamp a unique name so multi-paste uploads don't overwrite each other
+            // in the UI label (server also uniquePath's on disk).
+            name: (() => {
+              const raw = (f.name || '').trim();
+              if (raw && raw !== 'image.png' && raw !== 'image.jpg') return raw;
+              const ext = (f.type === 'image/jpeg' || /\.jpe?g$/i.test(raw)) ? 'jpg'
+                : (f.type === 'image/webp' || /\.webp$/i.test(raw)) ? 'webp'
+                : (f.type === 'image/gif' || /\.gif$/i.test(raw)) ? 'gif'
+                : 'png';
+              return `paste-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
+            })(),
             data,
             mediaType: f.type || fallbackType,
             kind,
@@ -839,7 +874,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
         const idx = slashFocusedRef.current;
         if (idx < 0 || idx >= total) return;
         e.preventDefault();
-        insertSkillTrigger(list[idx].trigger);
+        insertSkillTrigger(list[idx]);
       }
     };
     window.addEventListener('click', onClick);
@@ -850,31 +885,30 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
     };
   }, [slashOpen]);
 
-  // P3.45 — insert the trigger at the current cursor position (or end if no
-  // selection). Appends a trailing space so the user can immediately type
-  // arguments without hitting space first. Refocus the textarea + move caret
-  // after the inserted text so the inserted trigger feels like a single
-  // typed-out token rather than a paste.
-  const insertSkillTrigger = (trigger: string) => {
-    const insertion = `${trigger} `;
+  // P3.45 — insert a skill/command pill at the cursor (or replace a typed
+  // prefix like "/c"). Trailing space lets the user type arguments immediately.
+  const insertSkillTrigger = (row: BusSkillRow) => {
+    const pill = buildSlashPill({
+      trigger: row.trigger,
+      source: row.source,
+      displayName: row.displayName,
+      description: row.descZh,
+    });
     setSlashOpen(false);
     const r = ref.current;
-    // If user was typing a prefix (e.g. "/c"), replace the entire text with the
-    // selected trigger + trailing space. Otherwise insert at cursor (button mode).
     if (slashPrefixMatch) {
       if (r) {
-        r.setValue(insertion);
+        r.setValue('');
+        r.insertPill(pill);
         r.focus();
       } else {
-        setText(insertion);
+        setText(`${encodePill(pill)} `);
       }
+    } else if (r) {
+      r.focus();
+      r.insertPill(pill);
     } else {
-      if (r) {
-        r.focus();
-        r.insertText(insertion);
-      } else {
-        setText((t) => `${t}${insertion}`);
-      }
+      setText((t) => `${t}${encodePill(pill)} `);
     }
   };
 
@@ -1094,8 +1128,10 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
       setText('');
       // Claim is complete once dispatch has synchronously captured the target.
       // Do not hold the preparation mutex through the streamed response.
+      // Mid-turn image paste must steer (interrupt) — queue path drops attachments.
       const send = sendMessage(t || '(see attached file)', {
         ...(attachments ? { attachments } : {}),
+        ...(isTargetStreaming && attachments ? { handoff: 'steer' as const } : {}),
         target: { sid: owner.sid, agentId: owner.agentId },
       });
       submitPreparingRef.current = false;
@@ -1420,44 +1456,58 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
               {!slashHasSkills && hintFor === CB_HINT.SLASH && <span className="cb-hint" role="status">{t('composer.comingSoon')}</span>}
             </button>
             {slashOpen && slashHasSkills && filteredSkills.length > 0 && (
-              <div className="cb-slash-menu" role="menu" aria-label="Bus skills">
-                <div className="cb-slash-menu-head">
-                  <span className="cb-slash-menu-head-tag">COMMANDS</span>
-                  <span className="cb-slash-menu-head-n">{filteredSkills.length}</span>
-                  <span className="cb-slash-menu-head-sub">{slashPrefix ? `matching /${slashPrefix}` : 'all'}</span>
-                </div>
-                {filteredSkills.map((s, i) => (
-                  <button
-                    key={`${s.extensionId}:${s.skillId}`}
-                    type="button"
-                    role="menuitem"
-                    className={`cb-slash-item${slashFocused === i ? ' is-active' : ''}`}
-                    onMouseEnter={() => setSlashFocused(i)}
-                    title={
-                      s.descZh
-                        ? t('composer.slashItemDescTitle', { name: s.displayName, plugin: s.extensionId, desc: s.descZh, trigger: s.trigger })
-                        : t('composer.slashItemTitle', { name: s.displayName, plugin: s.extensionId, trigger: s.trigger })
-                    }
-                    onClick={() => insertSkillTrigger(s.trigger)}
-                  >
-                    <span className="cb-slash-trigger">{s.trigger}</span>
-                    <span className="cb-slash-name">{s.displayName}</span>
-                    {s.descZh && (
-                      <span className="cb-slash-desc">
-                        {s.descZh.length > 60 ? `${s.descZh.slice(0, 60)}…` : s.descZh}
-                      </span>
-                    )}
-                    <span
-                      className="cb-slash-arrow"
-                      role="button"
-                      tabIndex={0}
-                      aria-label={t('composer.viewInBusAria', { plugin: s.extensionId })}
-                      title={t('composer.viewInBusTitle', { plugin: s.extensionId })}
-                      onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(s.extensionId); }}
-                      onKeyDown={(e) => onArrowKey(e, s.extensionId)}
-                    >→</span>
-                  </button>
-                ))}
+              <div className="cb-slash-menu" role="menu" aria-label="Skills and commands">
+                {(['skill', 'command'] as const).map((source) => {
+                  const group = filteredSkills
+                    .map((s, i) => ({ s, i }))
+                    .filter(({ s }) => s.source === source);
+                  if (group.length === 0) return null;
+                  return (
+                    <div key={source} className="cb-slash-group">
+                      <div className="cb-slash-menu-head">
+                        <span className="cb-slash-menu-head-tag">{source === 'skill' ? 'SKILLS' : 'COMMANDS'}</span>
+                        <span className="cb-slash-menu-head-n">{group.length}</span>
+                        <span className="cb-slash-menu-head-sub">
+                          {slashPrefix ? `matching /${slashPrefix}` : 'all'}
+                        </span>
+                      </div>
+                      {group.map(({ s, i }) => (
+                        <button
+                          key={`${s.extensionId}:${s.skillId}`}
+                          type="button"
+                          role="menuitem"
+                          className={`cb-slash-item${slashFocused === i ? ' is-active' : ''}`}
+                          onMouseEnter={() => setSlashFocused(i)}
+                          title={
+                            s.descZh
+                              ? t('composer.slashItemDescTitle', { name: s.displayName, plugin: s.extensionId, desc: s.descZh, trigger: s.trigger })
+                              : t('composer.slashItemTitle', { name: s.displayName, plugin: s.extensionId, trigger: s.trigger })
+                          }
+                          onClick={() => insertSkillTrigger(s)}
+                        >
+                          <span className="cb-slash-trigger">{s.trigger}</span>
+                          <span className="cb-slash-name">{s.displayName}</span>
+                          {s.descZh && (
+                            <span className="cb-slash-desc">
+                              {s.descZh.length > 60 ? `${s.descZh.slice(0, 60)}…` : s.descZh}
+                            </span>
+                          )}
+                          {s.source === 'skill' && (
+                            <span
+                              className="cb-slash-arrow"
+                              role="button"
+                              tabIndex={0}
+                              aria-label={t('composer.viewInBusAria', { plugin: s.extensionId })}
+                              title={t('composer.viewInBusTitle', { plugin: s.extensionId })}
+                              onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(s.extensionId); }}
+                              onKeyDown={(e) => onArrowKey(e, s.extensionId)}
+                            >→</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
                 <div className="cb-slash-foot">{t('composer.slashFoot')}</div>
               </div>
             )}

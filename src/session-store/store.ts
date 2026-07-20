@@ -30,13 +30,14 @@ import { create } from 'zustand';
 import { t } from '@/i18n';
 import {
   useShellStore,
+  type ChatAttachment,
   type ChatMessage,
   type ChatSegment,
   type SubAgentRun,
   type ToolCall,
 } from '@forgeax/interface/store';
 import { parseSse } from '@forgeax/interface/lib/sse';
-import { expandPills } from '@forgeax/interface/lib/composer-bridge';
+import { expandPills, expandPillsForDisplay } from '@forgeax/interface/lib/composer-bridge';
 import { resolveReplyLanguage } from '@forgeax/interface/lib/reply-language';
 import { TurnAccumulator } from '../event-engine/turn-accumulator';
 import {
@@ -71,6 +72,22 @@ export interface SendMessageOpts {
   target?: { sid: string; agentId: string };
   /** Internal acceptance callback; invoked after the pinned target is validated. */
   onAccepted?: () => void;
+}
+
+function toChatAttachments(raw: Array<Record<string, unknown>> | undefined): ChatAttachment[] | undefined {
+  if (!raw?.length) return undefined;
+  const out: ChatAttachment[] = [];
+  for (const item of raw) {
+    const kind = typeof item.kind === 'string' ? item.kind : 'file';
+    out.push({
+      kind,
+      name: typeof item.name === 'string' ? item.name : undefined,
+      mediaType: typeof item.mediaType === 'string' ? item.mediaType : undefined,
+      data: typeof item.data === 'string' ? item.data : undefined,
+      path: typeof item.path === 'string' ? item.path : undefined,
+    });
+  }
+  return out;
 }
 
 /** checkpoint 软回退挂起态(Cursor 语义)。非 null = 被回退段置灰显示中。 */
@@ -786,8 +803,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   },
 
   sendMessage: async (text, opts) => {
-    if (!text.trim()) return;
-    const trimmed = text.trim();
+    if (!text.trim() && !opts?.attachments?.length) return;
+    const trimmed = text.trim() || '(see attached file)';
     // Resolve the agent reply language for THIS turn (follow-input detection or
     // the global quick-switch value). Sent as a field — the server injects a
     // directive into composeTurnRequest's dynamicSuffix, keeping the visible
@@ -863,14 +880,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       return;
     }
 
-    // /<name> [args] — generic server command dispatch.
-    const cmdMatch = trimmed.match(/^\/([a-z][a-z0-9_-]*)(?:\s+(.*))?$/s);
+    // /<name> [args] — generic server command dispatch (match on wire text so
+    // command pills expand to `/name` before routing).
+    const wireText = expandPills(trimmed);
+    const cmdMatch = wireText.match(/^\/([a-z][a-z0-9_-]*)(?:\s+(.*))?$/s);
     if (cmdMatch) {
       const cmdName = cmdMatch[1];
       const cmdArgs = cmdMatch[2]?.trim() || '';
       const agentId = startTab?.agentId ?? null;
+      const displayText = expandPillsForDisplay(trimmed);
       get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
-        id: newId(), role: 'user', text: trimmed, toolCalls: [], status: 'done', ts: Date.now(),
+        id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
       }]);
       const pendingId = newId();
       get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
@@ -914,13 +934,18 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     };
     const setStreaming = (val: boolean): void => get().setStreaming(startSid, activeAgent, val);
 
-    // Composer may fold big pastes into paste-pills; expand before display + send
-    // so the transcript shows the original text (model already receives expandPills).
-    const displayText = expandPills(trimmed);
+    // Composer may fold big pastes into paste-pills; expand paste/file pills for
+    // display while keeping skill/command pills as tag chips in the transcript.
+    const displayText = expandPillsForDisplay(trimmed);
+
+    const displayAttachments = toChatAttachments(opts?.attachments);
 
     // ── Interrupt-send (steer) ──
     if (opts?.handoff === 'steer') {
-      const steerUserMsg: ChatMessage = { id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now() };
+      const steerUserMsg: ChatMessage = {
+        id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
+        ...(displayAttachments ? { attachments: displayAttachments } : {}),
+      };
       get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, steerUserMsg]);
       try {
         const { emitForgeaXMessage } = await import('../session-bridge');
@@ -929,7 +954,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         markEmittedClientMsg(clientMsgId);
         const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
-        const r = await emitForgeaXMessage(startSid, displayText, {
+        const r = await emitForgeaXMessage(startSid, wireText, {
           to: candidate,
           payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
           handoff: 'steer',
@@ -943,7 +968,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       return;
     }
 
-    const userMsg: ChatMessage = { id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now() };
+    const userMsg: ChatMessage = {
+      id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
+      ...(displayAttachments ? { attachments: displayAttachments } : {}),
+    };
     const asstMsg: ChatMessage = { id: newId(), role: 'assistant', text: '', toolCalls: [], status: 'streaming', ts: Date.now() };
     const old = _abortByTab.get(startSid);
     if (old) {
@@ -963,7 +991,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
     // Optimistic push into the target agent's slot + auto-title.
     if (startTab && !startTab.displayName) {
-      useShellStore.getState().renameTab(startSid, displayText.slice(0, 40).replace(/\s+/g, ' '));
+      useShellStore.getState().renameTab(startSid, wireText.slice(0, 40).replace(/\s+/g, ' '));
     }
     get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, userMsg, asstMsg]);
     setStreaming(true);
@@ -980,7 +1008,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         markEmittedClientMsg(clientMsgId);
         const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
-        const r = await emitForgeaXMessage(startSid, displayText, {
+        const r = await emitForgeaXMessage(startSid, wireText, {
           to: candidate,
           payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
         });
@@ -1006,7 +1034,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     try {
       res = await fetch('/api/cli/chat', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: displayText, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
+        body: JSON.stringify({ message: wireText, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
         signal,
       });
     } catch (e) {

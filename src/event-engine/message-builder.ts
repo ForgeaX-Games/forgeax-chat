@@ -16,9 +16,9 @@
  * lands.
  */
 
-import type { CompletedTurn, RendererMessage, SystemMessage, ToolCallMessage } from './types';
+import type { CompletedTurn, RendererMessage, SystemMessage, ToolCallMessage, UserInputMessage } from './types';
 import type { TurnAccCallbacks } from './turn-accumulator';
-import type { ChatMessage, SubAgentRun, ToolCall } from '@forgeax/interface/store';
+import type { ChatAttachment, ChatMessage, SubAgentRun, ToolCall } from '@forgeax/interface/store';
 
 // ── Effect interface ──────────────────────────────────────────────────────
 
@@ -39,7 +39,12 @@ export interface MessageEffects {
   applySub: (emitterId: string, mut: (r: SubAgentRun) => SubAgentRun) => void;
   /** Optional: commit a user_input event as its own user ChatMessage.
    *  msgId = checkpoint 回退点外键(可能 undefined,旧事件)。 */
-  onUserInput?: (text: string, ts: number, msgId?: string) => void;
+  onUserInput?: (
+    text: string,
+    ts: number,
+    msgId?: string,
+    attachments?: UserInputMessage['attachments'],
+  ) => void;
   /**
    * Optional: commit a `kind:'system'` RendererMessage from the formatter
    * (warnings / errors / inter-agent traffic) as its own `role:'system'`
@@ -177,7 +182,7 @@ export function buildMainCallbacks(eff: MessageEffects): TurnAccCallbacks {
         const first = turn.messages[0];
         if (!first) return;
         if (first.kind === 'user_input') {
-          eff.onUserInput?.(first.text, first.timestamp, first.msgId);
+          eff.onUserInput?.(first.text, first.timestamp, first.msgId, first.attachments);
         } else if (first.kind === 'system') {
           eff.applySystem?.(first as SystemMessage);
         }
@@ -337,7 +342,7 @@ export function makeInMemEffects(
       subAgents[emitterId] = mut(prev);
       messages[idx] = { ...host, subAgents };
     },
-    onUserInput: (text, ts, msgId) => {
+    onUserInput: (text, ts, msgId, attachments) => {
       // Commit any open assistant bubble before starting a new turn — the
       // streaming → done flip happens here because hook:turnEnd of the
       // previous turn is what closed it. We finalize the last assistant
@@ -349,6 +354,15 @@ export function makeInMemEffects(
       if (lastIdx !== -1 && messages[lastIdx]!.status === 'streaming') {
         messages[lastIdx] = { ...messages[lastIdx]!, status: 'done' };
       }
+      const chatAtts: ChatAttachment[] | undefined = attachments?.length
+        ? attachments.map((att) => ({
+            kind: att.kind ?? 'file',
+            name: att.name,
+            mediaType: att.mediaType,
+            path: att.path,
+            data: att.data,
+          }))
+        : undefined;
       messages.push({
         id: newId(),
         role: 'user',
@@ -357,6 +371,7 @@ export function makeInMemEffects(
         status: 'done',
         ts,
         ...(msgId ? { msgId } : {}),
+        ...(chatAtts ? { attachments: chatAtts } : {}),
       });
       // Pre-allocate the assistant bubble for this turn so applyMain has
       // a target without each callback having to ensureAsst.

@@ -164,17 +164,60 @@ registerFormatter('user_input', (event) => {
   const p = (event.payload ?? {}) as Record<string, unknown>;
   const d = p.display as Record<string, unknown> | undefined;
   const text = (p.visual_display as string) ?? (d?.text as string) ?? displayContent(p.content);
-  if (!text) return null;
+  const rawAtts = Array.isArray(p.attachments) ? (p.attachments as Array<Record<string, unknown>>) : [];
+  let attachments = rawAtts
+    .map((att) => ({
+      kind: typeof att.kind === 'string' ? att.kind : undefined,
+      name: typeof att.name === 'string' ? att.name : undefined,
+      mediaType: typeof att.mediaType === 'string' ? att.mediaType : undefined,
+      path: typeof att.path === 'string' ? att.path : undefined,
+      data: typeof att.data === 'string' ? att.data : undefined,
+    }))
+    .filter((att) => att.path || att.data);
+
+  // Legacy kernel transcription only stored path notes inside llmMessage text
+  // (no attachments[]). Recover those so refresh still shows image chips.
+  if (attachments.length === 0) {
+    const llm = p.llmMessage as { content?: unknown } | undefined;
+    const noteText = [
+      typeof p.contextContent === 'string' ? p.contextContent : '',
+      typeof text === 'string' ? text : '',
+      ...((Array.isArray(llm?.content) ? llm!.content : []) as Array<{ text?: string }>)
+        .map((part) => (typeof part?.text === 'string' ? part.text : '')),
+    ].join('\n');
+    const recovered: typeof attachments = [];
+    const re = /\[Attached (image|document|file): (.+?) \(([^,]+), [^)]+\)\]/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(noteText)) !== null) {
+      const kind = m[1];
+      const path = m[2].trim();
+      const mediaType = m[3].trim();
+      if (!path) continue;
+      recovered.push({
+        kind,
+        path,
+        mediaType: mediaType && mediaType !== 'unknown type' ? mediaType : undefined,
+        name: path.split(/[/\\]/).pop(),
+        data: undefined,
+      });
+    }
+    attachments = recovered;
+  }
+
+  // Image-only sends use a placeholder content string, but also allow empty text
+  // when durable attachments are present so replay doesn't drop the bubble.
+  if (!text && attachments.length === 0) return null;
   const handoff = (p.handoff ?? event.handoff) as string | undefined;
   return {
     kind: 'user_input',
-    text,
+    text: text || '',
     isSteer: handoff === 'steer',
     source: event.source ?? 'user',
     agent: event.emitterId ?? '',
     timestamp: ts(event),
     // checkpoint 回退点的稳定外键(server api/sessions.ts 注入;旧事件无)。
     msgId: typeof p.msgId === 'string' ? p.msgId : undefined,
+    ...(attachments.length ? { attachments } : {}),
   };
 });
 

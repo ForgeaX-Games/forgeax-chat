@@ -145,10 +145,12 @@ function buildChipNode(payload: PillPayload, token: string): HTMLSpanElement {
   span.setAttribute('role', 'img');
   span.title = [payload.tooltip.title, ...payload.tooltip.lines, '---', payload.detail].join('\n');
 
-  const icon = document.createElement('span');
-  icon.className = 'kbl-pill-icon';
-  icon.textContent = payload.icon ?? '🔖';
-  span.appendChild(icon);
+  if (payload.icon) {
+    const icon = document.createElement('span');
+    icon.className = 'kbl-pill-icon';
+    icon.textContent = payload.icon;
+    span.appendChild(icon);
+  }
 
   const label = document.createElement('span');
   label.className = 'kbl-pill-label';

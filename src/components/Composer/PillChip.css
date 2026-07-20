@@ -64,6 +64,33 @@
 .kbl-pill-log    { border-left-color: var(--accent-error); }
 .kbl-pill-entity { border-left-color: var(--color-role-art, #c08cff); }
 .kbl-pill-paste  { border-left-color: var(--color-text-muted, #8a94a6); }
+/* Slash menu selections — skill (lime) vs server command (amber, Cursor-like). */
+.kbl-pill-skill {
+  background: rgba(212, 255, 72, 0.14);
+  border-color: rgba(212, 255, 72, 0.42);
+}
+.kbl-pill-skill .kbl-pill-label {
+  color: var(--primary, #d4ff48);
+  font-weight: 600;
+}
+.kbl-pill-command {
+  background: rgba(234, 179, 8, 0.16);
+  border-color: rgba(234, 179, 8, 0.45);
+}
+.kbl-pill-command .kbl-pill-label {
+  color: #fbbf24;
+  font-weight: 600;
+}
+.user-bubble .kbl-pill-skill {
+  background: rgba(18, 20, 24, 0.82);
+  border-color: rgba(212, 255, 72, 0.7);
+}
+.user-bubble .kbl-pill-skill .kbl-pill-label { color: #d4ff48; }
+.user-bubble .kbl-pill-command {
+  background: rgba(18, 20, 24, 0.82);
+  border-color: rgba(234, 179, 8, 0.65);
+}
+.user-bubble .kbl-pill-command .kbl-pill-label { color: #fbbf24; }
 
 .kbl-pill-tip {
   position: fixed;

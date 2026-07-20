@@ -436,6 +436,18 @@ function dispatch(evt: SessionEvent): void {
 
     const targetAgent = toAgent || tabAgent;
     if (!targetAgent) return;
+    const rawAtts = Array.isArray((payload as { attachments?: unknown }).attachments)
+      ? (payload as { attachments: Array<Record<string, unknown>> }).attachments
+      : [];
+    const attachments = rawAtts.length
+      ? rawAtts.map((att) => ({
+          kind: typeof att.kind === 'string' ? att.kind : 'file',
+          name: typeof att.name === 'string' ? att.name : undefined,
+          mediaType: typeof att.mediaType === 'string' ? att.mediaType : undefined,
+          path: typeof att.path === 'string' ? att.path : undefined,
+          data: typeof att.data === 'string' ? att.data : undefined,
+        })).filter((att) => att.path || att.data)
+      : undefined;
     const userMsg: ChatMessage = {
       id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
@@ -444,6 +456,7 @@ function dispatch(evt: SessionEvent): void {
       status: 'done',
       ts: evtTs,
       ...(typeof payload.msgId === 'string' ? { msgId: payload.msgId } : {}),
+      ...(attachments?.length ? { attachments } : {}),
     };
     useChatStore.getState().patchMessages(sid, targetAgent, (msgs) => [...msgs, userMsg]);
     return;

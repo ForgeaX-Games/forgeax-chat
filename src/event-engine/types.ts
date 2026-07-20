@@ -47,6 +47,14 @@ export interface UserInputMessage extends RendererMessageBase {
   source: string;
   /** checkpoint 回退点外键(payload.msgId,server 注入;旧事件无)。 */
   msgId?: string;
+  /** Path-only (or live base64) attachments from user_input payload. */
+  attachments?: Array<{
+    kind?: string;
+    name?: string;
+    mediaType?: string;
+    path?: string;
+    data?: string;
+  }>;
 }
 
 export interface AssistantCompleteMessage extends RendererMessageBase {

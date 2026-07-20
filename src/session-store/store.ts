@@ -561,28 +561,85 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       }, agentPath);
 
       const sorted = [...events].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+      const knownAssistantIds = new Set<string>();
+      let pendingUserAssistantId: string | null = null;
+      let openTurnStartedAt: number | null = null;
+      let openTurnAssistantId: string | null = null;
+      const lastAssistant = (): ChatMessage | undefined => {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i]!.role === 'assistant') return messages[i];
+        }
+        return undefined;
+      };
       for (const ev of sorted) {
         const p = (ev as { type?: string; payload?: { providerId?: unknown } }).payload;
         const pid = p && typeof p.providerId === 'string' && p.providerId ? p.providerId : undefined;
         if (ev.type === 'user_input' || ev.type === 'hook:turnStart') curPid = pid;
         else if (pid) curPid = pid;
+
+        const sourceAgent = typeof ev.source === 'string' && ev.source.startsWith('agent:')
+          ? ev.source.slice('agent:'.length)
+          : null;
+        const eventEmitter = typeof ev.emitterId === 'string' ? ev.emitterId : sourceAgent;
+        const ownAgentEvent = eventEmitter === null || eventEmitter === agentPath;
+        if (ev.type === 'hook:turnStart' && ownAgentEvent) {
+          openTurnStartedAt = ev.ts ?? Date.now();
+          openTurnAssistantId = pendingUserAssistantId;
+          pendingUserAssistantId = null;
+        }
+
+        const assistantBeforeFeed = lastAssistant()?.id ?? null;
         acc.feed(ev);
+
+        const tail = lastAssistant();
+        if (ev.type === 'user_input') {
+          // Human user_input creates a new assistant skeleton and is a real
+          // turn boundary. Inter-agent user_input renders as a system row and
+          // must not erase the currently open turn identity.
+          if (tail && tail.id !== assistantBeforeFeed) {
+            openTurnStartedAt = null;
+            openTurnAssistantId = null;
+            pendingUserAssistantId = tail.id;
+          }
+        }
+        if (openTurnStartedAt !== null && openTurnAssistantId === null &&
+            tail && !knownAssistantIds.has(tail.id)) {
+          openTurnAssistantId = tail.id;
+        }
+        for (const m of messages) {
+          if (m.role === 'assistant') knownAssistantIds.add(m.id);
+        }
+        if (ev.type === 'hook:turnEnd' && ownAgentEvent) {
+          openTurnStartedAt = null;
+          openTurnAssistantId = null;
+        }
       }
       acc.flush();
+      if (openTurnStartedAt !== null && openTurnAssistantId !== null) {
+        const anchor = `live:${agentPath}:${openTurnStartedAt}`;
+        const idx = messages.findIndex((m) => m.id === openTurnAssistantId);
+        if (idx >= 0) messages[idx] = { ...messages[idx]!, msgId: anchor };
+      }
       finalizeStreamingStatus(messages);
 
       // Commit to bySid[sid].messagesByAgent[agentPath], preserving live
       // daemon-tick-* bubbles + 带锚的在途流式气泡 (multi-tab §5.3) already in the slot.
+      // WAL replay 从未闭合 turnStart 派生同一个 live anchor，因此按身份去重，
+      // 不按文本前缀猜测（自动续轮可能与上一条正文相似）。
       set((s) => {
         const conv = s.bySid[sid] ?? EMPTY_CONV;
         const prev = conv.messagesByAgent[agentPath] ?? [];
         const liveDaemonMsgs = prev.filter((mm) => mm.id.startsWith('daemon-tick-'));
         const liveStreaming = prev.filter((mm) =>
           mm.status === 'streaming' && typeof mm.msgId === 'string' && mm.msgId.startsWith('live:'));
+        const liveAnchors = new Set(liveStreaming.map((mm) => mm.msgId));
+        const walMessages = liveAnchors.size === 0
+          ? messages
+          : messages.filter((mm) => !mm.msgId || !liveAnchors.has(mm.msgId));
         const keep = [...liveDaemonMsgs, ...liveStreaming];
         const merged = keep.length === 0
-          ? messages
-          : [...messages, ...keep].sort((a, b) => a.ts - b.ts);
+          ? walMessages
+          : [...walMessages, ...keep].sort((a, b) => a.ts - b.ts);
         return {
           bySid: {
             ...s.bySid,
@@ -1355,11 +1412,17 @@ export function useActiveMessages(): ChatMessage[] {
   const agentId = useActiveAgentId();
   return useChatStore((s) => (sid && agentId ? (s.bySid[sid]?.messagesByAgent[agentId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES));
 }
-/** Streaming flag for the active (sid, agentId). */
+/** Streaming flag for the active (sid, agentId).
+ *  OR L1 busyByAgentBySid —— boot 时 `_syncActiveAgentRunning` 从 list_agents.running
+ *  写入,避免刷新后错过 turnStart/snapshot 时 Send 误亮。 */
 export function useActiveStreaming(): boolean {
   const sid = useActiveSid();
   const agentId = useActiveAgentId();
-  return useChatStore((s) => (sid && agentId ? Boolean(s.bySid[sid]?.streamingByAgent[agentId]) : false));
+  const chatBusy = useChatStore((s) =>
+    sid && agentId ? Boolean(s.bySid[sid]?.streamingByAgent[agentId]) : false);
+  const shellBusy = useShellStore((s) =>
+    sid && agentId ? Boolean(s.busyByAgentBySid[sid]?.[agentId]) : false);
+  return Boolean(chatBusy || shellBusy);
 }
 export function useActiveContextPct(): number {
   const sid = useActiveSid();
@@ -1377,13 +1440,40 @@ export function useActiveCheckpointMsgIds(): Record<string, boolean> | undefined
   const sid = useActiveSid();
   return useChatStore((s) => (sid ? s.bySid[sid]?.checkpointMsgIds : undefined));
 }
+const EMPTY_STREAMING: Record<string, boolean> = {};
+let mergedChatFlagsRef: Record<string, boolean> = EMPTY_STREAMING;
+let mergedShellFlagsRef: Record<string, boolean> = EMPTY_STREAMING;
+let mergedStreamingFlags: Record<string, boolean> = EMPTY_STREAMING;
+
+function mergeStreamingByAgent(
+  chatFlags: Record<string, boolean>,
+  shellFlags: Record<string, boolean>,
+): Record<string, boolean> {
+  if (chatFlags === mergedChatFlagsRef && shellFlags === mergedShellFlagsRef) {
+    return mergedStreamingFlags;
+  }
+  mergedChatFlagsRef = chatFlags;
+  mergedShellFlagsRef = shellFlags;
+  const keys = new Set([...Object.keys(chatFlags), ...Object.keys(shellFlags)]);
+  if (keys.size === 0) {
+    mergedStreamingFlags = EMPTY_STREAMING;
+    return mergedStreamingFlags;
+  }
+  const out: Record<string, boolean> = {};
+  for (const k of keys) {
+    if (chatFlags[k] || shellFlags[k]) out[k] = true;
+  }
+  mergedStreamingFlags = out;
+  return mergedStreamingFlags;
+}
+
 /** Per-agent streaming flags for the active session (ChatAgentCapsule). */
 export function useActiveStreamingByAgent(): Record<string, boolean> {
   const sid = useActiveSid();
-  return useChatStore((s) => (sid ? s.bySid[sid]?.streamingByAgent ?? EMPTY_STREAMING : EMPTY_STREAMING));
+  const chatFlags = useChatStore((s) => (sid ? s.bySid[sid]?.streamingByAgent ?? EMPTY_STREAMING : EMPTY_STREAMING));
+  const shellFlags = useShellStore((s) => (sid ? s.busyByAgentBySid[sid] ?? EMPTY_STREAMING : EMPTY_STREAMING));
+  return mergeStreamingByAgent(chatFlags, shellFlags);
 }
-
-const EMPTY_STREAMING: Record<string, boolean> = {};
 
 // ── user_input dedupe (sendMessage emits → session-stream skips the echo) ────
 const _emittedClientMsgIds: string[] = [];

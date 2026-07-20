@@ -149,4 +149,52 @@ describe('chat store turn targeting regressions', () => {
     expect(useShellStore.getState().busyByAgentBySid[sid]?.['agent-a']).toBeUndefined();
     expect(useShellStore.getState().busyByAgentBySid[sid]?.['agent-b']).toBeUndefined();
   });
+
+  it('derives a live anchor only for the current unclosed WAL turn', async () => {
+    const sid = 'sid-replay-live';
+    const agentId = 'forge';
+    setShellTarget(tab(sid, agentId));
+    const events = [
+      { type: 'user_input', source: 'user', ts: 1, payload: { content: 'go' } },
+      { type: 'hook:turnStart', source: 'agent:forge', emitterId: agentId, ts: 2, payload: {} },
+      {
+        type: 'hook:assistantMessage',
+        source: 'agent:forge',
+        emitterId: agentId,
+        ts: 3,
+        payload: { llmMessage: { role: 'assistant', content: 'first' } },
+      },
+      { type: 'hook:turnEnd', source: 'agent:forge', emitterId: agentId, ts: 4, payload: {} },
+      // Automatic continuation: no new human user bubble.
+      { type: 'hook:turnStart', source: 'agent:forge', emitterId: agentId, ts: 5, payload: {} },
+      {
+        type: 'user_input',
+        source: 'agent',
+        emitterId: 'iori',
+        to: agentId,
+        ts: 5.5,
+        payload: { content: 'inter-agent update' },
+      },
+      {
+        type: 'hook:assistantMessage',
+        source: 'agent:forge',
+        emitterId: agentId,
+        ts: 6,
+        payload: { llmMessage: { role: 'assistant', content: 'second' } },
+      },
+    ];
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      data: events.map((event) => JSON.stringify(event)).join('\n'),
+    }), { status: 200 })) as typeof fetch;
+
+    await useChatStore.getState().loadSession(sid, agentId);
+
+    const assistants = useChatStore.getState().readMessages(sid, agentId)
+      .filter((message) => message.role === 'assistant');
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0]?.text).toBe('first');
+    expect(assistants[0]?.msgId?.startsWith('live:')).not.toBe(true);
+    expect(assistants[1]?.text).toBe('second');
+    expect(assistants[1]?.msgId).toBe('live:forge:5');
+  });
 });

@@ -229,6 +229,35 @@ function findStreamingAsst(
   return null;
 }
 
+/**
+ * 定位或领养本轮助手气泡:live 锚 → streaming → spawn。
+ * WAL replay 会从未闭合 turnStart 派生同一个 live 锚，因此无需按内容猜测；
+ * 猜测尾部 done 会在自动续轮时错误覆盖上一轮。
+ */
+function ensureStreamingAsst(
+  sid: string,
+  agentId: string,
+  ts: number,
+  anchor?: string,
+): ChatMessage {
+  const msgs = useChatStore.getState().readMessages(sid, agentId);
+  const byAnchor = anchor ? msgs.find((m) => m.msgId === anchor) : undefined;
+  const streaming = findStreamingAsst(sid, agentId)?.msg;
+  const adopt = byAnchor ?? streaming;
+  if (adopt) {
+    patchMsg(sid, agentId, adopt.id, (m) => ({
+      ...m,
+      status: 'streaming',
+      ...(anchor ? { msgId: anchor } : {}),
+    }));
+    useChatStore.getState().setStreaming(sid, agentId, true);
+    return adopt;
+  }
+  const spawned = spawnStreamingAsst(sid, agentId, ts, anchor);
+  useChatStore.getState().setStreaming(sid, agentId, true);
+  return spawned;
+}
+
 function patchMsg(sid: string, agentId: string, msgId: string, mut: (m: ChatMessage) => ChatMessage): void {
   useChatStore.getState().patchMessages(sid, agentId, (msgs) => msgs.map((m) => (m.id === msgId ? mut(m) : m)));
 }
@@ -473,16 +502,8 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'hook:turnStart') {
     if (!emitter) return;
     const anchor = liveAnchor(emitter, event.ts);
-    let ctx = findStreamingAsst(sid, emitter);
-    if (!ctx) {
-      const msg = spawnStreamingAsst(sid, emitter, ts, anchor);
-      ctx = { sid, agentId: emitter, msg };
-    } else {
-      // 领养:发送 tab 的乐观占位 / 已存在的流式气泡接上服务端身份锚(§3.4)。
-      patchMsg(sid, emitter, ctx.msg.id, (m) => ({ ...m, ts, msgId: anchor }));
-    }
-    _seals.set(sealKey(sid, emitter, ctx.msg.id), { text: 0, thinking: 0 });
-    useChatStore.getState().setStreaming(sid, emitter, true);
+    const msg = ensureStreamingAsst(sid, emitter, ts, anchor);
+    _seals.set(sealKey(sid, emitter, msg.id), { text: 0, thinking: 0 });
     return;
   }
 
@@ -494,23 +515,19 @@ function dispatch(evt: SessionEvent): void {
     // 发送 tab 去重(R1-b 对偶):cli 桥把 token 转发为 stream:llm 后,发起 turn 的
     // tab 已经在从自己的 /api/cli/chat SSE 渲染同一份文本 —— WS 这份丢弃。
     if ((chunk.type === 'text' || chunk.type === 'thinking') && isCliSseTurnActive(sid, emitter)) return;
-    let ctx = findStreamingAsst(sid, emitter);
-    if (!ctx) {
-      const msg = spawnStreamingAsst(sid, emitter, ts);
-      ctx = { sid, agentId: emitter, msg };
-    }
+    const ctxMsg = ensureStreamingAsst(sid, emitter, ts);
     if (chunk.type === 'text') {
       const txt = chunk.text ?? '';
       if (!txt) return;
       chatFirstToken(emitter);
-      enqueueStreamText(sid, emitter, ctx.msg.id, 'text', ts, txt);
+      enqueueStreamText(sid, emitter, ctxMsg.id, 'text', ts, txt);
       return;
     }
     if (chunk.type === 'thinking') {
       const txt = chunk.text ?? '';
       if (!txt) return;
       chatFirstToken(emitter);
-      enqueueStreamText(sid, emitter, ctx.msg.id, 'thinking', ts, txt);
+      enqueueStreamText(sid, emitter, ctxMsg.id, 'thinking', ts, txt);
       return;
     }
     if (chunk.type === 'tool_call') {
@@ -519,7 +536,7 @@ function dispatch(evt: SessionEvent): void {
       let parsedArgs: unknown = chunk.arguments ?? '';
       try { parsedArgs = JSON.parse(chunk.arguments ?? ''); } catch { /* partial */ }
       const tc: ToolCall = { callId, name: chunk.name ?? 'tool', args: parsedArgs, status: 'running' };
-      patchMsg(sid, emitter, ctx.msg.id, (m) => ({
+      patchMsg(sid, emitter, ctxMsg.id, (m) => ({
         ...m,
         toolCalls: m.toolCalls.some((tcl) => tcl.callId === callId) ? m.toolCalls.map((tcl) => (tcl.callId === callId ? { ...tcl, ...tc } : tcl)) : [...m.toolCalls, { ...tc, at: m.text.length }],
         segments: upsertToolSegment(m.segments ?? [], ts, tc),
@@ -532,9 +549,71 @@ function dispatch(evt: SessionEvent): void {
       if (!callId) return;
       const delta = chunk.arguments_delta ?? '';
       if (!delta) return;
-      enqueueDelta(sid, emitter, ctx.msg.id, callId, chunk.name ?? 'tool', delta);
+      enqueueDelta(sid, emitter, ctxMsg.id, callId, chunk.name ?? 'tool', delta);
       return;
     }
+    return;
+  }
+
+  // the reference agent CLI / CLI bridge tool events use stream:tool_* rather than
+  // hook:toolCall/toolResult. They are transient (not in WAL), so the WS path
+  // must maintain the live bubble for refresh/multi-tab restoration.
+  if (type === 'stream:tool_use') {
+    if (!emitter) return;
+    if (isCliSseTurnActive(sid, emitter)) return;
+    const callId = typeof payload.toolUseId === 'string' ? payload.toolUseId : '';
+    if (!callId) return;
+    const msg = ensureStreamingAsst(sid, emitter, ts);
+    const tc: ToolCall = {
+      callId,
+      name: typeof payload.name === 'string' ? payload.name : 'tool',
+      args: payload.input ?? {},
+      status: 'running',
+    };
+    patchMsg(sid, emitter, msg.id, (m) => ({
+      ...m,
+      toolCalls: m.toolCalls.some((existing) => existing.callId === callId)
+        ? m.toolCalls.map((existing) => existing.callId === callId ? { ...existing, ...tc } : existing)
+        : [...m.toolCalls, { ...tc, at: m.text.length }],
+      segments: upsertToolSegment(m.segments ?? [], ts, tc),
+      status: 'streaming',
+    }));
+    const fileArgs = payload.input && typeof payload.input === 'object'
+      ? payload.input as Record<string, unknown>
+      : undefined;
+    extractFileTouch(sid, emitter, callId, tc.name, fileArgs, ts);
+    return;
+  }
+
+  if (type === 'stream:tool_result') {
+    if (!emitter) return;
+    if (isCliSseTurnActive(sid, emitter)) return;
+    const callId = typeof payload.toolUseId === 'string' ? payload.toolUseId : '';
+    if (!callId) return;
+    const ctx = findStreamingAsst(sid, emitter);
+    if (!ctx) return;
+    const apply = (tc: ToolCall): ToolCall =>
+      tc.callId === callId
+        ? {
+          ...tc,
+          status: payload.isError ? 'error' : 'done',
+          ...(payload.isError
+            ? { error: String(payload.output ?? '') }
+            : { result: String(payload.output ?? '') }),
+        }
+        : tc;
+    patchMsg(sid, emitter, ctx.msg.id, (m) => ({
+      ...m,
+      toolCalls: m.toolCalls.map(apply),
+      segments: (m.segments ?? []).map((segment) =>
+        segment.kind === 'tool' ? { ...segment, tool: apply(segment.tool) } : segment),
+    }));
+    useShellStore.getState().updateFileTouchStatus(
+      sid,
+      emitter,
+      callId,
+      payload.isError ? 'error' : 'done',
+    );
     return;
   }
 
@@ -543,12 +622,11 @@ function dispatch(evt: SessionEvent): void {
     const callId = p.toolCall?.id ?? '';
     if (!callId) return;
     if (!emitter) return;
-    const ctx = findStreamingAsst(sid, emitter);
-    if (!ctx) return;
+    const ctxMsg = ensureStreamingAsst(sid, emitter, ts);
     dropPendingDelta(sid, callId);
     const ts2 = event.ts ?? Date.now();
     const tc: ToolCall = { callId, name: p.name ?? p.toolCall?.name ?? 'tool', args: p.args ?? {}, status: 'running' };
-    patchMsg(sid, emitter, ctx.msg.id, (m) => ({
+    patchMsg(sid, emitter, ctxMsg.id, (m) => ({
       ...m,
       toolCalls: m.toolCalls.some((tcl) => tcl.callId === callId) ? m.toolCalls.map((tcl) => (tcl.callId === callId ? { ...tcl, ...tc } : tcl)) : [...m.toolCalls, { ...tc, at: m.text.length }],
       segments: upsertToolSegment(m.segments ?? [], ts2, tc),
@@ -560,15 +638,14 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'hook:toolResult') {
     const p = payload as HookToolResultPayload;
     if (!emitter) return;
-    const ctx = findStreamingAsst(sid, emitter);
-    if (!ctx) return;
+    const ctxMsg = ensureStreamingAsst(sid, emitter, ts);
     const callId = p.callId;
     const apply = (tc: ToolCall): ToolCall => {
       const matched = callId ? tc.callId === callId : (tc.name === p.name && tc.status === 'running');
       if (!matched) return tc;
       return { ...tc, status: p.error ? 'error' : 'done', error: p.error };
     };
-    patchMsg(sid, emitter, ctx.msg.id, (m) => ({
+    patchMsg(sid, emitter, ctxMsg.id, (m) => ({
       ...m,
       toolCalls: m.toolCalls.map(apply),
       segments: (m.segments ?? []).map((s) => (s.kind === 'tool' ? { ...s, tool: apply(s.tool) } : s)),
@@ -580,10 +657,10 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'hook:turnEnd') {
     const p = payload as HookTurnEndPayload;
     if (!emitter) return;
-    const ctx = findStreamingAsst(sid, emitter);
-    if (ctx) {
+    const ctxMsg = findStreamingAsst(sid, emitter)?.msg;
+    if (ctxMsg) {
       const endTs = event.ts ?? Date.now();
-      patchMsg(sid, emitter, ctx.msg.id, (m) => {
+      patchMsg(sid, emitter, ctxMsg.id, (m) => {
         const durationMs = endTs - m.ts;
         if (p.error) return { ...m, status: 'error', errorMessage: p.error, durationMs };
         return { ...m, status: 'done', durationMs };
@@ -607,9 +684,8 @@ function dispatch(evt: SessionEvent): void {
     if (emitter && !isCliSseTurnActive(sid, emitter)) {
       const step = extractAuthoritative(payload);
       if (step) {
-        const ctx = findStreamingAsst(sid, emitter) ??
-          { sid, agentId: emitter, msg: spawnStreamingAsst(sid, emitter, ts) };
-        reconcileAssistantStep(sid, emitter, ctx.msg, step, ts);
+        const msg = ensureStreamingAsst(sid, emitter, ts);
+        reconcileAssistantStep(sid, emitter, msg, step, ts);
       }
     }
     const usage = payload.usage as { inputTokens?: number; outputTokens?: number } | undefined;
@@ -624,8 +700,8 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'agent_crash') {
     const errMsg = typeof payload.error === 'string' ? payload.error : typeof payload.message === 'string' ? payload.message : 'agent crash';
     if (emitter) {
-      const ctx = findStreamingAsst(sid, emitter);
-      if (ctx) patchMsg(sid, emitter, ctx.msg.id, (m) => ({ ...m, status: 'error', errorMessage: errMsg }));
+      const ctxMsg = findStreamingAsst(sid, emitter)?.msg;
+      if (ctxMsg) patchMsg(sid, emitter, ctxMsg.id, (m) => ({ ...m, status: 'error', errorMessage: errMsg }));
       useChatStore.getState().setStreaming(sid, emitter, false);
     }
     pushSystemMessage(sid, emitter, { text: errMsg, level: 'error', source: emitterId ? `${emitterId}(agent_crash)` : 'agent_crash', from: emitterId, ts });
@@ -697,40 +773,19 @@ function applyTurnSnapshot(frame: TurnSnapshotFrame): void {
   if (p.text) segments = appendChatSegment(segments ?? [], { kind: 'text', ts: p.startedAt, text: p.text });
   for (const tc of toolCalls) segments = upsertToolSegment(segments ?? [], p.startedAt, tc);
 
-  const store = useChatStore.getState();
-  const msgs = store.readMessages(sid, emitterId);
-  const existing = msgs.find((m) => m.msgId === anchor) ?? findStreamingAsst(sid, emitterId)?.msg;
-  let localId: string;
-  if (existing) {
-    localId = existing.id;
-    patchMsg(sid, emitterId, existing.id, (m) => ({
-      ...m,
-      msgId: anchor,
-      ts: p.startedAt,
-      text: p.text,
-      ...(p.thinking ? { thinking: p.thinking } : {}),
-      toolCalls,
-      segments,
-      status: 'streaming',
-    }));
-  } else {
-    const msg: ChatMessage = {
-      id: `s-${p.startedAt}-${Math.random().toString(36).slice(2, 8)}`,
-      role: 'assistant',
-      text: p.text,
-      ...(p.thinking ? { thinking: p.thinking } : {}),
-      toolCalls,
-      segments,
-      status: 'streaming',
-      ts: p.startedAt,
-      providerId: 'forgeax',
-      msgId: anchor,
-    };
-    store.patchMessages(sid, emitterId, (prev) => [...prev, msg]);
-    localId = msg.id;
-  }
-  _seals.set(sealKey(sid, emitterId, localId), { text: p.sealedTextLen, thinking: p.sealedThinkingLen });
-  store.setStreaming(sid, emitterId, true);
+  const existing = ensureStreamingAsst(sid, emitterId, p.startedAt, anchor);
+  patchMsg(sid, emitterId, existing.id, (m) => ({
+    ...m,
+    msgId: anchor,
+    ts: p.startedAt,
+    text: p.text,
+    thinking: p.thinking || undefined,
+    toolCalls,
+    segments,
+    status: 'streaming',
+  }));
+  _seals.set(sealKey(sid, emitterId, existing.id), { text: p.sealedTextLen, thinking: p.sealedThinkingLen });
+  useChatStore.getState().setStreaming(sid, emitterId, true);
 }
 
 /** 断线超窗/server 换代:全量恢复(强制 WAL 重放,绕过 slot 保护)→ 放行缓冲帧。 */

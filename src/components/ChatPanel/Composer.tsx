@@ -105,6 +105,7 @@ const PROVIDER_DISPLAY_FALLBACK: Record<string, string> = {
   'codex': 'OpenAI Codex',
   'cursor-agent': 'Cursor',
   'codebuddy': 'a peer agent CLI',
+  'kimi-code': 'Kimi Code',
 };
 
 // Concise one-line description per provider/kernel id → i18n key. Every dropdown
@@ -118,6 +119,7 @@ const PROVIDER_DESC_I18N: Record<string, string> = {
   'codex': 'composer.cliDescCodex',
   'cursor-agent': 'composer.cliDescCursor',
   'codebuddy': 'composer.cliDescCodebuddy',
+  'kimi-code': 'composer.cliDescKimiCode',
 };
 
 // Provider (model-source) switching is owned by Settings › Providers now — it's
@@ -143,7 +145,7 @@ const SHOW_CHAT_PROVIDER_SWITCHER = false;
 // reset value, instead of a hit on the previous provider's stale model (the
 // "切了 provider 但模型还停在 gpt" regression).
 const agentModelCache = new Map<string, AgentModelState | null>();
-const CLI_CATALOG_IDS = new Set(['claude-code', 'codex', 'cursor-agent', 'codebuddy']);
+const CLI_CATALOG_IDS = new Set(['claude-code', 'codex', 'cursor-agent', 'codebuddy', 'kimi-code']);
 /** Catalog-provider id in effect for a providerOverride (null = native forgeax). */
 const catalogOf = (providerOverride: string | null): string | null =>
   providerOverride && CLI_CATALOG_IDS.has(providerOverride) ? providerOverride : null;
@@ -519,17 +521,9 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   // 2026-06-02 — claude-code 现在也读 agent.json::models.model（chat 桥把它解析进
   // req.options.model，provider 转成 `claude --model`）。2026-07 — rented CLI 都走
   // driver-scoped catalog，选中模型经 TurnRequest.model 传给各自 `--model`。
-  const canSwitchModel =
-    isForgeaXNative || providerOverride === 'claude-code' || providerOverride === 'codex' || providerOverride === 'cursor-agent' || providerOverride === 'codebuddy';
-  const modelCatalogProviderId =
-    providerOverride === 'claude-code' || providerOverride === 'codex' || providerOverride === 'cursor-agent' || providerOverride === 'codebuddy'
-      ? providerOverride
-      : null;
-  const catalogProviderFor = useCallback((nextProvider: string | null): string | null => (
-    nextProvider === 'claude-code' || nextProvider === 'codex' || nextProvider === 'cursor-agent' || nextProvider === 'codebuddy'
-      ? nextProvider
-      : null
-  ), []);
+  const canSwitchModel = isForgeaXNative || CLI_CATALOG_IDS.has(providerOverride ?? '');
+  const modelCatalogProviderId = catalogOf(providerOverride);
+  const catalogProviderFor = useCallback(catalogOf, []);
   const switchProviderWithDefaultModel = useCallback((nextProvider: string | null) => {
     if (providerOverride === nextProvider) {
       setCliOpen(false);

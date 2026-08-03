@@ -336,6 +336,12 @@ function useThrottledValue<T>(value: T, ms: number): T {
   const lastAt = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
+    // Equality guard breaks the render loop: once `shown` has converged to
+    // `value`, re-running this effect produces NO further setState. Without it,
+    // the leading edge fired `setShown(value)` unconditionally every time the
+    // effect ran, which under fast streaming re-renders exceeded React's
+    // nested-update limit ("Maximum update depth exceeded").
+    if (shown === value) return;
     const since = Date.now() - lastAt.current;
     if (since >= ms) {
       lastAt.current = Date.now();
@@ -345,7 +351,7 @@ function useThrottledValue<T>(value: T, ms: number): T {
       timer.current = setTimeout(() => { lastAt.current = Date.now(); setShown(value); }, ms - since);
     }
     return () => { if (timer.current) clearTimeout(timer.current); };
-  }, [value, ms]);
+  }, [value, ms, shown]);
   return shown;
 }
 

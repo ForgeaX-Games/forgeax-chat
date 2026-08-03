@@ -437,6 +437,38 @@ function activeTarget(): { sid: string | null; agentId: string | null } {
   return { sid, agentId };
 }
 
+/** Seal an in-flight assistant bubble after Stop/abort so ForgeCard leaves
+ *  "正在思考" (status==='streaming' → running) without waiting for turnEnd. */
+function sealAbortedAssistantMessage(m: ChatMessage, endTs: number): ChatMessage {
+  if (m.role !== 'assistant' || m.status !== 'streaming') return m;
+  const sealTool = (tc: ToolCall): ToolCall =>
+    tc.status === 'running' ? { ...tc, status: 'done' } : tc;
+  const subAgents = m.subAgents
+    ? Object.fromEntries(
+        Object.entries(m.subAgents).map(([id, run]) => [
+          id,
+          run.status === 'streaming'
+            ? {
+                ...run,
+                status: 'done' as const,
+                toolCalls: run.toolCalls.map(sealTool),
+              }
+            : run,
+        ]),
+      )
+    : undefined;
+  return {
+    ...m,
+    status: 'done',
+    durationMs: endTs - m.ts,
+    toolCalls: m.toolCalls.map(sealTool),
+    segments: m.segments?.map((s: ChatSegment) =>
+      s.kind === 'tool' ? { ...s, tool: sealTool(s.tool) } : s,
+    ),
+    ...(subAgents ? { subAgents } : {}),
+  };
+}
+
 export const useChatStore = create<ChatStoreState>((set, get) => ({
   bySid: {},
   queuedMessages: {},
@@ -460,6 +492,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   readMessages: (sid, agentId) => get().bySid[sid]?.messagesByAgent[agentId] ?? EMPTY_MESSAGES,
 
   setStreaming: (sid, agentId, val) => {
+    // After Stop, ignore late setStreaming(true) until the next user send.
+    // Otherwise abort races / late WS frames flip the Stop button back on.
+    if (val && isAgentStreamSuppressed(sid, agentId)) return;
     // Mirror the per-(sid, agentId) busy flag into L1 so registry surfaces
     // (SessionSwitcher / AgentsPanel) can render a spinner without importing
     // chat message state. L1 owns the flag's storage; chat owns its truth.
@@ -837,8 +872,11 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     if (!sid) return;
     const conv = get().bySid[sid];
 
+    // Stop should only abort the current agent. The bug here is front-end
+    // re-rendering stale live state, not backend cancellation scope.
     const c = _abortByTab.get(sid);
-    if (c) c.controller.abort();
+    const ownsActiveController = Boolean(c && agentId && c.agentId === agentId);
+    if (ownsActiveController) c!.controller.abort();
 
     const runId = conv?.runId ?? null;
     if (runId) {
@@ -849,6 +887,29 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const qs = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
     fetch(`/api/sessions/${encodeURIComponent(sid)}/abort${qs}`, { method: 'POST' })
       .catch((e) => console.warn('[chat.cancelStream] session abort POST failed', (e as Error).message));
+
+    // Optimistic UI clear + suppress late WS frames that would call
+    // setStreaming(true) again (the "need two Stops" symptom). Keep this scoped
+    // to the selected agent; do not stop Forge just because Iori was stopped.
+    // Two independent UI bindings must both be cleared:
+    //   1) streamingByAgent / busyByAgentBySid → Stop button + "回复进行中"
+    //   2) assistant message status === 'streaming' → ForgeCard "正在思考… Ns"
+    if (agentId) {
+      const endTs = Date.now();
+      suppressAgentStream(sid, agentId);
+      get().setStreaming(sid, agentId, false);
+      get().patchMessages(sid, agentId, (msgs) =>
+        msgs.map((m) => sealAbortedAssistantMessage(m, endTs)),
+      );
+      const shell = useShellStore.getState();
+      const live = shell.liveAgents[sid];
+      if (live?.some((a) => a.path === agentId && a.running)) {
+        shell.setLiveAgents(
+          sid,
+          live.map((a) => (a.path === agentId ? { ...a, running: false } : a)),
+        );
+      }
+    }
 
     closeThreadHistoryTails(sid);
   },
@@ -937,37 +998,84 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       return;
     }
 
-    // /<name> [args] — generic server command dispatch (match on wire text so
-    // command pills expand to `/name` before routing).
-    const wireText = expandPills(trimmed);
+    // /<name> [args] — resolve project/bus skills before falling back to the
+    // legacy server-command transport. Skills are prompt entries, so their
+    // materialized prompt is fed into the normal kernel turn below; commands
+    // still use /api/commands and return their compact system result.
+    let wireText = expandPills(trimmed);
     const cmdMatch = wireText.match(/^\/([a-z][a-z0-9_-]*)(?:\s+(.*))?$/s);
     if (cmdMatch) {
       const cmdName = cmdMatch[1];
       const cmdArgs = cmdMatch[2]?.trim() || '';
       const agentId = startTab?.agentId ?? null;
-      const displayText = expandPillsForDisplay(trimmed);
-      get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
-        id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
-      }]);
-      const pendingId = newId();
-      get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
-        id: pendingId, role: 'system', text: `⏳ /${cmdName} running...`, toolCalls: [], status: 'done', ts: Date.now(),
-      }]);
+      let skill: { skillId: string; extensionId: string } | undefined;
       try {
-        const r = await fetch(`/api/commands/${encodeURIComponent(cmdName)}/execute`, {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ args: cmdArgs ? cmdArgs.split(/\s+/) : [], sessionId: startSid, requestingAgentId: agentId ?? undefined }),
-        });
-        const j = await r.json();
-        const result = j.result;
-        const sysText = result?.ok !== false
-          ? `✅ /${cmdName} → ${typeof result?.data === 'string' ? result.data : JSON.stringify(result?.data ?? result)}`
-          : `❌ /${cmdName}: ${result?.error ?? 'unknown error'}`;
-        get().patchMessages(startSid, sysAgent, (msgs) => msgs.map((m) => m.id === pendingId ? { ...m, text: sysText, ts: Date.now() } : m));
-      } catch (e) {
-        get().patchMessages(startSid, sysAgent, (msgs) => msgs.map((m) => m.id === pendingId ? { ...m, text: t('store.command.networkError', { cmdName, message: (e as Error).message }), ts: Date.now() } : m));
+        const skillResp = await fetch('/api/skills');
+        if (skillResp.ok) {
+          const data = (await skillResp.json()) as {
+            skills?: Array<{
+              id: string;
+              extensionId: string;
+              triggers?: Array<{ kind: string; command?: string }>;
+            }>;
+          };
+          const found = data.skills?.find((s) => s.triggers?.some((tr) => tr.kind === 'slash' && tr.command === cmdName));
+          if (found) skill = { skillId: found.id, extensionId: found.extensionId };
+        }
+      } catch {
+        // A transient skill-catalog failure should not hide builtin commands.
       }
-      return;
+
+      if (skill) {
+        try {
+          const r = await fetch('/api/skills/run', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              skillId: skill.skillId,
+              extensionId: skill.extensionId,
+              input: cmdArgs || undefined,
+              caller: { kind: 'user', sessionId: startSid, agentId: agentId ?? undefined },
+            }),
+          });
+          const result = await r.json() as { ok?: boolean; kind?: string; text?: string; error?: string };
+          if (!r.ok || result.ok === false) {
+            pushSys(`❌ /${cmdName}: ${result.error ?? `skill request failed (${r.status})`}`);
+            return;
+          }
+          if (result.kind !== 'prompt' || typeof result.text !== 'string') {
+            pushSys(`❌ /${cmdName}: skill returned no prompt`);
+            return;
+          }
+          wireText = result.text + (cmdArgs ? `\n\nUser input:\n${cmdArgs}` : '');
+        } catch (e) {
+          pushSys(`❌ /${cmdName}: ${t('store.command.networkError', { cmdName, message: (e as Error).message })}`);
+          return;
+        }
+      } else {
+        const displayText = expandPillsForDisplay(trimmed);
+        get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
+          id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
+        }]);
+        const pendingId = newId();
+        get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
+          id: pendingId, role: 'system', text: `⏳ /${cmdName} running...`, toolCalls: [], status: 'done', ts: Date.now(),
+        }]);
+        try {
+          const r = await fetch(`/api/commands/${encodeURIComponent(cmdName)}/execute`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ args: cmdArgs ? cmdArgs.split(/\s+/) : [], sessionId: startSid, requestingAgentId: agentId ?? undefined }),
+          });
+          const j = await r.json();
+          const result = j.result;
+          const sysText = result?.ok !== false
+            ? `✅ /${cmdName} → ${typeof result?.data === 'string' ? result.data : JSON.stringify(result?.data ?? result)}`
+            : `❌ /${cmdName}: ${result?.error ?? 'unknown error'}`;
+          get().patchMessages(startSid, sysAgent, (msgs) => msgs.map((m) => m.id === pendingId ? { ...m, text: sysText, ts: Date.now() } : m));
+        } catch (e) {
+          get().patchMessages(startSid, sysAgent, (msgs) => msgs.map((m) => m.id === pendingId ? { ...m, text: t('store.command.networkError', { cmdName, message: (e as Error).message }), ts: Date.now() } : m));
+        }
+        return;
+      }
     }
 
     // Resolve the chat target — @mention overrides the tab's pinned agent.
@@ -1051,6 +1159,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       useShellStore.getState().renameTab(startSid, wireText.slice(0, 40).replace(/\s+/g, ' '));
     }
     get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, userMsg, asstMsg]);
+    clearAgentStreamSuppression(startSid, activeAgent);
     setStreaming(true);
 
     const turnOverride = startTab?.providerOverride ?? null;
@@ -1485,6 +1594,24 @@ export function markEmittedClientMsg(clientMsgId: string): void {
 export function isOwnUserInput(clientMsgId: string | undefined): boolean {
   if (!clientMsgId) return false;
   return _emittedClientMsgIds.includes(clientMsgId);
+}
+
+// ── Stop/abort stream suppression ──────────────────────────────────────────
+// After cancelStream, late WS frames (stream:llm / turnStart / turn-snapshot)
+// must not re-light Stop via setStreaming(true) / reopen a sealed bubble.
+// Cleared on the next user sendMessage for that agent.
+const _streamSuppressByAgent = new Set<string>();
+function streamSuppressKey(sid: string, agentId: string): string {
+  return `${sid}::${agentId}`;
+}
+export function suppressAgentStream(sid: string, agentId: string): void {
+  _streamSuppressByAgent.add(streamSuppressKey(sid, agentId));
+}
+export function clearAgentStreamSuppression(sid: string, agentId: string): void {
+  _streamSuppressByAgent.delete(streamSuppressKey(sid, agentId));
+}
+export function isAgentStreamSuppressed(sid: string, agentId: string): boolean {
+  return _streamSuppressByAgent.has(streamSuppressKey(sid, agentId));
 }
 
 // ── cli-SSE turn dedupe (sendMessage cli 路径 → session-stream 丢 WS 副本) ────

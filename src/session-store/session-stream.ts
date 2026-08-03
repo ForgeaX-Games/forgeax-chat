@@ -31,7 +31,14 @@ import {
 import { ratioFromUsage } from '../event-engine/turn-accumulator';
 import { chatFirstToken, chatTurnEnd } from '@forgeax/interface/lib/trace';
 import { t } from '@/i18n';
-import { appendChatSegment, isOwnUserInput, isCliSseTurnActive, upsertToolSegment, useChatStore } from './store';
+import {
+  appendChatSegment,
+  isAgentStreamSuppressed,
+  isOwnUserInput,
+  isCliSseTurnActive,
+  upsertToolSegment,
+  useChatStore,
+} from './store';
 
 // ─── server event payload shapes ─────────────────────────────────────────
 
@@ -239,7 +246,10 @@ function ensureStreamingAsst(
   agentId: string,
   ts: number,
   anchor?: string,
-): ChatMessage {
+): ChatMessage | null {
+  // After Stop, ignore late live frames so they cannot reopen a sealed bubble
+  // or flip the Stop button back on (needs-two-clicks).
+  if (isAgentStreamSuppressed(sid, agentId)) return null;
   const msgs = useChatStore.getState().readMessages(sid, agentId);
   const byAnchor = anchor ? msgs.find((m) => m.msgId === anchor) : undefined;
   const streaming = findStreamingAsst(sid, agentId)?.msg;
@@ -503,6 +513,7 @@ function dispatch(evt: SessionEvent): void {
     if (!emitter) return;
     const anchor = liveAnchor(emitter, event.ts);
     const msg = ensureStreamingAsst(sid, emitter, ts, anchor);
+    if (!msg) return;
     _seals.set(sealKey(sid, emitter, msg.id), { text: 0, thinking: 0 });
     return;
   }
@@ -516,6 +527,7 @@ function dispatch(evt: SessionEvent): void {
     // tab 已经在从自己的 /api/cli/chat SSE 渲染同一份文本 —— WS 这份丢弃。
     if ((chunk.type === 'text' || chunk.type === 'thinking') && isCliSseTurnActive(sid, emitter)) return;
     const ctxMsg = ensureStreamingAsst(sid, emitter, ts);
+    if (!ctxMsg) return;
     if (chunk.type === 'text') {
       const txt = chunk.text ?? '';
       if (!txt) return;
@@ -564,6 +576,7 @@ function dispatch(evt: SessionEvent): void {
     const callId = typeof payload.toolUseId === 'string' ? payload.toolUseId : '';
     if (!callId) return;
     const msg = ensureStreamingAsst(sid, emitter, ts);
+    if (!msg) return;
     const tc: ToolCall = {
       callId,
       name: typeof payload.name === 'string' ? payload.name : 'tool',
@@ -623,6 +636,7 @@ function dispatch(evt: SessionEvent): void {
     if (!callId) return;
     if (!emitter) return;
     const ctxMsg = ensureStreamingAsst(sid, emitter, ts);
+    if (!ctxMsg) return;
     dropPendingDelta(sid, callId);
     const ts2 = event.ts ?? Date.now();
     const tc: ToolCall = { callId, name: p.name ?? p.toolCall?.name ?? 'tool', args: p.args ?? {}, status: 'running' };
@@ -639,6 +653,7 @@ function dispatch(evt: SessionEvent): void {
     const p = payload as HookToolResultPayload;
     if (!emitter) return;
     const ctxMsg = ensureStreamingAsst(sid, emitter, ts);
+    if (!ctxMsg) return;
     const callId = p.callId;
     const apply = (tc: ToolCall): ToolCall => {
       const matched = callId ? tc.callId === callId : (tc.name === p.name && tc.status === 'running');
@@ -685,7 +700,7 @@ function dispatch(evt: SessionEvent): void {
       const step = extractAuthoritative(payload);
       if (step) {
         const msg = ensureStreamingAsst(sid, emitter, ts);
-        reconcileAssistantStep(sid, emitter, msg, step, ts);
+        if (msg) reconcileAssistantStep(sid, emitter, msg, step, ts);
       }
     }
     const usage = payload.usage as { inputTokens?: number; outputTokens?: number } | undefined;
@@ -774,6 +789,7 @@ function applyTurnSnapshot(frame: TurnSnapshotFrame): void {
   for (const tc of toolCalls) segments = upsertToolSegment(segments ?? [], p.startedAt, tc);
 
   const existing = ensureStreamingAsst(sid, emitterId, p.startedAt, anchor);
+  if (!existing) return;
   patchMsg(sid, emitterId, existing.id, (m) => ({
     ...m,
     msgId: anchor,

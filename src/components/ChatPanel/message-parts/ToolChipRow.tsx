@@ -151,17 +151,22 @@ export function ToolChipRow({ tc, size = 'md' }: { tc: ToolCall; size?: 'sm' | '
     return lines.length > TAIL_LINES ? lines.slice(-TAIL_LINES).join('\n') : streamingContent;
   }, [isStreaming, streamingContent]);
 
-  // Auto-open when streaming starts; auto-collapse when streaming ends
+  // Auto-open when streaming starts; auto-collapse when streaming ends.
+  // Driven by the streaming EDGE (wasStreamingRef), NOT by `open` — keeping
+  // `open` out of the dep array means toggling it never re-runs this effect,
+  // which (combined with fast streaming re-renders) could otherwise self-loop
+  // into "Maximum update depth exceeded". Functional setState returns the same
+  // value when already in the target state so React bails out.
   useEffect(() => {
-    if (isStreaming && !open && !userToggledRef.current) {
-      setOpen(true);
+    if (userToggledRef.current) return;
+    if (isStreaming && !wasStreamingRef.current) {
       wasStreamingRef.current = true;
-    }
-    if (!isStreaming && wasStreamingRef.current && !userToggledRef.current) {
-      setOpen(false);
+      setOpen((v) => (v ? v : true));
+    } else if (!isStreaming && wasStreamingRef.current) {
       wasStreamingRef.current = false;
+      setOpen((v) => (v ? false : v));
     }
-  }, [isStreaming, open]);
+  }, [isStreaming]);
 
   const handleToggle = () => {
     userToggledRef.current = true;

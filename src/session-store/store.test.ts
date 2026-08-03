@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { useShellStore, type ChatTab } from '@forgeax/interface/store';
 import {
   _chatInternals,
+  clearAgentStreamSuppression,
+  isAgentStreamSuppressed,
   useChatStore,
   type QueuedMessage,
   type SendMessageOpts,
@@ -41,6 +43,13 @@ beforeEach(() => {
 afterEach(() => {
   for (const turn of _chatInternals.abortByTab.values()) turn.controller.abort();
   _chatInternals.abortByTab.clear();
+  for (const sid of Object.keys(useChatStore.getState().bySid)) {
+    for (const agentId of Object.keys(
+      useChatStore.getState().bySid[sid]?.streamingByAgent ?? {},
+    )) {
+      clearAgentStreamSuppression(sid, agentId);
+    }
+  }
   useChatStore.setState(initialChatState, true);
   useShellStore.setState(initialShellState, true);
   globalThis.fetch = initialFetch;
@@ -150,6 +159,81 @@ describe('chat store turn targeting regressions', () => {
     expect(useShellStore.getState().busyByAgentBySid[sid]?.['agent-b']).toBeUndefined();
   });
 
+  it('clears delegated sub-agent streaming on Stop without changing abort scope', () => {
+    const sid = 'sid-delegated';
+    const subagent = 'iori';
+    const abortRequests: string[] = [];
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/abort')) abortRequests.push(url);
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    setShellTarget(tab(sid, subagent));
+    useChatStore.getState().setStreaming(sid, subagent, true);
+    useChatStore.getState().patchMessages(sid, subagent, () => [
+      {
+        id: 'asst-live',
+        role: 'assistant',
+        text: '',
+        toolCalls: [{ callId: 'c1', name: 'read', args: {}, status: 'running' }],
+        status: 'streaming',
+        ts: Date.now() - 6000,
+      },
+    ]);
+    useShellStore.getState().setLiveAgents(sid, [
+      {
+        path: subagent,
+        display: 'Iori',
+        parent: 'forge',
+        running: true,
+        depth: 2,
+      },
+    ]);
+
+    useChatStore.getState().cancelStream();
+
+    expect(abortRequests).toEqual([
+      `/api/sessions/${encodeURIComponent(sid)}/abort?agent=${encodeURIComponent(subagent)}`,
+    ]);
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent[subagent]).toBe(false);
+    expect(useShellStore.getState().busyByAgentBySid[sid]?.[subagent]).toBeUndefined();
+    const sealed = useChatStore.getState().readMessages(sid, subagent)[0];
+    expect(sealed?.status).toBe('done');
+    expect(sealed?.toolCalls[0]?.status).toBe('done');
+    expect(useShellStore.getState().liveAgents[sid]?.[0]?.running).toBe(false);
+    expect(isAgentStreamSuppressed(sid, subagent)).toBe(true);
+    useChatStore.getState().setStreaming(sid, subagent, true);
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent[subagent]).toBe(false);
+  });
+
+  it('keeps other busy agents running when stopping the active sub-agent', () => {
+    const sid = 'sid-scope';
+    const abortRequests: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/abort')) abortRequests.push(url);
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    setShellTarget(tab(sid, 'iori'));
+    useChatStore.getState().setStreaming(sid, 'forge', true);
+    useChatStore.getState().setStreaming(sid, 'iori', true);
+
+    useChatStore.getState().cancelStream();
+
+    expect(abortRequests).toEqual([
+      `/api/sessions/${encodeURIComponent(sid)}/abort?agent=iori`,
+    ]);
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent['iori']).toBe(false);
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent['forge']).toBe(true);
+    expect(useShellStore.getState().busyByAgentBySid[sid]?.['iori']).toBeUndefined();
+    expect(useShellStore.getState().busyByAgentBySid[sid]?.['forge']).toBe(true);
+    expect(isAgentStreamSuppressed(sid, 'iori')).toBe(true);
+    expect(isAgentStreamSuppressed(sid, 'forge')).toBe(false);
+  });
+
   it('derives a live anchor only for the current unclosed WAL turn', async () => {
     const sid = 'sid-replay-live';
     const agentId = 'forge';
@@ -196,5 +280,57 @@ describe('chat store turn targeting regressions', () => {
     expect(assistants[0]?.msgId?.startsWith('live:')).not.toBe(true);
     expect(assistants[1]?.text).toBe('second');
     expect(assistants[1]?.msgId).toBe('live:forge:5');
+  });
+
+  it('routes a project slash skill through every registered CLI kernel', async () => {
+    const providers = ['claude-code', 'forgeax-core', 'codex', 'cursor-agent', 'codebuddy', 'kimi-code'];
+    const requests: Array<{ provider: string; message: string }> = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url === '/api/skills') {
+        return new Response(JSON.stringify({
+          skills: [{
+            id: 'shared-kernel-smoke',
+            extensionId: '@forgeax-extension/shared-kernel-smoke-skill',
+            triggers: [{ kind: 'slash', command: 'shared-kernel-smoke' }],
+          }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (url === '/api/skills/run') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { skillId?: string; extensionId?: string };
+        expect(body).toEqual({
+          skillId: 'shared-kernel-smoke',
+          extensionId: '@forgeax-extension/shared-kernel-smoke-skill',
+          input: 'kernel input',
+          caller: { kind: 'user', sessionId: expect.any(String), agentId: 'forge' },
+        });
+        return new Response(JSON.stringify({ ok: true, kind: 'prompt', text: 'SHARED_KERNEL_SKILL_OK' }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url === '/api/cli/chat') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { providerOverride?: string; message?: string };
+        requests.push({ provider: body.providerOverride ?? '', message: body.message ?? '' });
+        return new Response(
+          'event: token\ndata: {"type":"token","text":"ok","providerId":"' + body.providerOverride + '"}\n\n' +
+          'event: done\ndata: {"type":"done","providerId":"' + body.providerOverride + '"}\n\n',
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        );
+      }
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    for (const provider of providers) {
+      const sid = `skill-${provider}`;
+      setShellTarget(tab(sid, 'forge', provider));
+      await useChatStore.getState().sendMessage('/shared-kernel-smoke kernel input');
+    }
+
+    expect(requests).toHaveLength(providers.length);
+    expect(requests.map((request) => request.provider)).toEqual(providers);
+    for (const request of requests) {
+      expect(request.message).toContain('SHARED_KERNEL_SKILL_OK');
+      expect(request.message).toContain('User input:\nkernel input');
+    }
   });
 });

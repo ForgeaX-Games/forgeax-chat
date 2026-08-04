@@ -393,6 +393,12 @@ interface ChatStoreState {
   // ── low-level mutation primitives (used by session-stream + sendMessage) ──
   /** Patch a specific `(sid, agentId)` message slot. */
   patchMessages: (sid: string, agentId: string, updater: (msgs: ChatMessage[]) => ChatMessage[]) => void;
+  /** Apply message-slot patches in a single Zustand commit. */
+  batchPatchMessages: (patches: Array<{
+    sid: string;
+    agentId: string;
+    updater: (msgs: ChatMessage[]) => ChatMessage[];
+  }>) => void;
   /** Read a `(sid, agentId)` message slot (empty array if absent). */
   readMessages: (sid: string, agentId: string) => ChatMessage[];
   /** Set the per-agent streaming flag. */
@@ -477,16 +483,30 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     bySid: { ...s.bySid, [sid]: { ...(s.bySid[sid] ?? EMPTY_CONV), ...patch } },
   })),
 
-  patchMessages: (sid, agentId, updater) => set((s) => {
-    const conv = s.bySid[sid] ?? EMPTY_CONV;
-    const prev = conv.messagesByAgent[agentId] ?? [];
-    const next = updater(prev);
-    return {
-      bySid: {
-        ...s.bySid,
-        [sid]: { ...conv, messagesByAgent: { ...conv.messagesByAgent, [agentId]: next } },
-      },
-    };
+  patchMessages: (sid, agentId, updater) =>
+    get().batchPatchMessages([{ sid, agentId, updater }]),
+
+  batchPatchMessages: (patches) => set((s) => {
+    if (patches.length === 0) return s;
+    let changed = false;
+    const nextBySid = { ...s.bySid };
+    const clonedBySid = new Map<string, ConvSlice>();
+
+    for (const { sid, agentId, updater } of patches) {
+      let conv = clonedBySid.get(sid);
+      if (!conv) {
+        const current = nextBySid[sid] ?? EMPTY_CONV;
+        conv = { ...current, messagesByAgent: { ...current.messagesByAgent } };
+        clonedBySid.set(sid, conv);
+        nextBySid[sid] = conv;
+      }
+      const previous = conv.messagesByAgent[agentId] ?? EMPTY_MESSAGES;
+      const next = updater(previous);
+      if (next === previous) continue;
+      conv.messagesByAgent[agentId] = next;
+      changed = true;
+    }
+    return changed ? { bySid: nextBySid } : s;
   }),
 
   readMessages: (sid, agentId) => get().bySid[sid]?.messagesByAgent[agentId] ?? EMPTY_MESSAGES,

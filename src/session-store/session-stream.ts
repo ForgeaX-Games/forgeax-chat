@@ -137,8 +137,10 @@ function flushPendingDeltas(): void {
   if (pendingDeltas.size === 0) return;
   const batch = [...pendingDeltas.values()];
   pendingDeltas.clear();
-  for (const pd of batch) {
-    patchMsg(pd.sid, pd.agentId, pd.msgId, (m) => {
+  useChatStore.getState().batchPatchMessages(batch.map((pd) => ({
+    sid: pd.sid,
+    agentId: pd.agentId,
+    updater: (messages) => patchMessageInList(messages, pd.msgId, (m) => {
       const existing = m.toolCalls.find((tc) => tc.callId === pd.callId);
       if (existing) {
         if (typeof existing.args !== 'string' || existing.status !== 'running') return m;
@@ -158,8 +160,8 @@ function flushPendingDeltas(): void {
         segments: upsertToolSegment(m.segments ?? [], m.ts ?? Date.now(), tc),
         status: 'streaming',
       };
-    });
-  }
+    }),
+  })));
 }
 
 function enqueueDelta(sid: string, agentId: string, msgId: string, callId: string, name: string, delta: string): void {
@@ -198,8 +200,10 @@ function flushPendingStreamText(): void {
   if (pendingStreamText.size === 0) return;
   const batch = [...pendingStreamText.values()];
   pendingStreamText.clear();
-  for (const p of batch) {
-    patchMsg(p.sid, p.agentId, p.msgId, (m) => {
+  useChatStore.getState().batchPatchMessages(batch.map((p) => ({
+    sid: p.sid,
+    agentId: p.agentId,
+    updater: (messages) => patchMessageInList(messages, p.msgId, (m) => {
       let text = m.text;
       let thinking = m.thinking ?? '';
       let segments = m.segments ?? [];
@@ -209,8 +213,8 @@ function flushPendingStreamText(): void {
         segments = appendChatSegment(segments, { kind: ch.kind, ts: ch.ts, text: ch.text });
       }
       return { ...m, text, ...(thinking ? { thinking } : {}), segments, status: 'streaming' };
-    });
-  }
+    }),
+  })));
 }
 
 function enqueueStreamText(sid: string, agentId: string, msgId: string, kind: 'text' | 'thinking', ts: number, text: string): void {
@@ -268,8 +272,23 @@ function ensureStreamingAsst(
   return spawned;
 }
 
+function patchMessageInList(
+  messages: ChatMessage[],
+  msgId: string,
+  mutate: (message: ChatMessage) => ChatMessage,
+): ChatMessage[] {
+  const index = messages.findIndex((message) => message.id === msgId);
+  if (index < 0) return messages;
+  const current = messages[index];
+  const nextMessage = mutate(current);
+  if (nextMessage === current) return messages;
+  const next = messages.slice();
+  next[index] = nextMessage;
+  return next;
+}
+
 function patchMsg(sid: string, agentId: string, msgId: string, mut: (m: ChatMessage) => ChatMessage): void {
-  useChatStore.getState().patchMessages(sid, agentId, (msgs) => msgs.map((m) => (m.id === msgId ? mut(m) : m)));
+  useChatStore.getState().patchMessages(sid, agentId, (messages) => patchMessageInList(messages, msgId, mut));
 }
 
 function spawnStreamingAsst(sid: string, agentId: string, ts: number, anchor?: string): ChatMessage {
@@ -817,7 +836,21 @@ function handleResumeGap(frame: { sid: string }): void {
 
 /** Boot 时调一次。重复调安全（按 key 注册，HMR 重载会覆盖旧 dispatch）。 */
 export function subscribeSessionStream(): void {
-  onSessionEvent('session-stream', dispatch);
-  onTurnSnapshot('session-stream', applyTurnSnapshot);
-  onResumeGap('session-stream', handleResumeGap);
+  onSessionEvent('session-stream', (event) => enqueueSessionWork(() => dispatch(event)));
+  onTurnSnapshot('session-stream', (frame) => enqueueSessionWork(() => applyTurnSnapshot(frame)));
+  onResumeGap('session-stream', (frame) => enqueueSessionWork(() => handleResumeGap(frame)));
+}
+
+const pendingSessionWork: Array<() => void> = [];
+let sessionWorkScheduled = false;
+
+function enqueueSessionWork(work: () => void): void {
+  pendingSessionWork.push(work);
+  if (sessionWorkScheduled) return;
+  sessionWorkScheduled = true;
+  queueMicrotask(() => {
+    sessionWorkScheduled = false;
+    const batch = pendingSessionWork.splice(0);
+    for (const apply of batch) apply();
+  });
 }

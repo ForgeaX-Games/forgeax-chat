@@ -57,6 +57,7 @@ export { subscribeSessionStream } from './session-stream';
 export {
   fetchSessionList,
   createSession,
+  ensureSession,
   deleteSession,
   emitForgeaXMessage,
   listSessionAgents,

@@ -93,7 +93,7 @@ export interface ForgeaXAgentNode {
 
 // `game` scopes the list to one game's sessions (整个 session 面板按 game 收口).
 // Omitting it lets the server fall back to the active game; passing the current
-// pinned slug keeps every surface showing only that game's sessions.
+// authoritative slug keeps every surface showing only that game's sessions.
 export async function fetchSessionList(game?: string): Promise<SessionMeta[]> {
   const url = game ? `/api/sessions?game=${encodeURIComponent(game)}` : "/api/sessions";
   const r = await fetch(url);
@@ -102,17 +102,17 @@ export async function fetchSessionList(game?: string): Promise<SessionMeta[]> {
   return j.sessions ?? [];
 }
 
-/** 创建一条新 session。`displayName` / `defaultDir` 不传时让 server 端缺省决定
+/** 创建一条新 session。`displayName` / `scope` 不传时让 server 端缺省决定
  *  （server 端 displayName 留 undefined → UI 用 `session <sid前6位>` 占位）。 */
 export async function createSession(opts?: {
   displayName?: string;
-  defaultDir?: string;
+  scope?: string;
   autoStart?: boolean;
   bootstrapAgent?: string | false | null;
 }): Promise<{ sid: string; bootstrappedAgent: string | null }> {
   const body: Record<string, unknown> = { autoStart: opts?.autoStart ?? true };
   if (opts?.displayName !== undefined) body.displayName = opts.displayName;
-  if (opts?.defaultDir !== undefined) body.defaultDir = opts.defaultDir;
+  if (opts?.scope !== undefined) body.scope = opts.scope;
   if (opts?.bootstrapAgent !== undefined) body.bootstrapAgent = opts.bootstrapAgent;
   const r = await fetch("/api/sessions", {
     method: "POST",
@@ -125,6 +125,24 @@ export async function createSession(opts?: {
   }
   const j = (await r.json()) as { sid: string; bootstrappedAgent?: string | null };
   return { sid: j.sid, bootstrappedAgent: j.bootstrappedAgent ?? null };
+}
+
+export async function ensureSession(opts?: {
+  scope?: string;
+  autoStart?: boolean;
+  bootstrapAgent?: string | false | null;
+}): Promise<{ sid: string; bootstrappedAgent: string | null; created: boolean }> {
+  const r = await fetch('/api/sessions/ensure', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      autoStart: opts?.autoStart ?? true,
+      ...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
+      ...(opts?.bootstrapAgent !== undefined ? { bootstrapAgent: opts.bootstrapAgent } : {}),
+    }),
+  });
+  if (!r.ok) throw new Error(`POST /api/sessions/ensure failed: ${await r.text().catch(() => `HTTP ${r.status}`)}`);
+  return r.json();
 }
 
 /** DELETE /api/sessions/:sid —— 整个 session 目录从盘上抹掉（含 ledger / agents）。

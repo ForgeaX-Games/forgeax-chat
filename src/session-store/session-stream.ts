@@ -706,7 +706,9 @@ function dispatch(evt: SessionEvent): void {
     // (key 含唯一 localMsgId,永不复用)。一个 agent 同刻只跑一个 turn,前缀清扫只清本 turn。
     const sealPrefix = `${sid}:${emitter}:`;
     for (const k of _seals.keys()) if (k.startsWith(sealPrefix)) _seals.delete(k);
-    chatTurnEnd(emitter, !p.error, p.error);
+    // 原生路同样三值:取消不是故障,也不是成功。两个执行口的判据必须同形 —— 只在一口
+    // 分辨取消,同一件事在两条入口下就长得不一样,监控没法比对。
+    chatTurnEnd(emitter, p.aborted ? 'cancelled' : p.error ? 'error' : 'ok', p.error);
     useChatStore.getState().setStreaming(sid, emitter, false);
     if (!p.error && !p.aborted) useChatStore.getState().flushQueuedForAgent(sid, emitter);
     return;

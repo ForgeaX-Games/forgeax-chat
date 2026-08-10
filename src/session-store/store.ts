@@ -39,6 +39,11 @@ import {
 import { parseSse } from '@forgeax/interface/lib/sse';
 import { expandPills, expandPillsForDisplay } from '@forgeax/interface/lib/composer-bridge';
 import { resolveReplyLanguage } from '@forgeax/interface/lib/reply-language';
+// 必须是**静态** import:动态 import 的 await 会把请求推到下一个微任务,改掉产品钉住的
+// 派发顺序(2026-08-06:为拿 traceparent 在 fetch 前插了一句 await import,"连续两次
+// sendMessage 后已发出 2 个请求"这条回归断言从 2 变 0)。该模块顶层无副作用,与同包已
+// 静态引入的 lib/sse 等同级,不引入新耦合。
+import { beginChatTurn, chatFirstToken, chatTurnEnd } from '@forgeax/interface/lib/trace';
 import { TurnAccumulator } from '../event-engine/turn-accumulator';
 import {
   parseEventLines,
@@ -1137,7 +1142,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         const candidate = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : undefined;
         const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         markEmittedClientMsg(clientMsgId);
-        const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
         const r = await emitForgeaXMessage(startSid, wireText, {
           to: candidate,
@@ -1192,7 +1196,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         const candidate = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : undefined;
         const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         markEmittedClientMsg(clientMsgId);
-        const { beginChatTurn } = await import('@forgeax/interface/lib/trace');
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
         const r = await emitForgeaXMessage(startSid, wireText, {
           to: candidate,
@@ -1217,31 +1220,63 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // R1-b 对偶(多 tab 同步 §5.4):cli 桥会把 token 广播成 stream:llm,发起 turn 的
     // 本 tab 已经在从 SSE 渲染同一份文本 —— 标记存续期,session-stream 丢 WS 那份。
     markCliSseActive(startSid, activeAgent);
+    // 两条入口都要开链(2026-08-06 外审):原生路早就调 beginChatTurn,而在模型选择器里
+    // 显式选了 CLI 内核时走的是这条 —— 此前既不发 traceparent(服务端的 kernel.turn
+    // 无处可挂),也不起前端失速看门狗(卡住时没有 ui.stall)。真实会话因此 0 个 span。
+    let traceparent: string | undefined;
+    try {
+      ({ traceparent } = beginChatTurn(activeAgent, startSid, turnOverride ?? undefined));
+    } catch {
+      /* 遥测不可用时静默降级 —— 聊天必须照常发出去。 */
+    }
+    // 两个 helper 都是**同步**的:静态 import 之后不再有动态 import 的 await,收口就不会因为
+    // 一次微任务延迟落到同一 agent 的下一轮上(把新链误收、旧链永远泄漏)。
+    // 这只保证 helper 自身同步 —— 整轮当然还是异步的(请求、流式读取都在 await)。
+    // "只生效一次"完全依赖 trace API 自身的 firstTokenSeen / ended,不另造本地布尔 ——
+    // 两套状态迟早分叉,而这个 bug 的教训正是"开了不收、状态各记各的"。
+    const noteFirstToken = (): void => {
+      try { chatFirstToken(activeAgent); } catch { /* 观测绝不反噬聊天 */ }
+    };
+    // 三值,不是布尔:取消不是故障(标成 error 会让 trace 里全是假失败),但也**不能并进成功**
+    // —— 那等于亲手销毁取消信号,误触取消风暴在监控里就和健康流量长得一模一样。
+    const endTrace = (outcome: 'ok' | 'cancelled' | 'error', errMessage?: string): void => {
+      try { chatTurnEnd(activeAgent, outcome, errMessage); } catch { /* 观测绝不反噬聊天 */ }
+    };
+    // 主轮的错误/取消要带到唯一汇合点(finally)去判 ok,避免各出口判据分叉。
+    let streamError: string | undefined;
+    let streamCancelled = false;
     try {
       res = await fetch('/api/cli/chat', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: wireText, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
+        body: JSON.stringify({ message: wireText, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(traceparent ? { traceparent } : {}), ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
         signal,
       });
     } catch (e) {
       clearCliSseActive(startSid, activeAgent);
-      if ((e as Error).name === 'AbortError' || signal.aborted) {
+      const aborted = (e as Error).name === 'AbortError' || signal.aborted;
+      if (aborted) {
         patchAsst((m) => (m.status === 'streaming' ? { ...m, status: 'done' } : m));
       } else {
         patchAsst((m) => ({ ...m, status: 'error', errorMessage: `network error: ${(e as Error).message}` }));
       }
+      endTrace(aborted ? 'cancelled' : 'error', aborted ? undefined : (e as Error).message);
       finishTurn(); return;
     }
     if (!res.ok) {
       clearCliSseActive(startSid, activeAgent);
       let body: { error?: string; hint?: string } = {};
       try { body = await res.json(); } catch { /* ignore */ }
-      patchAsst((m) => ({ ...m, status: 'error', errorMessage: body.error ? `${res.status} ${body.error}${body.hint ? ` — ${body.hint}` : ''}` : `HTTP ${res.status}` }));
+      const httpError = body.error ? `${res.status} ${body.error}${body.hint ? ` — ${body.hint}` : ''}` : `HTTP ${res.status}`;
+      patchAsst((m) => ({ ...m, status: 'error', errorMessage: httpError }));
+      endTrace('error', httpError);
       finishTurn(); return;
     }
     if (!res.body) {
       clearCliSseActive(startSid, activeAgent);
       patchAsst((m) => ({ ...m, status: 'error', errorMessage: 'empty response body' }));
+      // 第 6 个终点(200 但无 body)。收口必须覆盖**每一个** return —— 漏一个就留下一条
+      // 永远 provisional 的链,失速看门狗每 30/60/90s 报一次假 no-first-token。
+      endTrace('error', 'empty response body');
       finishTurn(); return;
     }
 
@@ -1355,10 +1390,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           if (frame.event !== 'token' && frame.event !== 'thinking') flushSseTextBuf();
           if (frame.event === 'token') {
             const text = String(payload.text ?? '');
-            if (text) { bufText(mainEvent, emitterId ?? null, 'text', text, providerId); if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL) flushSseTextBuf(); }
+            // 只认**主 agent** 的字:子 agent 先出字不证明主轮已响应,拿它撤看门狗
+            // 会把主轮真卡死掩盖掉。chatFirstToken 内部幂等,重复调用无害。
+            if (text) { if (mainEvent) noteFirstToken(); bufText(mainEvent, emitterId ?? null, 'text', text, providerId); if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL) flushSseTextBuf(); }
           } else if (frame.event === 'thinking') {
             const text = String(payload.text ?? '');
-            if (text) { bufText(mainEvent, emitterId ?? null, 'thinking', text, providerId); if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL) flushSseTextBuf(); }
+            if (text) { if (mainEvent) noteFirstToken(); bufText(mainEvent, emitterId ?? null, 'thinking', text, providerId); if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL) flushSseTextBuf(); }
           } else if (frame.event === 'tool-call') {
             const callId = String(payload.callId ?? '');
             if (callId) {
@@ -1379,7 +1416,15 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             flushSseDeltaBuf();
             const callId = String(payload.callId ?? '');
             const ok = payload.ok !== false;
-            const result = typeof payload.result === 'string' ? payload.result : undefined;
+            // 经我们代理的第三方 MCP 工具,结果是 `{text, structuredContent}` 形状
+            // (structuredContent 装真业务数据,编排层刻意保留不剥)。只认字符串会让这类
+            // 工具卡的正文一直是空的 —— 修了编排层不修显示契约,等于把"丢结构"换成"卡片全空"。
+            const rawResult: unknown = payload.result;
+            const result = typeof rawResult === 'string'
+              ? rawResult
+              : typeof (rawResult as { text?: unknown } | null)?.text === 'string'
+                ? (rawResult as { text: string }).text
+                : undefined;
             const error = typeof payload.error === 'string' ? payload.error : undefined;
             const apply = (tc: ToolCall): ToolCall => tc.callId !== callId ? tc : { ...tc, status: ok ? 'done' : 'error', result, error };
             if (mainEvent) patchAsst((m) => ({ ...m, toolCalls: m.toolCalls.map(apply), segments: (m.segments ?? []).map((s) => s.kind === 'tool' && s.tool.callId === callId ? { ...s, tool: apply(s.tool) } : s) }));
@@ -1387,7 +1432,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           } else if (frame.event === 'error') {
             flushSseDeltaBuf();
             const msg = String(payload.message ?? payload.error ?? 'stream error');
-            if (mainEvent) patchAsst((m) => ({ ...m, status: 'error', errorMessage: msg }));
+            // 只有主轮的错误决定 trace 的 ok —— 子 agent 失败不代表这一轮失败。
+            if (mainEvent) { streamError = msg; patchAsst((m) => ({ ...m, status: 'error', errorMessage: msg })); }
             else if (emitterId) patchSub(emitterId, (r) => ({ ...r, status: 'error', errorMessage: msg } as SubAgentRun));
           } else if (frame.event === 'done') {
             flushSseDeltaBuf();
@@ -1400,10 +1446,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         acc.feed(stored);
       }
     } catch (e) {
+      // 这里只**记状态**,不收口 —— 收口统一放在下面的 finally,catch 与正常退出
+      // 共用同一套判据。两处各判各的迟早分叉,那正是本次事故的形状。
       if ((e as Error).name === 'AbortError' || signal.aborted) {
+        streamCancelled = true;
         patchAsst((m) => ({ ...m, status: 'done', providerId: m.providerId ?? lastSeenProviderId ?? turnOverride ?? undefined }));
       } else {
-        patchAsst((m) => ({ ...m, status: 'error', errorMessage: `stream error: ${(e as Error).message}` }));
+        streamError = `stream error: ${(e as Error).message}`;
+        patchAsst((m) => ({ ...m, status: 'error', errorMessage: streamError }));
       }
     } finally {
       clearCliSseActive(startSid, activeAgent);
@@ -1413,6 +1463,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       for (const acc of subAccs.values()) acc.flush();
       patchAsst((m) => (m.status === 'streaming' ? { ...m, status: 'done' } : m));
       for (const eid of subAccs.keys()) patchSub(eid, (r) => (r.status === 'streaming' ? { ...r, status: 'done' } : r));
+      // 所有流路径的唯一汇合点:正常读完、流内 error、抛异常、被取消都从这里过。
+      // 幂等由 chatTurnEnd 自己保证,所以早到的收口(网络/HTTP 终点)不会被覆盖。
+      // 判据顺序:**取消优先于流内错误**。取消触发的 teardown 常常顺带甩出一条 error 帧,
+      // 或一个非 AbortError 的异常(不同运行时可能是 TypeError)—— 让 error 赢,用户主动停
+      // 就会被记成故障。取消是一个独立结局,既不是失败也不是成功。
+      const cancelled = streamCancelled || signal.aborted;
+      endTrace(cancelled ? 'cancelled' : streamError !== undefined ? 'error' : 'ok', cancelled ? undefined : streamError);
       finishTurn();
     }
   },

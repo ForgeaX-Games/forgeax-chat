@@ -333,4 +333,64 @@ describe('chat store turn targeting regressions', () => {
       expect(request.message).toContain('User input:\nkernel input');
     }
   });
+
+  it('keeps the visible thread aligned with an @mentioned agent', async () => {
+    const sid = 'sid-mention';
+    let request: { agentId?: string; message?: string } | undefined;
+
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url === '/api/cli/chat') {
+        request = JSON.parse(String(init?.body ?? '{}')) as { agentId?: string; message?: string };
+        return new Response(
+          'event: token\ndata: {"type":"token","text":"ok","providerId":"test-cli"}\n\n' +
+          'event: done\ndata: {"type":"done","providerId":"test-cli"}\n\n',
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        );
+      }
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    setShellTarget(tab(sid, 'forge'));
+    await useChatStore.getState().sendMessage('@iori inspect the scene', {
+      target: { sid, agentId: 'forge' },
+    });
+
+    expect(request).toMatchObject({ agentId: 'iori', message: '@iori inspect the scene' });
+    expect(useShellStore.getState().tabs[0]?.agentId).toBe('iori');
+    expect(useChatStore.getState().readMessages(sid, 'forge')).toEqual([]);
+    expect(useChatStore.getState().readMessages(sid, 'iori')[0]).toMatchObject({
+      role: 'user',
+      text: '@iori inspect the scene',
+    });
+  });
+
+  it('routes a mention-only send instead of falling back to the pinned agent', async () => {
+    const sid = 'sid-mention-only';
+    let request: { agentId?: string; message?: string } | undefined;
+
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url === '/api/cli/chat') {
+        request = JSON.parse(String(init?.body ?? '{}')) as { agentId?: string; message?: string };
+        return new Response('event: done\ndata: {"type":"done"}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    setShellTarget(tab(sid, 'forge'));
+    await useChatStore.getState().sendMessage('@iori ', {
+      target: { sid, agentId: 'forge' },
+    });
+
+    expect(request).toMatchObject({ agentId: 'iori', message: '@iori' });
+    expect(useShellStore.getState().tabs[0]?.agentId).toBe('iori');
+    expect(useChatStore.getState().readMessages(sid, 'iori')[0]).toMatchObject({
+      role: 'user',
+      text: '@iori',
+    });
+  });
 });

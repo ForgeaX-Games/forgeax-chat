@@ -1104,23 +1104,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     }
 
     // Resolve the chat target — @mention overrides the tab's pinned agent.
-    // The composer inserts a trailing space after a mention, but `trimmed`
-    // removes it before this point. Accept either a separator or end-of-input
-    // so sending the mention itself does not silently fall back to the pinned
-    // agent.
-    const mentionMatch = trimmed.match(/^@([a-zA-Z][a-zA-Z0-9_-]{0,39})(?:\s+|$)/);
+    const mentionMatch = trimmed.match(/^@([a-zA-Z][a-zA-Z0-9_-]{0,39})\s+/);
     const mentionedAgent = mentionMatch?.[1];
     const agentId = mentionedAgent ?? targetAgent;
     if (!agentId) { pushSys(t('store.noAgentSelected')); return; }
-
-    // `@agent` changes the routing target, so the visible chat slot must move
-    // with it before the optimistic user/assistant bubbles are written. Without
-    // this handoff, the request is sent to (and streamed into) `mentionedAgent`
-    // while `useActiveMessages()` keeps reading the tab's previous agent slot;
-    // the turn then looks stuck even though the backend accepted it.
-    if (mentionedAgent && mentionedAgent !== targetAgent && startTab?.agentId === targetAgent) {
-      useShellStore.getState().setTabAgent(startSid, mentionedAgent);
-    }
     const activeAgent = agentId;
 
     const patchAsst = (mut: (m: ChatMessage) => ChatMessage): void => {

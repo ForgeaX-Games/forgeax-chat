@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ExternalLink, ArrowDown, Undo2, ChevronDown, X } from 'lucide-react';
+import { ArrowDown, Undo2, ChevronDown, X } from 'lucide-react';
 import { loadOnboarding, saveOnboarding } from '@forgeax/interface/components/Onboarding/types';
 import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
 import { ForgeCard } from './ForgeCard';
@@ -23,13 +23,8 @@ import type { ChatMessage } from '../../session-store';
 import { parseDisplaySegments } from '@forgeax/interface/lib/composer-bridge';
 import { PillChip } from '../Composer/PillChip';
 import type { ChatAttachment } from '@forgeax/interface/store';
-import { getWindowManager, decodeSurfaceFromLocation } from '@forgeax/interface/lib/platform';
 import { useTranslation, t } from '@forgeax/interface/i18n';
 import './ChatPanel.css';
-
-// True when THIS window is itself a detached surface (so we don't show a
-// "pop out" button inside an already-popped-out window).
-const IS_DETACHED_WINDOW = decodeSurfaceFromLocation() !== null;
 
 // 消息编辑草稿(**仅内存**):点自己消息进编辑态后,若用户改了内容却未发送就失焦/
 // 取消,把草稿按 sid:msgId 暂存;下次重新编辑同一条时回填用户上次改到一半的内容。
@@ -671,24 +666,8 @@ export function ChatPanel() {
     return () => { clearTimeout(id); document.removeEventListener('visibilitychange', onVis); };
   }, []);
 
-  const canPopOut = !IS_DETACHED_WINDOW && getWindowManager().canDetach();
-
   return (
     <aside className="chat-panel chat-rail glass-subtle" data-testid="chat-panel">
-      {canPopOut && (
-        <button
-          className="cp-window-toggle"
-          onClick={() =>
-            void useShellStore.getState().detachSurface(
-              { kind: 'panel', id: 'chat' },
-              { title: t('chat.windowTitle') },
-            )
-          }
-          title={t('chat.popOut')}
-        >
-          <ExternalLink size={12} />
-        </button>
-      )}
       <div className="cp-body">
         <ChatAgentCapsule />
 

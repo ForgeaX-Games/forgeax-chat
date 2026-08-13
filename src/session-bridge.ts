@@ -64,7 +64,13 @@ export interface TurnSnapshotFrame {
     thinking: string;
     sealedTextLen: number;
     sealedThinkingLen: number;
-    toolCalls: Array<{ callId: string; name: string; args?: unknown; status: "running" | "done" | "error" }>;
+    toolCalls: Array<{
+      callId: string;
+      name: string;
+      args?: unknown;
+      permissionPrompt?: boolean;
+      status: "running" | "done" | "error";
+    }>;
   };
 }
 

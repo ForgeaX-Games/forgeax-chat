@@ -22,6 +22,8 @@ import type {
   ToolResultMessage,
 } from './types';
 import { registerSubagentFormatters } from './subagent-events';
+import { stringifyToolResult, truncateToolResult } from './tool-result';
+import { normalizeToolCall } from './tool-name';
 import { t } from '@/i18n';
 
 // ── Minimal LLMMessage shape (matches wire format from forgeax-server) ──
@@ -247,11 +249,42 @@ registerFormatter('hook:assistantMessage', (event) => {
   };
 });
 
+export function normalizeHookToolCall(name: string, args: unknown): { name: string; args: unknown } {
+  return normalizeToolCall(name, args);
+}
+
+export function inferToolNameFromResult(result: unknown): string | undefined {
+  let value = result;
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  if (Array.isArray(record.todos)) return 'todo_write';
+  if (record.summary && typeof record.summary === 'object') return 'deliver_summary';
+  return undefined;
+}
+
+function structuredResult(result: unknown): unknown {
+  if (typeof result !== 'string') return result;
+  try {
+    return JSON.parse(result);
+  } catch {
+    return result;
+  }
+}
+
 registerFormatter('hook:toolCall', (event) => {
   const p = (event.payload ?? {}) as Record<string, unknown>;
-  const name = (p.name ?? '') as string;
-  if (name === 'subagent') return null;
-  const args = p.args ?? {};
+  const rawName = (p.name ?? '') as string;
+  if (rawName === 'subagent') return null;
+  const deferred = normalizeHookToolCall(rawName, p.args ?? {});
+  const name = deferred.name;
+  const args = deferred.args;
   const tc = p.toolCall as { id?: string } | undefined;
   const callId = (p.callId ?? p.toolCallId ?? tc?.id ?? p.id ?? `${name}-${ts(event)}`) as string;
   let visualDisplay: string | undefined;
@@ -283,6 +316,7 @@ registerFormatter('hook:toolCall', (event) => {
     id: callId,
     name,
     status: 'running' as const,
+    ...(p.permissionPrompt === true ? { permissionPrompt: true } : {}),
     visualDisplay,
     args,
     agent: event.emitterId ?? '',
@@ -292,7 +326,11 @@ registerFormatter('hook:toolCall', (event) => {
 
 registerFormatter('hook:toolResult', (event) => {
   const p = (event.payload ?? {}) as Record<string, unknown>;
-  const name = (p.name ?? '') as string;
+  const rawName = (p.name ?? '') as string;
+  const inferredName = inferToolNameFromResult(p.result);
+  const name = (rawName === 'DeferExecuteTool' || rawName === 'tool' || !rawName)
+    ? ((inferredName ?? rawName) || 'tool')
+    : rawName;
   const durationMs = (p.durationMs ?? 0) as number;
   const errorText = p.error ? String(p.error) : '';
 
@@ -303,6 +341,7 @@ registerFormatter('hook:toolResult', (event) => {
       name,
       durationMs,
       isError: !!errorText,
+      ...(p.result !== undefined ? { resultData: structuredResult(p.result) } : {}),
       agent: event.emitterId ?? '',
       timestamp: ts(event),
     } as ToolResultMessage;
@@ -316,7 +355,9 @@ registerFormatter('hook:toolResult', (event) => {
     visualDisplay = String(p.visual_display);
   }
 
-  if (!visualDisplay && !fullContent) {
+  if (p.result !== undefined) {
+    fullContent = stringifyToolResult(p.result);
+  } else if (!visualDisplay && !fullContent) {
     if (errorText) {
       fullContent = errorText;
     } else {
@@ -343,7 +384,7 @@ registerFormatter('hook:toolResult', (event) => {
     }
   }
 
-  const truncatedContent = fullContent.length > 2000 ? fullContent.slice(0, 2000) + '\n…' : fullContent;
+  const truncatedContent = truncateToolResult(fullContent);
 
   return {
     kind: 'tool_result',
@@ -354,6 +395,7 @@ registerFormatter('hook:toolResult', (event) => {
     fullContent: fullContent.length > 2000 ? fullContent : undefined,
     durationMs,
     isError: !!errorText,
+    ...(p.result !== undefined ? { resultData: structuredResult(p.result) } : {}),
     agent: event.emitterId ?? '',
     timestamp: ts(event),
   };
@@ -452,13 +494,29 @@ export function formatEvent(event: StoredEvent, viewerId?: string): RendererMess
 
   if (event.type.startsWith('hook:') || event.type.startsWith('_')) return null;
 
-  // `agent_log` is a diagnostic/log channel (thinking mirror, plan narration,
-  // provider errors, …). It must NOT render as a chat bubble — logs don't belong
-  // in the conversation thread. Reasoning still shows in the collapsible THOUGHT
-  // area (live `stream:llm` thinking chunk → m.thinking); the agent_log entries
-  // stay in the WAL ledger + dashboard/observatory for diagnostics. Drop them all
-  // from the chat formatter.
-  if (event.type === 'agent_log') return null;
+  // `agent_log` is diagnostic by default. A host may explicitly promote a
+  // concise, user-facing progress summary; only that exact visibility label is
+  // allowed through. Private reasoning, provider logs, and unknown labels stay
+  // fail-closed and never become chat content.
+  if (event.type === 'agent_log') {
+    if (p.visibility !== 'public_summary') return null;
+    const text = typeof p.visual_display === 'string'
+      ? p.visual_display
+      : typeof p.summary === 'string'
+        ? p.summary
+        : typeof p.text === 'string'
+          ? p.text
+          : displayContent(p.content);
+    if (!text.trim()) return null;
+    return {
+      kind: 'assistant_complete',
+      text: '',
+      thinking: '',
+      publicSummary: text,
+      agent: event.emitterId ?? '',
+      timestamp: ts(event),
+    };
+  }
 
   const vis = p.visual_display ? String(p.visual_display) : undefined;
   const text = vis ?? displayContent(p.content);

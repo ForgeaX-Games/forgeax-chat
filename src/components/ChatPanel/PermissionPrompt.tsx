@@ -12,10 +12,16 @@
  *  避免整段命令把审批按钮顶出视口后无法收回。 */
 
 import { useEffect, useState, type ReactElement } from 'react';
-import { ShieldAlert, HelpCircle, Check, X, Loader2 } from 'lucide-react';
+import { ShieldAlert, HelpCircle, Check, X, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
 import { useShellStore } from '@forgeax/interface/store';
-import { usePendingPermission, clearPendingPermission } from '@forgeax/interface/lib/permission-stream';
+import {
+  usePendingPermission,
+  useResolvedPermission,
+  recordResolvedPermission,
+  clearPendingPermission,
+  isAskUserToolName,
+} from '@forgeax/interface/lib/permission-stream';
 
 /** Preview budget for the folded command body. Past this → show expand/collapse. */
 const CMD_PREVIEW_CHARS = 360;
@@ -54,6 +60,7 @@ export function PermissionPrompt(): ReactElement | null {
   const { t } = useTranslation();
   const activeSid = useShellStore((s) => s.activeSid);
   const pending = usePendingPermission(activeSid);
+  const resolvedAsk = useResolvedPermission(activeSid);
   const [busy, setBusy] = useState(false);
   // AskUserQuestion: chosen labels per question index.
   const [picks, setPicks] = useState<Record<number, string[]>>({});
@@ -61,33 +68,104 @@ export function PermissionPrompt(): ReactElement | null {
   const [remember, setRemember] = useState(false);
   // Long command body fold — reset per request so a new prompt starts collapsed.
   const [cmdExpanded, setCmdExpanded] = useState(false);
+  const [resolvedExpanded, setResolvedExpanded] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
 
   useEffect(() => {
     setPicks({});
     setBusy(false);
     setRemember(false);
     setCmdExpanded(false);
-  }, [pending?.reqId]);
+    setResolvedExpanded(false);
+    setPermissionError(null);
+  }, [pending?.reqId, pending?.toolName]);
 
-  if (!activeSid || !pending) return null;
+  if (!activeSid) return null;
 
-  const isAsk = pending.toolName === 'AskUserQuestion';
+  if (!pending) {
+    if (!resolvedAsk || resolvedAsk.sid !== activeSid) return null;
+    const summary = resolvedAsk.questions
+      .map((item) => `${item.question}: ${item.values.join('; ')}`)
+      .join(' · ');
+    return (
+      <div
+        role="status"
+        aria-label={t('permission.askTitle')}
+        style={{
+          margin: '8px 10px', padding: '8px 12px', borderRadius: 10,
+          border: '1px solid var(--color-kind-cli-provider, #6db3f2)',
+          background: 'var(--color-bg-elevated, #1c1f24)', fontSize: 13,
+        }}
+      >
+        <button
+          type="button"
+          aria-expanded={resolvedExpanded}
+          onClick={() => setResolvedExpanded((value) => !value)}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', textAlign: 'left' }}
+        >
+          <Check size={14} />
+          <span style={{ flex: 1 }}>{summary}</span>
+          {resolvedExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+        {resolvedExpanded && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--color-border, #444)' }}>
+            {resolvedAsk.questions.map((item) => (
+              <div key={item.question}>
+                <div style={{ fontWeight: 600 }}>{item.question}</div>
+                <div style={{ opacity: 0.8 }}>{item.values.join('; ')}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const isAsk = isAskUserToolName(pending.toolName);
   const questions = isAsk ? readQuestions(pending.input) : [];
   const askable = isAsk && questions.length > 0;
 
-  const reply = async (allow: boolean, answers?: Record<string, string>) => {
+  const reply = async (
+    allow: boolean,
+    answers?: Record<string, string>,
+    answerValues?: Record<string, string[]>,
+  ) => {
     if (busy) return;
     setBusy(true);
+    setPermissionError(null);
     const reqId = pending.reqId;
-    clearPendingPermission(activeSid, reqId);
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(activeSid)}/permission-reply`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(activeSid)}/permission-reply`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         // remember:仅在 allow 时有意义 —— 让 host 记住本会话该 capability,同类免卡。
-        body: JSON.stringify({ reqId, allow, ...(answers ? { answers } : {}), ...(allow && remember ? { remember: true } : {}) }),
+        body: JSON.stringify({
+          reqId,
+          allow,
+          ...(answers ? { answers } : {}),
+          ...(answerValues ? { answerValues } : {}),
+          ...(allow && remember ? { remember: true } : {}),
+        }),
       });
-    } catch { /* server times out fail-closed if this never lands */ } finally {
+      const body = await response.json().catch(() => ({})) as { ok?: boolean; reason?: string };
+      if (!response.ok || body.ok !== true) throw new Error(body.reason || `Request failed (${response.status})`);
+      if (allow && answers && isAsk) {
+        recordResolvedPermission(activeSid, {
+          reqId,
+          toolName: pending.toolName,
+          questions: questions.map((question, index) => ({
+            question: question.question,
+            values: picks[index] ?? [],
+          })),
+        });
+        setResolvedExpanded(false);
+      }
+      clearPendingPermission(activeSid, reqId);
+    } catch (cause) {
+      // Keep the pending card and the user's selections editable. The server
+      // may still be waiting, and a transient UI/network failure is retryable.
+      setPermissionError(cause instanceof Error ? cause.message : t('askUser.submitFailed'));
+    } finally {
       setBusy(false);
     }
   };
@@ -105,8 +183,13 @@ export function PermissionPrompt(): ReactElement | null {
   const allAnswered = askable && questions.every((_, i) => (picks[i]?.length ?? 0) > 0);
   const submitAnswers = () => {
     const answers: Record<string, string> = {};
-    questions.forEach((q, i) => { answers[q.question] = (picks[i] ?? []).join(', '); });
-    void reply(true, answers);
+    const answerValues: Record<string, string[]> = {};
+    questions.forEach((q, i) => {
+      const values = picks[i] ?? [];
+      answers[q.question] = values.join(', ');
+      answerValues[q.question] = values;
+    });
+    void reply(true, answers, answerValues);
   };
 
   const accent = askable ? 'var(--color-kind-cli-provider, #6db3f2)' : 'var(--color-status-amber, #d8a200)';
@@ -159,6 +242,7 @@ export function PermissionPrompt(): ReactElement | null {
               </div>
             </div>
           ))}
+          {permissionError && <div role="alert" style={{ color: 'var(--color-status-red, #e06c75)', fontSize: 12 }}>{permissionError}</div>}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', marginTop: 2 }}>
             {!allAnswered && (
               <span style={{ marginRight: 'auto', fontSize: 11, opacity: 0.6 }}>
@@ -175,6 +259,7 @@ export function PermissionPrompt(): ReactElement | null {
         </>
       ) : (
         <>
+          {permissionError && <div role="alert" style={{ color: 'var(--color-status-red, #e06c75)', fontSize: 12 }}>{permissionError}</div>}
           {pending.capability && (
             <div style={{ fontSize: 11, opacity: 0.7 }}>
               {t('permission.capabilityLabel', { capability: pending.capability })}

@@ -18,6 +18,30 @@
   min-height: 0;
 }
 
+/* The chat conversation is currently presented as a single Forge stream.
+ * Keep the agent switcher available to the controller, but do not expose the
+ * decorative multi-agent role strip in the message UI. Agent identity remains
+ * in the event/data model and execution cards. */
+.chat-agent-capsule-wrap {
+  display: none !important;
+}
+
+/* Windowing — pop chat out into its own OS window (Tauri shell only). */
+.cp-window-toggle {
+  position: absolute;
+  top: 6px; right: 6px;
+  z-index: 5;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  color: var(--color-text-primary);
+  background: var(--color-background-base);
+  border: 1px solid var(--color-border-default);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.cp-window-toggle:hover { opacity: 1; }
+
 /* Sub-agent switcher — 顶部圆形头像 + 水平拖动 */
 .agent-switcher {
   display: flex; align-items: center; gap: 6px;
@@ -1006,14 +1030,14 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
      + 8px gap + 8px padding-right ≈ 48). If you add a new icon to kc-header,
      bump this value — .kc-copy-btn computes its right offset from it. */
   --kc-header-controls: 48px;
-  background: rgba(255,255,255,0.02);
-  border: 1px solid rgba(255,255,255,0.10);
-  border-radius: 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   /* 12px gives ~6px clearance between user-bubble's 3px box-shadow tail and
      the kc-running 3px outer ring (4px margin → -2px overlap before this fix). */
   margin-top: 12px;
   font-size: 12px;
-  overflow: hidden;
+  overflow: visible;
   transition: border-color 0.3s, box-shadow 0.3s;
 }
 /* When the provider pill is rendered (.kc-provider — "forgeax" / "claude"…),
@@ -1050,8 +1074,8 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
   .kc-copy-btn:active, .kc-copy-btn:focus { opacity: 1; }
 }
 .forge-card.kc-running {
-  border-color: rgba(212, 255, 72, 0.30);
-  animation: kc-card-pulse 2s ease-in-out infinite;
+  border-color: transparent;
+  animation: none;
 }
 @keyframes kc-card-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(212, 255, 72, 0); }
@@ -1103,9 +1127,8 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
 .kc-header {
   width: 100%;
   display: flex; align-items: center; gap: 8px;
-  padding: 4px 8px 4px 4px;
-  background: transparent; border: none; cursor: pointer;
-  border-bottom: 1px solid rgba(255,255,255,0.10);
+  padding: 0 0 8px;
+  background: transparent; border: none;
   /* iter-98 audit: chat-panel is fixed 340px → kc-header ≈328px after padding.
      kc-name has flex:1 so it absorbs leftover space; the 8px flex gap is
      non-shrinkable; logo(20)+status(16)+chev(16)+3×gap(8)=76px of fixed
@@ -1127,8 +1150,8 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
   .kc-logo { box-shadow: 0 0 0 1px rgba(255,255,255,0.06); }
 }
 .kc-name {
-  flex: 1; text-align: left;
-  font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.62);
+  flex: none; text-align: left;
+  font-size: 12px; font-weight: 700; color: var(--primary, #d4ff48);
   text-transform: uppercase; letter-spacing: 0.10em;
   /* At 11px caps with 62% alpha, default sub-pixel AA (macOS Safari/Chrome) can
      leave strokes uneven against the dark ForgeCard bg. Force grayscale AA for
@@ -1140,6 +1163,12 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
      two-line cross-engine baseline for the platform that needs it. */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+.kc-time {
+  flex:none;
+  color:var(--color-text-tertiary, rgba(255,255,255,.35));
+  font-size:10.5px;
+  font-variant-numeric:tabular-nums;
 }
 .kc-provider {
   font-size: 9px;
@@ -1206,10 +1235,11 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
 .status-done { color: var(--accent-green); }
 .status-running { color: var(--accent-orange); animation: spin 1s linear infinite; }
 .status-waiting { color: var(--accent-cyan); }
+.status-error { color: var(--accent-error, #F26A6A); }
 @keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
 
 .kc-body {
-  padding: 10px 14px;
+  padding: 0;
   display: flex; flex-direction: column; gap: 8px;
 }
 .kc-status-text {
@@ -3653,71 +3683,6 @@ button.cb-mbsel-menu-head {
   letter-spacing: 0.02em;
 }
 
-/* — — — (PR #10/#11 TodoFlow + mp-sm-* variants) — — — */
-/* ─────────────────────────────────────────────────────────────────────
-   TodoFlow — common-at-the-bottom todo list with tool chips nested
-   under whichever todo was in_progress when each tool fired.
-   ───────────────────────────────────────────────────────────────────── */
-
-.todo-flow {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px dashed rgba(255,255,255,0.10);
-}
-
-.todo-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 3px 0;
-  font-size: 12.5px;
-  line-height: 1.5;
-}
-.todo-icon {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  padding-top: 2px;
-}
-.todo-row.todo-pending .todo-icon     { color: var(--color-icon-secondary); }
-.todo-row.todo-in_progress .todo-icon { color: var(--accent-orange); }
-.todo-row.todo-completed .todo-icon   { color: var(--accent-green); }
-.todo-row.todo-cancelled .todo-icon,
-.todo-row.todo-missing .todo-icon     { color: var(--color-icon-tertiary); }
-
-.todo-content {
-  color: var(--text-primary);
-  flex: 1;
-  min-width: 0;
-  word-break: break-word;
-}
-.todo-content.is-active {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.todo-content.is-cancelled {
-  text-decoration: line-through;
-  color: rgba(255,255,255,0.40);
-}
-.todo-missing {
-  color: rgba(255,255,255,0.30);
-  font-style: italic;
-}
-
-/* Tool chips nested under a todo: indented + left-bordered to read as
-   "these tools ran under this todo's work" */
-.todo-nest {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 2px 0 6px 10px;
-  padding: 2px 0 2px 12px;
-  border-left: 1px dashed var(--color-border-default);
-}
-
 /* Orphan SubAgentCard fallback (subAgents without an associated chip) */
 .kc-orphan-subs {
   display: flex;
@@ -3725,12 +3690,6 @@ button.cb-mbsel-menu-head {
   gap: 4px;
   margin-top: 6px;
 }
-
-/* sm variant — used when TodoFlow renders inside SubAgentCard */
-.todo-flow.mp-sm { font-size: 11px; margin-top: 6px; padding-top: 6px; }
-.todo-flow.mp-sm .todo-row { font-size: 11px; padding: 2px 0; gap: 6px; }
-.todo-flow.mp-sm .todo-icon { padding-top: 1px; }
-.todo-nest.mp-sm { margin: 1px 0 4px 8px; padding-left: 10px; gap: 3px; }
 
 /* ─────────────────────────────────────────────────────────────────────
    message-parts/ sm variants — used by SubAgentCard so its inline
@@ -4361,6 +4320,10 @@ button.cb-mbsel-menu-head {
    复用 tool 段渲染:agent 调 ask_user 工具时,ForgeCard 用本卡替代普通 chip。
    单选(radio)/ 多选(checkbox)由 data-multi 区分,作答 POST /ask-reply。 */
 .ask-user-card {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   margin: 6px 0;
   padding: 12px 14px;
   border: 1px solid var(--primary, #d4ff48);
@@ -4396,6 +4359,9 @@ button.cb-mbsel-menu-head {
 .ask-user-opts {
   display: flex;
   flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   gap: 6px;
 }
 .ask-user-opt {
@@ -4403,6 +4369,8 @@ button.cb-mbsel-menu-head {
   align-items: flex-start;
   gap: 9px;
   width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   text-align: left;
   padding: 8px 10px;
   border: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.14));
@@ -4413,6 +4381,10 @@ button.cb-mbsel-menu-head {
   transition: border-color 0.12s, background 0.12s;
 }
 .ask-user-opt:hover:not(.is-locked) {
+  border-color: var(--color-border-strong, rgba(255, 255, 255, 0.28));
+  background: rgba(255, 255, 255, 0.045);
+}
+.ask-user-opt.is-checked:hover:not(.is-locked) {
   border-color: var(--primary, #d4ff48);
   background: rgba(212, 255, 72, 0.08);
 }
@@ -4427,7 +4399,6 @@ button.cb-mbsel-menu-head {
 .ask-user-opt-icon {
   margin-top: 1px;
   flex: 0 0 auto;
-  color: var(--primary, #d4ff48);
 }
 .ask-user-opt-body {
   display: flex;
@@ -4468,6 +4439,81 @@ button.cb-mbsel-menu-head {
   font-size: 12.5px;
   color: var(--accent-green, #6ee7a8);
 }
+.ask-user-collapsed {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  background: rgba(212, 255, 72, 0.045);
+}
+.ask-user-resolved-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 0;
+  color: var(--text-primary, #fff);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.ask-user-resolved-row:hover { background: color-mix(in srgb, var(--color-text-primary) 3%, transparent); }
+.ask-user-resolved-row:focus-visible {
+  outline: 2px solid var(--primary, #d4ff48);
+  outline-offset: -2px;
+}
+.ask-user-resolved-question {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.72));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ask-user-resolved-values {
+  max-width: 48%;
+  overflow: hidden;
+  color: var(--accent-green, #6ee7a8);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ask-user-answer-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  color: var(--accent-green, #6ee7a8);
+  background: rgba(110, 231, 168, 0.08);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.ask-user-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.55));
+  background: transparent;
+  cursor: pointer;
+}
+.ask-user-collapse:hover { color: var(--text-primary, #fff); background: rgba(255, 255, 255, 0.08); }
+.ask-user-error {
+  padding: 6px 9px;
+  border: 1px solid rgba(242, 106, 106, 0.35);
+  border-radius: 7px;
+  color: var(--accent-error, #f26a6a);
+  background: rgba(242, 106, 106, 0.08);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 .ask-user-empty {
   font-size: 12px;
   color: var(--text-muted, rgba(255, 255, 255, 0.45));
@@ -4500,6 +4546,136 @@ button.cb-mbsel-menu-head {
   border-color: var(--color-border-default, rgba(255, 255, 255, 0.14));
 }
 .ask-user-spin { color: var(--primary, #d4ff48); animation: status-pulse 1.2s linear infinite; }
+
+/* Grouped Ask User presentation from chat-panel.html: one neutral card per
+   question and one shared confirmation action for the whole group. */
+.ask-user-group {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  gap: 10px;
+  margin: 7px 0;
+}
+.ask-user-question {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  gap: 10px;
+  padding: 13px 14px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-text-primary) 8%, var(--color-background-base));
+}
+.ask-user-question-head { display: flex; align-items: flex-start; gap: 8px; }
+.ask-user-question-head.is-toggle {
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 7px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.14s, background 0.14s;
+}
+.ask-user-question-head.is-toggle:hover { color: var(--color-text-primary, #fff); background: color-mix(in srgb, var(--color-text-primary) 5%, transparent); }
+.ask-user-question-head.is-toggle:focus-visible { outline: 2px solid var(--primary, #d4ff48); outline-offset: 1px; }
+.ask-user-question-head.is-toggle > svg { flex: none; margin-left: auto; color: var(--color-text-secondary, rgba(255, 255, 255, 0.6)); }
+.ask-user-question .ask-user-q {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.ask-user-question .ask-user-opt {
+  min-height: 42px;
+  align-items: center;
+  padding: 9px 11px;
+  border: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.18));
+  background: color-mix(in srgb, var(--color-text-primary) 2.5%, transparent);
+  color: var(--color-text-secondary, rgba(255, 255, 255, 0.6));
+}
+.ask-user-question .ask-user-opt-body { min-width: 0; flex: 1; }
+.ask-user-question .ask-user-opt-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  margin: 0 1px 0 auto;
+  border: 1.5px solid var(--color-border-strong, #737373);
+  color: var(--color-text-on-bright, #0d0d0d);
+  background: transparent;
+}
+.ask-user-question .ask-user-opt-icon.is-single { border-radius: 50%; }
+.ask-user-question .ask-user-opt-icon.is-multi { border-radius: 4px; }
+.ask-user-question .ask-user-opt-icon.is-on {
+  border-color: var(--primary, #d4ff48);
+  background: var(--primary, #d4ff48);
+}
+.ask-user-question .ask-user-opt-icon svg { width: 11px; height: 11px; }
+.ask-user-question .ask-user-opt-label {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+.ask-user-question .ask-user-opt-desc {
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 1.35;
+  color: var(--color-text-tertiary, rgba(255, 255, 255, 0.3));
+}
+.ask-user-question .ask-user-opt.is-checked {
+  border: 2px solid var(--primary, #d4ff48);
+  /* Compensate the selected 2px border so the option does not jump in size. */
+  padding: 8px 10px;
+  box-shadow: none;
+  background: color-mix(in srgb, var(--primary, #d4ff48) 4%, transparent);
+  color: var(--text-primary, #fff);
+}
+.ask-user-question .ask-user-opt.is-checked .ask-user-opt-label { color: var(--color-text-primary, #fff); }
+.ask-user-question .ask-user-opt.is-checked .ask-user-opt-icon { color: var(--color-text-on-bright, #0d0d0d); }
+.ask-user-question .ask-user-opt-custom {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+.ask-user-other-label { flex: none; color: var(--color-text-secondary, rgba(255, 255, 255, 0.6)); font-size: 12px; font-weight: 400; }
+.ask-user-question .ask-user-custom-input {
+  min-width: 0;
+  flex: 1;
+  width: auto;
+  margin: 0;
+  padding: 4px 3px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.14));
+  border-radius: 0;
+  background: transparent;
+}
+.ask-user-question .ask-user-custom-input:focus { border-bottom-color: var(--primary, #d4ff48); }
+.ask-user-actions { display: flex; justify-content: flex-end; }
+.ask-user-actions .ask-user-submit { align-self: auto; margin-top: 0; min-width: 74px; }
+.ask-user-question.ask-user-collapsed {
+  padding: 0;
+  gap: 0;
+  background: color-mix(in srgb, var(--color-text-primary) 5%, var(--color-background-base));
+}
+.ask-user-question .ask-user-resolved-row { min-height: 44px; padding-right: 14px; }
+.ask-user-question .ask-user-resolved-row > svg:first-child { color: var(--primary, #d4ff48); }
+.ask-user-question .ask-user-resolved-values { margin-left: auto; color: var(--primary, #d4ff48); }
+.ask-user-question .ask-user-resolved-row > svg:last-child { margin-left: 5px; color: var(--color-text-tertiary, rgba(255, 255, 255, 0.3)); }
 
 /* ── checkpoint 回退点(Cursor 软回退)───────────────────── */
 

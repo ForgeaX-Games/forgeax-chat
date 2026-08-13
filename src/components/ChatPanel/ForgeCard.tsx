@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Brain, ChevronDown, ChevronUp, CheckCircle2, Loader2, Clock, AlertCircle } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
 import agentIcon from '@forgeax/interface/assets/icons/agent-icon.png';
@@ -13,13 +13,13 @@ import { ToolChipRow } from './message-parts/ToolChipRow';
 import { AskUserCard } from './message-parts/AskUserCard';
 import { KcCopyBtn } from './message-parts/KcCopyBtn';
 import { buildInterleavedSegments, partitionToolCalls } from './message-parts/interleave';
-import { groupTodoFlow } from './message-parts/groupTodoFlow';
-import { TodoFlow } from './message-parts/TodoFlow';
 import { SubAgentCard } from './SubAgentCard';
 import { AgentStatusChip } from './AgentStatusChip';
+import { MAIN_AGENT_ACCENT } from './agent-identity';
+import { shortAgentId } from './useAgentNames';
 
 interface ForgeCardProps {
-  status: 'done' | 'running' | 'waiting';
+  status: 'done' | 'running' | 'waiting' | 'error';
   text: string;
   thought?: string;
   thoughtCollapsed?: boolean;
@@ -43,10 +43,20 @@ interface ForgeCardProps {
   durationMs?: number;
   /** Active sub-agent display name; falls back to FORGE when unset. */
   agentName?: string;
+  /** Human-readable message time shown beside the current agent identity. */
+  timestamp?: string;
   /** Session id —— needed by interactive segments (ask_user) to POST replies. */
   sid?: string;
   /** Emitter agent path of this bubble —— ask-reply routing key with sid. */
   agentId?: string;
+  /** Host-owned execution trace for this assistant turn. It belongs to the
+   *  Forge response container, rather than being a sibling in the chat
+   *  timeline between the user message and the response. */
+  processContent?: ReactNode;
+  /** Index in the remaining message segments before which processContent was
+   *  emitted. Preserves Ask User/text segments that chronologically preceded
+   *  the first Todo/process event. */
+  processInsertAt?: number;
 }
 
 // PROVIDER_BADGE + providerBadgeFor moved to ../../lib/provider-badge.ts in
@@ -101,12 +111,15 @@ export function ForgeCard({
   cost,
   durationMs,
   agentName,
+  timestamp,
   sid,
   agentId,
+  processContent,
+  processInsertAt,
 }: ForgeCardProps) {
   const { t } = useTranslation();
-  const displayName = (agentName?.trim() || 'FORGE').toUpperCase();
-  const [collapsed, setCollapsed] = useState(false);
+  const isMainAgent = !agentName || shortAgentId(agentName) === 'forge';
+  const displayName = (isMainAgent ? 'ForgeaX' : agentName?.trim() || 'ForgeaX').toUpperCase();
   const onProviderBusDeepLink = useProviderBusDeepLink();
   const [thoughtOpen, setThoughtOpen] = useState(!thoughtCollapsed);
   const logoSrc = useDownsampledImage(agentIcon, 20);
@@ -140,11 +153,7 @@ export function ForgeCard({
   return (
     <div className={`forge-card kc-${status}`}>
       {status === 'done' && text.length > 0 && <KcCopyBtn text={text} />}
-      <button
-        className="kc-header"
-        onClick={() => setCollapsed((v) => !v)}
-        title="Toggle"
-      >
+      <div className="kc-header">
         {/* ADR-0019: WEBM 状态机. 没 avatarRules (老资源/默认 agent) 时回退到原 PNG.
          *  size=28 跟 .kc-logo 对齐 (CSS 已从 20→28 + radius 4→50%). */}
         <AgentAvatarVideo
@@ -154,7 +163,8 @@ export function ForgeCard({
           shape="circle"
           fallback={<img className="kc-logo" src={logoSrc} alt={displayName} />}
         />
-        <span className="kc-name">{displayName}</span>
+        <span className="kc-name" style={isMainAgent ? { color: MAIN_AGENT_ACCENT } : undefined}>{displayName}</span>
+        {timestamp && <time className="kc-time">{timestamp}</time>}
         {/* 右上角实时工作状态趣味文案 —— 跟头像同源, 只在 turn 进行中显示. */}
         {(status === 'running' || status === 'waiting') && (
           <AgentStatusChip agentId={agentId ?? null} />
@@ -170,14 +180,11 @@ export function ForgeCard({
           {status === 'done' && <CheckCircle2 size={14} className="status-done" />}
           {status === 'running' && <Loader2 size={14} className="status-running spin" />}
           {status === 'waiting' && <Clock size={14} className="status-waiting" />}
+          {status === 'error' && <AlertCircle size={14} className="status-error" />}
         </span>
-        <span className="kc-chev">
-          {collapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-        </span>
-      </button>
+      </div>
 
-      {!collapsed && (
-        <div className="kc-body">
+      <div className="kc-body">
           {status === 'running' && !text && (
             <div className="kc-loading">
               <span className="dot-pulse" aria-hidden="true">
@@ -189,7 +196,7 @@ export function ForgeCard({
             </div>
           )}
           {status === 'waiting' && (
-            <div className="kc-status-text">Waiting</div>
+            <div className="kc-status-text">{t('taskFlow.waiting')}</div>
           )}
           {/* Legacy / replayed messages carry only the flattened `thinking`
               field (no time-ordered segments[] — e.g. reconstructed from the
@@ -201,7 +208,7 @@ export function ForgeCard({
             <div className={`thought-card ${thoughtOpen ? 'expanded' : 'collapsed'}`}>
               <button className="tc-row" onClick={() => setThoughtOpen((v) => !v)}>
                 <Brain size={14} className="tc-brain" />
-                <span className="tc-label">Thought process</span>
+                <span className="tc-label">{t('taskFlow.thoughtProcess')}</span>
                 <span className="tc-chev">
                   {thoughtOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                 </span>
@@ -216,16 +223,7 @@ export function ForgeCard({
             </div>
           )}
           {(() => {
-            // Two-phase layout: groupTodoFlow splits tool calls into
-            //   1. preFlowTools  — fire BEFORE any todo_write or while no
-            //                       in_progress todo → main flow interleave
-            //   2. nestedToolsByTodoId — fire while a todo is in_progress →
-            //                       rendered inside TodoFlow under that todo
-            //   3. currentTodoState — the latest todos[] after all merges/
-            //                       replaces/clears → TodoFlow at bubble bottom
-            // todo_write tools themselves are NOT rendered as chips.
-            const { preFlowTools, currentTodoState, nestedToolsByTodoId } = groupTodoFlow(toolCalls);
-            const { ordered, orphans } = partitionToolCalls(preFlowTools);
+            const { ordered, orphans } = partitionToolCalls(toolCalls);
             const canInterleave = status === 'done' && ordered.length > 0 && text.length > 0;
 
             // Track which subagent ids we've already inline-rendered so we
@@ -239,9 +237,12 @@ export function ForgeCard({
               return <SubAgentCard key={`sub-${subagentId}`} run={run} parentAgentId={agentId ?? null} />;
             };
             // Render a tool chip; if it has a subagentId that resolves, the
-            // SubAgentCard renders inline right after (chip + card always
-            // co-located, both in main flow and inside TodoFlow nest).
+            // SubAgentCard renders inline right after it.
             const renderTool = (tc: ToolCall, key: string) => {
+              // CLI AskUserQuestion is owned by the permission side-channel;
+              // rendering it here would duplicate the PermissionPrompt after
+              // a WAL replay.
+              if (tc.permissionPrompt) return null;
               // ask_user —— 复用 tool 段渲染交互式选项卡(单选/多选)而非普通 chip。
               if (tc.name === 'ask_user' && sid) {
                 return <AskUserCard key={key} tc={tc} sid={sid} agentId={agentId ?? ''} />;
@@ -265,17 +266,27 @@ export function ForgeCard({
               <ThoughtChunk key={key} text={body} ts={ts} animated={status === 'running'} />
             );
 
+            const renderSegment = (seg: ChatSegment, i: number) => {
+              if (seg.kind === 'text') {
+                return <ForgeText key={`t-${i}-${seg.ts}`} text={seg.text} animated={status === 'running' && i === segments!.length - 1} />;
+              }
+              if (seg.kind === 'thinking') {
+                return renderThinking(`th-${i}-${seg.ts}`, seg.text, seg.ts);
+              }
+              return renderTool(seg.tool, `tc-${seg.tool.callId}`);
+            };
+
             const mainFlow = useSegments ? (
               <div className="kc-segmented">
-                {segments!.map((seg, i) => {
-                  if (seg.kind === 'text') {
-                    return <ForgeText key={`t-${i}-${seg.ts}`} text={seg.text} animated={status === 'running' && i === segments!.length - 1} />;
-                  }
-                  if (seg.kind === 'thinking') {
-                    return renderThinking(`th-${i}-${seg.ts}`, seg.text, seg.ts);
-                  }
-                  return renderTool(seg.tool, `tc-${seg.tool.callId}`);
-                })}
+                {segments!.flatMap((seg, i) => [
+                  ...(processContent && i === (processInsertAt ?? 0)
+                    ? [<Fragment key="process-slot">{processContent}</Fragment>]
+                    : []),
+                  renderSegment(seg, i),
+                ])}
+                {processContent && (processInsertAt ?? 0) >= segments!.length && (
+                  <Fragment key="process-slot-end">{processContent}</Fragment>
+                )}
                 {/* When upstream cli returns a clean 'done' with no segments
                  *  at all, render an empty-state hint so the bubble isn't
                  *  visually blank — mirrors the legacy fallback below. */}
@@ -287,6 +298,7 @@ export function ForgeCard({
               </div>
             ) : !canInterleave ? (
               <>
+                {processContent}
                 {text && <ForgeText text={text} animated={status === 'running'} />}
                 {/* When upstream cli returns a clean 'done' with no token + no
                  * tool calls + no todos, render a low-contrast placeholder so
@@ -296,14 +308,15 @@ export function ForgeCard({
                     {t('forgeCard.emptyResponse')}
                   </div>
                 )}
-                {preFlowTools.length > 0 && (
+                {toolCalls.length > 0 && (
                   <div className="kc-tools">
-                    {preFlowTools.map((tc) => renderTool(tc, tc.callId))}
+                    {toolCalls.map((tc) => renderTool(tc, tc.callId))}
                   </div>
                 )}
               </>
             ) : (
               <div className="kc-interleaved">
+                {processContent}
                 {buildInterleavedSegments(text, ordered).map((s, i) =>
                   s.kind === 'text'
                     ? <ForgeText key={i} text={s.value} animated={false} />
@@ -317,9 +330,7 @@ export function ForgeCard({
               </div>
             );
 
-            // After main flow + TodoFlow renders, surface any SubAgentCards
-            // that didn't get inline'd anywhere (defensive against future
-            // data shapes where subAgents exist without a chip).
+            // Surface any SubAgentCards that didn't get inline'd anywhere.
             const orphanSubAgents = subAgents
               ? Object.values(subAgents).filter((sa) => !renderedSubAgentIds.has(sa.emitterId))
               : [];
@@ -327,13 +338,6 @@ export function ForgeCard({
             return (
               <>
                 {mainFlow}
-                {currentTodoState && currentTodoState.length > 0 && (
-                  <TodoFlow
-                    todos={currentTodoState}
-                    nestedToolsByTodoId={nestedToolsByTodoId}
-                    renderSubAgent={renderSubAgentFor}
-                  />
-                )}
                 {orphanSubAgents.length > 0 && (
                   <div className="kc-orphan-subs">
                     {orphanSubAgents.map((sa) => (
@@ -357,20 +361,24 @@ export function ForgeCard({
             // The `~` prefix on fallback signals it's a client estimate, so
             // users can tell the precise number from the rough one.
             const finalDuration = durationMs ?? fallbackDurationMs;
-            if (status !== 'done' || (finalDuration === undefined && cost === undefined)) return null;
+            // ProcessAccordion owns the turn duration as the single visible
+            // `Worked for …` summary. Keep only provider cost here when a
+            // Process exists; rendering both timers duplicates the same fact.
+            const showDuration = !processContent && finalDuration !== undefined;
+            if (status !== 'done' || (!showDuration && cost === undefined)) return null;
             const isFallback = durationMs === undefined && fallbackDurationMs !== undefined;
             // Tooltip carries the exact underlying values — display rounds for
             // readability (`2.2s`, `$0.082`) but hovering reveals `2234ms ·
             // $0.082491` so power users can see precise cost/latency without
             // popping devtools.
             const tip = [
-              finalDuration !== undefined ? `${isFallback ? '~' : ''}${Math.round(finalDuration)}ms` : null,
+              showDuration ? `${isFallback ? '~' : ''}${Math.round(finalDuration)}ms` : null,
               cost !== undefined && cost > 0 ? `$${cost.toFixed(6)}` : null,
               isFallback ? '⏱ client estimate (provider omitted duration_ms)' : null,
             ].filter(Boolean).join(' · ');
             return (
               <div className="kc-meta" title={tip}>
-                {finalDuration !== undefined && (
+                {showDuration && (
                   <span className="kc-meta-item">
                     ⏱ {isFallback ? '~' : ''}{(finalDuration / 1000).toFixed(1)}s
                   </span>
@@ -381,8 +389,7 @@ export function ForgeCard({
               </div>
             );
           })()}
-        </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -398,6 +405,7 @@ export function ForgeCard({
  * non-segments code path.
  */
 function ThoughtChunk({ text, ts, animated }: { text: string; ts: number; animated: boolean }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(animated);
   // Re-open on `ts` change so a new thinking segment doesn't stay hidden under
   // an old collapsed one (rare, but matters when same-bubble has two reasoning
@@ -407,7 +415,7 @@ function ThoughtChunk({ text, ts, animated }: { text: string; ts: number; animat
     <div className={`thought-chunk ${open ? 'open' : 'collapsed'}`} data-ts={ts}>
       <button type="button" className="tc-row" onClick={() => setOpen((v) => !v)}>
         <Brain size={12} className="tc-brain" />
-        <span className="tc-label">{animated ? 'Thinking…' : 'Thought'}</span>
+        <span className="tc-label">{animated ? t('taskFlow.thinkingActive') : t('taskFlow.thought')}</span>
         <span className="tc-chev">{open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}</span>
       </button>
       {open && (

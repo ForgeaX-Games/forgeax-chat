@@ -182,8 +182,9 @@ export class TurnAccumulator {
         break;
 
       case 'hook:turnEnd':
+        if (payload.waitingForInput === true) break;
         this.cb.onMeta?.({ thinking: false });
-        this.finalizeTurn(emitter);
+        this.finalizeTurn(emitter, payload.aborted === true || typeof payload.error === 'string');
         break;
 
       case 'hook:assistantMessage': {
@@ -231,10 +232,12 @@ export class TurnAccumulator {
           result.isError || result.content?.startsWith('Error') || result.content?.startsWith('error');
         const status: 'error' | 'done' = isError ? 'error' : 'done';
         const resultFields = {
+          ...(result.name && result.name !== 'tool' ? { name: result.name } : {}),
           status,
           resultDisplay: result.visualDisplay,
           resultContent: result.content,
           fullResultContent: result.fullContent,
+          resultData: result.resultData,
           durationMs: result.durationMs,
         };
         const idx = this.pendingToolCalls.get(result.callId);
@@ -349,7 +352,7 @@ export class TurnAccumulator {
    * pushMessage, streamText is empty and we just commit. The streamText branch
    * is a fallback for when turnEnd fires before/without a hook:assistantMessage.
    */
-  private finalizeTurn(agent: string): void {
+  private finalizeTurn(agent: string, interrupted = false): void {
     if (this.streamText) {
       this.currentMessages.push({
         kind: 'assistant_complete',
@@ -366,6 +369,7 @@ export class TurnAccumulator {
         agent: agent || this.currentAgent,
         messages: this.currentMessages,
         timestamp: this.turnTs || Date.now(),
+        ...(interrupted ? { interrupted: true } : {}),
       });
     }
 

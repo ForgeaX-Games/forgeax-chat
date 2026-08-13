@@ -14,7 +14,17 @@ import { resolveNaming } from '@forgeax/ai-workbench/lib/agent-name';
 import { listExtensions, pickLang, type ExtensionInfo } from '@forgeax/interface/lib/extension-api';
 import { buildSlashPill, encodePill } from '@forgeax/interface/lib/composer-bridge';
 import { RichInput, buildPastedFilePill, type RichInputHandle } from '../Composer/RichInput';
-import { buildAssetPill, requestComposerInsert, useComposerPendingInsert, clearComposerPendingInsert } from '@forgeax/interface/lib/composer-bridge';
+import {
+  buildAssetPill,
+  requestComposerInsert,
+  useComposerPendingInsert,
+  clearComposerPendingInsert,
+  appendComposerText,
+  appendComposerTextOnce,
+  advanceComposerTextRevision,
+  useComposerPendingText,
+  clearComposerPendingText,
+} from '@forgeax/interface/lib/composer-bridge';
 import {
   getAgentModel,
   listModels,
@@ -274,6 +284,11 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   // cached value to paint yet → the picker shows '…' instead of the global
   // FORGEAX_MODEL fallback, killing the opus flash on session switch.
   const [agentModelLoading, setAgentModelLoading] = useState(false);
+  // Keep only successful warm-ups as terminal state. A failed request must be
+  // retryable after a transient server/provider error; otherwise one dropped
+  // request permanently disables the optimization for this tab/provider.
+  const cliPrewarmInFlight = useRef(new Set<string>());
+  const cliPrewarmSucceeded = useRef(new Set<string>());
   // 2026-05-20 重做后 sid 真值住 store.activeSid —— 不再单独本地 state。
   // 旧 ensureForgeaXSid 单例已删，所有需要 sid 的调用直接用 activeSid。
   const forgeaxSid = activeSid;
@@ -572,6 +587,49 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
     void fetchAgentModel(forgeaxSid, activeAgent, modelCatalogProviderId);
   }, [canSwitchModel, activeAgent, forgeaxSid, modelCatalogProviderId]);
 
+  // Start a provider-owned persistent transport once the active Studio
+  // session, agent, provider and model are known. This is intentionally an
+  // empty transport warm-up: the server composes the exact same native
+  // MCP/plugin/skill/CLAUDE.md/settings surface as the real turn and sends no
+  // hidden model prompt. Kernels without this optional capability return a
+  // no-op, so the chat UI stays provider-agnostic.
+  useEffect(() => {
+    if (!activeSid || !activeAgent || !providerOverride || !CLI_CATALOG_IDS.has(providerOverride)) return;
+    if (agentModelLoading || !agentModel) return;
+    const provider = providers.find((item) => item.id === providerOverride);
+    if (!provider || !provider.health.ok) return;
+    const attemptKey = `${activeSid}\u0000${activeAgent}\u0000${providerOverride}`;
+    if (cliPrewarmSucceeded.current.has(attemptKey) || cliPrewarmInFlight.current.has(attemptKey)) return;
+    cliPrewarmInFlight.current.add(attemptKey);
+    void fetch('/api/cli/warm', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: activeSid,
+        // Keep the legacy wire field for older hosts; the server canonicalizes
+        // the provider-native key from (sessionId, agentId).
+        threadId: activeSid,
+        agentId: activeAgent,
+        providerOverride,
+      }),
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json() as { ok?: boolean; error?: string };
+      if (result.ok === false) throw new Error(result.error ?? 'prewarm failed');
+      cliPrewarmInFlight.current.delete(attemptKey);
+      cliPrewarmSucceeded.current.add(attemptKey);
+    }).catch((error) => {
+      // Prewarm is an optimization. A provider failure must remain visible on
+      // the real turn and must never block composing or sending a message.
+      console.warn('[composer] cli transport prewarm failed', {
+        provider: providerOverride,
+        sid: activeSid,
+        agent: activeAgent,
+        error,
+      });
+    });
+  }, [activeAgent, activeSid, agentModel, agentModelLoading, providerOverride, providers]);
+
   // Auto-close the dropdown if a stream starts while it's open. The override
   // wouldn't apply to the in-flight turn anyway, so showing a clickable list
   // while the result is already streaming is misleading.
@@ -680,6 +738,7 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
   const pendingFileReadsRef = useRef<Map<Promise<void>, number>>(new Map());
   const fileReadCommitQueueRef = useRef<Promise<void>>(Promise.resolve());
   const ownerRef = useRef<ComposerOwner | null>(null);
+  const applyingPendingTextRef = useRef(false);
   const textOwnerGenerationRef = useRef<number | null>(null);
   const connectResumeOwnerRef = useRef<ComposerOwner | null>(null);
   const mountedRef = useRef(true);
@@ -715,6 +774,10 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
     const owner = currentOwner();
     textOwnerGenerationRef.current = value && owner ? owner.generation : null;
     setText(value);
+    if (applyingPendingTextRef.current) return;
+    // A manual edit starts a fresh recommendation revision. The bridge still
+    // dedupes clicks queued in the same revision.
+    advanceComposerTextRevision();
   };
   const updatePendingFileReadCount = () => {
     if (!mountedRef.current) return;
@@ -1064,6 +1127,41 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
     });
     return () => cancelAnimationFrame(id);
   }, [composerPendingInsert, clearComposerPendingInsert]);
+
+  // Pending plain-text request bridge — kept separate from the pill channel:
+  // suggestions are draft text, not structured references. Use the same rAF
+  // handoff so a closed Radix menu cannot steal the contenteditable selection.
+  const composerPendingText = useComposerPendingText();
+  useEffect(() => {
+    if (!composerPendingText) return;
+    const id = requestAnimationFrame(() => {
+      const r = ref.current;
+      if (!r) return;
+      const current = r.getValue();
+      const next = composerPendingText.mode === 'replace'
+        ? composerPendingText.text
+        : composerPendingText.recommendationId
+          ? appendComposerText(current, composerPendingText.text)
+          : appendComposerTextOnce(current, composerPendingText.text);
+      r.focus();
+      if (next !== current) {
+        // RichInput.setValue intentionally calls onChange so every imperative
+        // write stays in sync with Composer state. This write is a bridge
+        // consumption, not a manual edit: advancing the recommendation
+        // revision here would make a second click on the same button look new.
+        applyingPendingTextRef.current = true;
+        try {
+          r.setValue(next);
+        } finally {
+          applyingPendingTextRef.current = false;
+        }
+        setText(next);
+      }
+      r.setSelection(next.length);
+      clearComposerPendingText();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [composerPendingText, clearComposerPendingText]);
 
   // Queued messages for the active (sid, agentId) slot.
   const queueKey = activeSid && activeAgent ? `${activeSid}::${activeAgent}` : null;

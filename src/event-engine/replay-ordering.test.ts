@@ -59,6 +59,26 @@ const asstMsg = (emitter: string, ts: number, text: string): StoredEvent => ({
 });
 
 describe('replay ordering — inter-agent cards interleave with multi-turn forge text', () => {
+  it('rebuilds assistant prose around tools in one turn without overwriting earlier prose', () => {
+    const events: StoredEvent[] = [
+      { type: 'user_input', source: 'user', ts: 1, payload: { content: 'make one file' } },
+      { type: 'hook:turnStart', emitterId: 'forge', ts: 2 },
+      asstMsg('forge', 3, 'I will inspect first.\n'),
+      { type: 'hook:toolCall', emitterId: 'forge', ts: 4, payload: { name: 'read_file', callId: 'r1', args: {} } },
+      { type: 'hook:toolResult', emitterId: 'forge', ts: 5, payload: { name: 'read_file', callId: 'r1', ok: true, result: 'ok' } },
+      asstMsg('forge', 6, 'Now I will write it.\n'),
+      { type: 'hook:toolCall', emitterId: 'forge', ts: 7, payload: { name: 'write_file', callId: 'w1', args: {} } },
+      { type: 'hook:toolResult', emitterId: 'forge', ts: 8, payload: { name: 'write_file', callId: 'w1', ok: true, result: 'ok' } },
+      asstMsg('forge', 9, 'Finished.'),
+      { type: 'hook:turnEnd', emitterId: 'forge', ts: 10 },
+    ];
+
+    const msgs = replay(events, 'forge');
+    const assistant = msgs.find((message) => message.role === 'assistant');
+    expect(assistant?.text).toBe('I will inspect first.Now I will write it.Finished.');
+    expect(assistant?.toolCalls.map((tool) => tool.name)).toEqual(['read_file', 'write_file']);
+  });
+
   it('keeps each forge turn in its own bubble, cards interleaved at event time', () => {
     // forge: speaks → delegates to iori → iori replies → forge speaks again.
     const events: StoredEvent[] = [

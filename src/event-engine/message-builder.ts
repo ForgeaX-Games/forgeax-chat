@@ -16,9 +16,11 @@
  * lands.
  */
 
-import type { CompletedTurn, RendererMessage, SystemMessage, ToolCallMessage, UserInputMessage } from './types';
+import type { AssistantCompleteMessage, CompletedTurn, RendererMessage, SystemMessage, ToolCallMessage, UserInputMessage } from './types';
 import type { TurnAccCallbacks } from './turn-accumulator';
 import type { ChatAttachment, ChatMessage, SubAgentRun, ToolCall } from '@forgeax/interface/store';
+import { parseToolResultData } from './tool-result';
+import { hasPendingAskUser } from '../task-flow/ask-user-protocol';
 
 // ── Effect interface ──────────────────────────────────────────────────────
 
@@ -89,14 +91,37 @@ export function rendererToolCallToLegacy(msg: ToolCallMessage): ToolCall {
       : msg.status === 'error'
         ? 'error'
         : 'done';
+  const resultData =
+    msg.resultData !== undefined
+      ? parseToolResultData(msg.resultData)
+      : parseToolResultData(msg.fullResultContent ?? msg.resultContent);
   return {
     callId: msg.id,
     name: msg.name,
     args: msg.args,
     status,
+    ...(msg.permissionPrompt ? { permissionPrompt: true } : {}),
     result: msg.resultContent,
+    fullResultContent: msg.fullResultContent,
+    resultData,
     error: msg.status === 'error' ? msg.resultContent : undefined,
     subagentId: msg.subagentId,
+  };
+}
+
+function appendPublicSummary(message: ChatMessage, text: string, ts: number): ChatMessage {
+  if (!text.trim()) return message;
+  const segments = message.segments ?? [];
+  const last = segments.at(-1);
+  if (last?.kind === 'thinking' && last.visibility === 'public_summary') {
+    return {
+      ...message,
+      segments: [...segments.slice(0, -1), { ...last, text: `${last.text}${text}` }],
+    };
+  }
+  return {
+    ...message,
+    segments: [...segments, { kind: 'thinking', ts, text, visibility: 'public_summary' }],
   };
 }
 
@@ -144,11 +169,25 @@ export function buildMainCallbacks(eff: MessageEffects): TurnAccCallbacks {
         //    from msg.text or the bubble stays blank.
         // Fallback to m.text when msg.text is empty handles the live abort
         // path where the stream cuts off before hook:assistantMessage.
-        eff.applyMain((m) => ({
-          ...m,
-          text: msg.text || m.text,
-          thinking: msg.thinking || m.thinking || undefined,
-        }));
+        eff.applyMain((m) => {
+          const complete = msg as AssistantCompleteMessage;
+          const withSummary = complete.publicSummary
+            ? appendPublicSummary(m, complete.publicSummary, msg.timestamp)
+            : m;
+          const appendAuthoritativeStep = (current: string, step: string): string => {
+            if (!step || current.endsWith(step)) return current || step;
+            return current + step;
+          };
+          return {
+            ...withSummary,
+            // One logical turn may emit an assistantMessage before every
+            // tool call plus a final conclusion.  Live streaming already has
+            // the step as a suffix; WAL replay does not.  Suffix de-dup keeps
+            // live idempotent while rebuilding every step in order on replay.
+            text: appendAuthoritativeStep(withSummary.text, msg.text),
+            thinking: appendAuthoritativeStep(withSummary.thinking ?? '', msg.thinking) || undefined,
+          };
+        });
       } else if (msg.kind === 'system') {
         // System banner — warnings / errors / inter-agent traffic. Forwarded
         // to the effects layer if it provides applySystem (replay path does;
@@ -169,6 +208,14 @@ export function buildMainCallbacks(eff: MessageEffects): TurnAccCallbacks {
       }));
     },
     onTurn: (turn) => {
+      if (turn.interrupted && turn.agent !== 'user') {
+        eff.applyMain((m) => ({
+          ...m,
+          status: 'error',
+          turnAborted: true,
+          errorMessage: 'Turn interrupted',
+        }));
+      }
       // user_input fires as a one-shot onTurn (agent='user', single msg).
       // Replay binds eff.onUserInput to commit it; live ignores (user bubble
       // was pushed manually before SSE started).
@@ -436,7 +483,10 @@ export function finalizeStreamingStatus(messages: ChatMessage[]): void {
     const m = messages[i]!;
     let changed = false;
     let next = m;
-    if (m.role === 'assistant' && m.status === 'streaming') {
+    if (m.role === 'assistant' && m.status === 'streaming' && !hasPendingAskUser([
+      ...m.toolCalls,
+      ...(m.segments?.flatMap((segment) => segment.kind === 'tool' ? [segment.tool] : []) ?? []),
+    ])) {
       next = { ...next, status: 'done' };
       changed = true;
     }

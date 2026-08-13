@@ -5,12 +5,13 @@ import { useShellStore } from '@forgeax/interface/store';
 import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
 import type { SubAgentRun } from '../../session-store';
 import { ProviderBadgePill } from '@forgeax/interface/lib/provider-badge';
-import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
 import { ForgeText } from './message-parts/ForgeText';
 import { ToolChipRow } from './message-parts/ToolChipRow';
 import { KcCopyBtn } from './message-parts/KcCopyBtn';
 import { buildInterleavedSegments, partitionToolCalls } from './message-parts/interleave';
 import { useAgentNames, shortAgentId } from './useAgentNames';
+import { AgentIdentityAvatar } from './AgentIdentityAvatar';
+import { useAgentIdentities } from './agent-identity';
 
 // Handoff "拍一拍" phrases — the delegating agent (initiator) hands the task
 // off to this sub-agent. Read as: "{from}拍了拍{to}，并{action}". A stable
@@ -69,6 +70,7 @@ export function SubAgentCard({ run, parentAgentId }: { run: SubAgentRun; parentA
     openOverlay('settings', 'plugins');
   };
   const resolveName = useAgentNames();
+  const identify = useAgentIdentities();
   const prof = profileFor(run.emitterId);
   // Handoff framing: the message owner (parentAgentId — the agent that
   // delegated this sub-run) is the pat INITIATOR; the sub-agent (run.emitterId)
@@ -83,6 +85,7 @@ export function SubAgentCard({ run, parentAgentId }: { run: SubAgentRun; parentA
     ? `${fromName}拍了拍${toName}，并${patActionFor(`${run.emitterId}:${run.startedAt}`)}`
     : '';
   const isStreaming = run.status === 'streaming';
+  const emitterIdentity = identify(run.emitterId);
   const text = run.text ?? '';
   const { ordered, orphans } = partitionToolCalls(run.toolCalls);
   // Interleave when the run is settled (not streaming) and has both text +
@@ -90,25 +93,29 @@ export function SubAgentCard({ run, parentAgentId }: { run: SubAgentRun; parentA
   const canInterleave = !isStreaming && ordered.length > 0 && text.length > 0;
   return (
     <div className="sub-agent-card" style={{ borderLeftColor: prof.color }}>
-      <button className="sac-header" onClick={() => setOpen((o) => !o)}>
-        {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+      <button
+        className="sac-header"
+        onClick={() => { if (!isStreaming) setOpen((o) => !o); }}
+        aria-expanded={open}
+        aria-disabled={isStreaming}
+      >
+        {!isStreaming && (open ? <ChevronDown size={11} /> : <ChevronRight size={11} />)}
         {isHandoff ? (
           <>
             {/* 拍一拍发起者的头像 (delegating agent) + 拍一拍文案 */}
-            <AgentAvatarVideo
-              agentId={initiatorId}
-              mode="idle"
-              size={18}
-              shape="circle"
+            <AgentIdentityAvatar
+              identity={identify(initiatorId)}
               className="sac-pat-avatar"
-              fallback={<span className="sac-emoji">{profileFor(initiatorId ?? '').emoji}</span>}
+              size={18}
             />
             <span className="sac-pat-text">{patText}</span>
           </>
         ) : (
           <>
-            <span className="sac-emoji">{prof.emoji}</span>
-            <span className="sac-name" style={{ color: prof.color }}>{prof.displayName}</span>
+            <AgentIdentityAvatar identity={emitterIdentity} className="sac-pat-avatar" size={18} />
+            <span className="sac-name" style={{ color: emitterIdentity?.accent ?? prof.color }}>
+              {emitterIdentity?.name ?? toName}
+            </span>
             <span className="sac-role">{t(prof.roleKey)}</span>
           </>
         )}

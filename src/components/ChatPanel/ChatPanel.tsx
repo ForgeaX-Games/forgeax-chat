@@ -1,14 +1,16 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowDown, Undo2, ChevronDown, X } from 'lucide-react';
+import { ExternalLink, ArrowDown, ArrowLeft, Undo2, ChevronDown, X } from 'lucide-react';
 import { loadOnboarding, saveOnboarding } from '@forgeax/interface/components/Onboarding/types';
 import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
 import { ForgeCard } from './ForgeCard';
 import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
+import { dropAskUserSession } from './message-parts/AskUserCard';
 import { ChatAgentCapsule } from './ChatAgentCapsule';
 import { RewindConfirmDialog, RewindBanner, DirtyNoticeBar, RewindInlineEditor, BubbleEditInline } from './RewindControls';
 import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
+import { useHost } from '@forgeax/interface/core/app-shell';
 import { useAgentNames, shortAgentId } from './useAgentNames';
 import { useShellStore } from '@forgeax/interface/store';
 import {
@@ -24,7 +26,14 @@ import { parseDisplaySegments } from '@forgeax/interface/lib/composer-bridge';
 import { PillChip } from '../Composer/PillChip';
 import type { ChatAttachment } from '@forgeax/interface/store';
 import { useTranslation, t } from '@forgeax/interface/i18n';
+import { projectWorkTimeline } from '../../task-flow/project';
+import { useAgentThreadNav } from './use-agent-thread';
+import type { WorkTimelineItem } from '../../task-flow/model';
+import { ProcessAccordion } from './ProcessAccordion';
+import { ArtifactCard } from './ArtifactCard';
+import { createDeliverActions } from './deliver-actions';
 import './ChatPanel.css';
+import './TaskFlow.css';
 
 // 消息编辑草稿(**仅内存**):点自己消息进编辑态后,若用户改了内容却未发送就失焦/
 // 取消,把草稿按 sid:msgId 暂存;下次重新编辑同一条时回填用户上次改到一半的内容。
@@ -400,7 +409,41 @@ function SystemLine({ m }: { m: ChatMessage }) {
 
 export function ChatPanel() {
   const { t } = useTranslation();
+  const host = useHost();
+  const deliverActions = useMemo(
+    () => createDeliverActions((id, args) => host.commands.execute(id, args)),
+    [host],
+  );
   const messages = useActiveMessages();
+  // The session's bound agent owns every turn it streams, so it is also the
+  // default attribution for the round's tasks (`providerId` names the kernel,
+  // not the persona).
+  const ownerAgentId = useShellStore(
+    (s) => s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null,
+  );
+  const projectionSid = useShellStore((s) => s.activeSid);
+  const sessionTabs = useShellStore((s) => s.tabs);
+  const knownSessionSidsRef = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const current = new Set(sessionTabs.map((tab) => tab.sid));
+    const previous = knownSessionSidsRef.current;
+    if (previous) {
+      for (const sid of previous) {
+        if (!current.has(sid)) dropAskUserSession(sid);
+      }
+    }
+    knownSessionSidsRef.current = current;
+  }, [sessionTabs]);
+  // Project the complete thread before applying the DOM render window. The
+  // current UI consumes independent message/process/artifact items; legacy
+  // Round parsing remains available only to old WAL fixtures.
+  const taskFlowProjection = useMemo(
+    () => projectWorkTimeline(messages, {
+      ownerAgentId: ownerAgentId ?? undefined,
+      sid: projectionSid ?? undefined,
+    }),
+    [messages, ownerAgentId, projectionSid],
+  );
   // First-chat hint: after the onboarding tour ends, a brand-new user hasn't
   // sent anything yet. Instead of a global floating nudge, this belongs to the
   // chat's own empty state — a note above the composer + a highlighted input,
@@ -532,10 +575,11 @@ export function ChatPanel() {
   // 气泡（store.ts ~1680）；如果 messages 已有，说明正在直播，不能 clobber。
   // 持久化 tab 刷新场景 messages=[]，gate 开门重放。
   // 2026-05-20 重做：sid === threadId（一一对应），WAL replay 直接用 activeSid。
-  const activeSid = useShellStore((s) => s.activeSid);
+  const activeSid = projectionSid;
   const activeAgentId = useShellStore(
     (s) => s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null,
   );
+  const { inSubAgentView, backToMain } = useAgentThreadNav();
   const loadSession = useChatStore((s) => s.loadSession);
   // Each (sid, agentPath) pair has its own ledger on disk + an independent
   // messagesByAgent slot in store. Reload whenever the (sid, agentPath) key
@@ -666,6 +710,35 @@ export function ChatPanel() {
     return () => { clearTimeout(id); document.removeEventListener('visibilitychange', onVis); };
   }, []);
 
+  const visibleMessages = messages.length > renderLimit ? messages.slice(messages.length - renderLimit) : messages;
+  const visibleIds = new Set(visibleMessages.map((message) => message.id));
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const visibleTimeline = taskFlowProjection.timeline.filter((item: WorkTimelineItem) => {
+    if (item.kind === 'message') return visibleIds.has(item.messageId);
+    if (item.kind === 'process') {
+      const process = taskFlowProjection.processesById[item.processId];
+      return (process?.sourceMessageIds ?? [process?.anchorMessageId ?? '']).some((id) => visibleIds.has(id));
+    }
+    return visibleIds.has(taskFlowProjection.artifactMessageIds[item.artifactId] ?? '');
+  });
+  // A process is owned by its Forge response. Keep that ownership in the
+  // render tree instead of emitting the process as a top-level timeline row.
+  // When paging hides the original anchor, attach it to the first still-visible
+  // source message so the process remains inspectable with partial history.
+  const processesByHostMessageId = new Map<string, typeof taskFlowProjection.processesById[string][]>();
+  for (const item of visibleTimeline) {
+    if (item.kind !== 'process') continue;
+    const process = taskFlowProjection.processesById[item.processId];
+    if (!process) continue;
+    const visibleSources = (process.sourceMessageIds ?? []).filter((id) => visibleIds.has(id));
+    const hostMessageId = process.anchorMessageId && visibleIds.has(process.anchorMessageId)
+      ? process.anchorMessageId
+      : visibleSources[0];
+    if (!hostMessageId) continue;
+    const hosted = processesByHostMessageId.get(hostMessageId) ?? [];
+    hosted.push(process);
+    processesByHostMessageId.set(hostMessageId, hosted);
+  }
   return (
     <aside className="chat-panel chat-rail glass-subtle" data-testid="chat-panel">
       <div className="cp-body">
@@ -699,11 +772,36 @@ export function ChatPanel() {
           </button>
         )}
 
-        {(messages.length > renderLimit ? messages.slice(messages.length - renderLimit) : messages).map((m, idx, view) => {
+        {visibleTimeline.map((timelineItem) => {
+          if (timelineItem.kind === 'process') {
+            // Rendered inside the owning ForgeCard below.
+            return null;
+          }
+          if (timelineItem.kind === 'artifact') {
+            const artifact = taskFlowProjection.artifactsById[timelineItem.artifactId];
+            if (!artifact) return null;
+            return (
+              <ArtifactCard
+                key={`artifact-${artifact.id}`}
+                artifact={artifact}
+                timestamp={(() => {
+                  const hostMessageId = taskFlowProjection.artifactMessageIds[artifact.id];
+                  const hostMessage = hostMessageId ? messageById.get(hostMessageId) : undefined;
+                  return hostMessage ? formatTs(hostMessage.ts) : undefined;
+                })()}
+                onReveal={deliverActions.onReveal}
+                onNext={deliverActions.onNext}
+              />
+            );
+          }
+          const m = messageById.get(timelineItem.messageId);
+          if (!m) return null;
+          const view = visibleMessages;
+          const idx = view.findIndex((message) => message.id === m.id);
           const prev = idx > 0 ? view[idx - 1] : null;
           const showDivider = !prev || !sameDay(prev.ts, m.ts);
           // checkpoint:绝对下标(分页 slice 偏移)→ 是否落在被回退置灰区。
-          const absIdx = messages.length - view.length + idx;
+          const absIdx = messages.indexOf(m);
           // Cursor 软回退:目标消息原地变编辑框(isEditTarget),它**之后**的
           // 消息变灰(isRewound 严格 > 目标)。
           const isEditTarget = rewoundFromIdx >= 0 && absIdx === rewoundFromIdx;
@@ -713,6 +811,34 @@ export function ChatPanel() {
           const canRewindHere =
             m.role === 'user' && !!m.msgId && checkpointMsgIds?.[m.msgId] !== undefined
             && !isRewound && !isEditTarget && m.msgId !== editingMsgId;
+          const projectedSegments = m.role === 'assistant' && m.segments
+            ? m.segments.filter((segment, index) => timelineItem.segmentIndexes.includes(index)
+              && (segment.kind !== 'thinking' || segment.visibility === 'public_summary'))
+            : m.segments;
+          const projectedText = projectedSegments
+            ?.filter((segment) => segment.kind === 'text')
+            .map((segment) => segment.kind === 'text' ? segment.text : '')
+            .join('') ?? m.text;
+          const projectedTools = projectedSegments
+            ?.filter((segment) => segment.kind === 'tool')
+            .map((segment) => segment.kind === 'tool' ? segment.tool : null)
+            .filter((tool): tool is NonNullable<typeof tool> => tool !== null) ?? m.toolCalls;
+          // When an assistant message's task-flow content was projected into a
+          // round, the leftover message item can be an empty shell (e.g. a
+          // delegation turn whose thinking wasn't consumed): no projected text,
+          // no projected tools, no sub-agents. Skip it — the round already
+          // renders its content, so rendering the shell shows a bare THOUGHT card.
+          const isProjectedRemnant = m.role === 'assistant'
+            && m.segments !== undefined
+            && (timelineItem.segmentIndexes?.length ?? 0) < m.segments.length
+            && !projectedText.trim()
+            && (projectedTools?.length ?? 0) === 0
+            && !Object.keys(m.subAgents ?? {}).length
+            // An empty segment shell can still be the intentional owner of a
+            // ProcessAccordion. Dropping it also drops Worked-for and every
+            // Todo/process entry nested inside it.
+            && !processesByHostMessageId.has(m.id);
+          if (isProjectedRemnant) return null;
           if (isLocalEditTarget && activeSid) {
             return (
               <Fragment key={m.id}>
@@ -786,26 +912,60 @@ export function ChatPanel() {
                 </div>
               ) : (
                 <div className={`msg-block${isRewound ? ' is-rewound' : ''}`}>
-                  <div className="ts">{formatTs(m.ts)}</div>
                   <ForgeCard
-                    status={m.status === 'streaming' ? 'running' : m.status === 'error' ? 'waiting' : 'done'}
-                    text={m.text}
-                    thought={m.thinking}
+                    status={m.status === 'streaming' ? 'running' : m.status === 'error' ? 'error' : 'done'}
+                    text={projectedText}
+                    // Raw provider reasoning is fail-closed. Public summaries
+                    // are projected into ProcessAccordion, never duplicated in
+                    // the final assistant message.
+                    thought={undefined}
                     thoughtCollapsed
-                    toolCalls={m.toolCalls}
-                    segments={m.segments}
+                    toolCalls={projectedTools}
+                    segments={projectedSegments}
                     subAgents={m.subAgents}
                     errorMessage={m.errorMessage}
                     providerId={m.providerId}
                     cost={m.cost}
                     durationMs={m.durationMs}
                     agentName={activeAgentId ?? undefined}
+                    timestamp={formatTs(m.ts)}
                     sid={activeSid ?? undefined}
                     agentId={activeAgentId ?? undefined}
+                    processInsertAt={(() => {
+                      const hosted = processesByHostMessageId.get(m.id);
+                      if (!hosted?.length || !m.segments?.length) return undefined;
+                      const processCallIds = new Set(hosted.flatMap((process) => process.entries.flatMap((entry) =>
+                        entry.kind === 'tool' || entry.kind === 'todo_snapshot'
+                          ? [entry.kind === 'tool' ? entry.step.id : entry.id.slice('todo:'.length)]
+                          : [])));
+                      const processTextIndexes = new Set(hosted.flatMap((process) => process.entries.flatMap((entry) => {
+                        const prefix = `${entry.kind === 'thinking_summary' ? 'thinking' : 'text'}:${m.id}:`;
+                        if ((entry.kind === 'thinking_summary' || entry.kind === 'assistant_intermediate') && entry.id.startsWith(prefix)) {
+                          const index = Number(entry.id.slice(prefix.length));
+                          return Number.isInteger(index) ? [index] : [];
+                        }
+                        return [];
+                      })));
+                      const anchor = m.segments.findIndex((segment, index) =>
+                        processTextIndexes.has(index)
+                        || (segment.kind === 'tool' && processCallIds.has(segment.tool.callId)));
+                      // Ask User may suspend the kernel and resume the same
+                      // logical turn in a later provider message.  In that
+                      // case the hosted process has no segment anchor in the
+                      // original Ask message.  Keep the answered Ask cards in
+                      // front of the resumed execution instead of hoisting the
+                      // Process block above them.
+                      if (anchor < 0) return (timelineItem.segmentIndexes ?? []).length;
+                      return (timelineItem.segmentIndexes ?? []).filter((index) => index < anchor).length;
+                    })()}
+                    processContent={processesByHostMessageId.get(m.id)?.map((process) => {
+                      const turn = taskFlowProjection.turnsById[process.id];
+                      const hasArtifact = (turn?.artifactIds ?? []).some(
+                        (artifactId) => !!taskFlowProjection.artifactsById[artifactId],
+                      );
+                      return <ProcessAccordion key={`process-${process.id}`} process={process} hasArtifact={hasArtifact} />;
+                    })}
                   />
-                  {/* SubAgentCards are now rendered inline by ForgeCard next to
-                      their associated chip (in main flow or inside TodoFlow
-                      nest), with an orphan fallback at the bubble bottom. */}
                 </div>
               )}
             </Fragment>
@@ -861,7 +1021,17 @@ export function ChatPanel() {
           </button>
         </div>
       )}
-      <Composer highlight={showFirstHint} />
+      {inSubAgentView
+        ? (
+          <div className="cp-subagent-bar">
+            <span className="cp-subagent-note">{t('taskFlow.subAgentReadOnly')}</span>
+            <button type="button" className="cp-subagent-back" onClick={backToMain}>
+              <ArrowLeft size={14} aria-hidden="true" />
+              {t('taskFlow.backToMain')}
+            </button>
+          </div>
+        )
+        : <Composer highlight={showFirstHint} />}
     </aside>
   );
 }

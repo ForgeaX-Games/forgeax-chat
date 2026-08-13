@@ -61,6 +61,8 @@ export interface AssistantCompleteMessage extends RendererMessageBase {
   kind: 'assistant_complete';
   text: string;
   thinking: string;
+  /** Host-labelled user-facing progress, distinct from private reasoning. */
+  publicSummary?: string;
 }
 
 export type ToolStatus = 'pending' | 'running' | 'done' | 'error';
@@ -70,10 +72,14 @@ export interface ToolCallMessage extends RendererMessageBase {
   id: string;
   name: string;
   status: ToolStatus;
+  /** True when the CLI permission side-channel owns this interaction. */
+  permissionPrompt?: boolean;
   visualDisplay?: string;
   args: unknown;
   resultDisplay?: string;
   resultContent?: string;
+  /** Complete structured result for protocol consumers; never truncated. */
+  resultData?: unknown;
   /** Full untruncated result for progressive expansion (when resultContent is truncated). */
   fullResultContent?: string;
   durationMs?: number;
@@ -88,6 +94,8 @@ export interface ToolResultMessage extends RendererMessageBase {
   content: string;
   /** Full untruncated content — only set when content was truncated. */
   fullContent?: string;
+  /** Complete structured result from the hook payload. */
+  resultData?: unknown;
   durationMs: number;
   /** True when the tool execution failed / was aborted. */
   isError?: boolean;
@@ -117,6 +125,8 @@ export interface CompletedTurn {
   agent: string;
   messages: RendererMessage[];
   timestamp: number;
+  /** The kernel ended this turn by cancellation or error. */
+  interrupted?: boolean;
   /** When true, this turn is still being built (live streaming). commitTurn replaces it. */
   _draft?: boolean;
 }

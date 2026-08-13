@@ -29,8 +29,13 @@ import {
   type TurnSnapshotFrame,
 } from '../session-bridge';
 import { ratioFromUsage } from '../event-engine/turn-accumulator';
+import { mergeToolResult } from '../event-engine/tool-result';
+import { inferToolNameFromResult, normalizeHookToolCall } from '../event-engine/event-formatter';
+import { normalizeToolCall } from '../event-engine/tool-name';
+import { hasPendingAskUser } from '../task-flow/ask-user-protocol';
 import { chatFirstToken, chatTurnEnd } from '@forgeax/interface/lib/trace';
 import { t } from '@/i18n';
+import type { ArtifactResolvedPayload, ArtifactSummary } from '@forgeax/types/artifact-summary';
 import {
   appendChatSegment,
   isAgentStreamSuppressed,
@@ -50,6 +55,7 @@ interface StreamLlmPayload {
     name?: string;
     arguments?: string;
     arguments_delta?: string;
+    visibility?: 'public_summary' | 'private_reasoning';
   };
   turn?: number;
 }
@@ -58,19 +64,24 @@ interface HookToolCallPayload {
   name?: string;
   args?: Record<string, unknown>;
   toolCall?: { id?: string; name?: string };
+  permissionPrompt?: boolean;
 }
 
 interface HookToolResultPayload {
   name?: string;
   durationMs?: number;
   error?: string;
+  result?: unknown;
   callId?: string;
 }
 
 interface HookTurnEndPayload {
   turn?: number;
+  turnId?: string;
   aborted?: boolean;
   error?: string;
+  durationMs?: number;
+  waitingForInput?: boolean;
 }
 
 interface UserInputPayload {
@@ -79,10 +90,14 @@ interface UserInputPayload {
 }
 
 // ─── file-touch extraction from tool calls ──────────────────────────────
-const FILE_TOOL_PATH_KEY: Record<string, string> = {
-  read_file: 'path',
-  write_file: 'path',
+export const FILE_TOOL_PATH_KEY: Record<string, string> = {
+  read_file: 'file_path',
+  write_file: 'file_path',
   edit_file: 'file_path',
+  notebook_edit: 'notebook_path',
+  delete_file: 'file_path',
+  rename_file: 'to',
+  move_file: 'to',
   apply_patch: 'path',
 };
 
@@ -186,7 +201,7 @@ interface PendingStreamText {
   sid: string;
   agentId: string;
   msgId: string;
-  chunks: Array<{ kind: 'text' | 'thinking'; ts: number; text: string }>;
+  chunks: Array<{ kind: 'text' | 'thinking'; ts: number; text: string; visibility?: 'public_summary' | 'private_reasoning' }>;
 }
 
 const pendingStreamText = new Map<string, PendingStreamText>();
@@ -210,18 +225,31 @@ function flushPendingStreamText(): void {
       for (const ch of p.chunks) {
         if (ch.kind === 'text') text += ch.text;
         else thinking += ch.text;
-        segments = appendChatSegment(segments, { kind: ch.kind, ts: ch.ts, text: ch.text });
+        segments = appendChatSegment(segments, {
+          kind: ch.kind,
+          ts: ch.ts,
+          text: ch.text,
+          ...(ch.visibility ? { visibility: ch.visibility } : {}),
+        });
       }
       return { ...m, text, ...(thinking ? { thinking } : {}), segments, status: 'streaming' };
     }),
   })));
 }
 
-function enqueueStreamText(sid: string, agentId: string, msgId: string, kind: 'text' | 'thinking', ts: number, text: string): void {
+function enqueueStreamText(
+  sid: string,
+  agentId: string,
+  msgId: string,
+  kind: 'text' | 'thinking',
+  ts: number,
+  text: string,
+  visibility?: 'public_summary' | 'private_reasoning',
+): void {
   const key = `${sid}:${agentId}:${msgId}`;
   const p = pendingStreamText.get(key);
-  if (p) p.chunks.push({ kind, ts, text });
-  else pendingStreamText.set(key, { sid, agentId, msgId, chunks: [{ kind, ts, text }] });
+  if (p) p.chunks.push({ kind, ts, text, ...(visibility ? { visibility } : {}) });
+  else pendingStreamText.set(key, { sid, agentId, msgId, chunks: [{ kind, ts, text, ...(visibility ? { visibility } : {}) }] });
   if (streamTextRafId === null) streamTextRafId = requestAnimationFrame(flushPendingStreamText);
 }
 
@@ -238,6 +266,61 @@ function findStreamingAsst(
     if (m.role === 'assistant' && m.status === 'streaming') return { sid, agentId, msg: m };
   }
   return null;
+}
+
+function findLatestAsst(
+  sid: string,
+  agentId: string | null | undefined,
+  turnId?: string,
+): ChatMessage | null {
+  if (!agentId) return null;
+  const msgs = useChatStore.getState().readMessages(sid, agentId);
+  if (turnId) {
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const message = msgs[i];
+      if (message?.role === 'assistant' && message.turnId === turnId) return message;
+    }
+  }
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i]?.role === 'assistant') return msgs[i]!;
+  }
+  return null;
+}
+
+function artifactFromPayload(payload: Record<string, unknown>): ArtifactSummary | null {
+  const wire = payload as unknown as Partial<ArtifactResolvedPayload>;
+  if (wire.schemaVersion !== undefined && wire.schemaVersion !== 1) return null;
+  const resolution = payload.resolution && typeof payload.resolution === 'object'
+    ? payload.resolution as Record<string, unknown>
+    : null;
+  if (!resolution || (resolution.kind !== 'summary' && resolution.kind !== 'unavailable') || !resolution.summary || typeof resolution.summary !== 'object') return null;
+  const summary = resolution.summary as Record<string, unknown>;
+  if (typeof summary.id !== 'string' || typeof summary.sid !== 'string' || typeof summary.turnId !== 'string' || !Array.isArray(summary.files)) return null;
+  const files = summary.files.filter((file): file is Record<string, unknown> => !!file && typeof file === 'object' && !Array.isArray(file))
+    .filter((file) => typeof file.path === 'string' && (file.change === 'edit' || file.change === 'new' || file.change === 'del'))
+    .map((file) => ({
+      path: file.path as string,
+      change: file.change as 'edit' | 'new' | 'del',
+      ...(typeof file.insertions === 'number' ? { insertions: file.insertions } : {}),
+      ...(typeof file.deletions === 'number' ? { deletions: file.deletions } : {}),
+      ...(typeof file.binary === 'boolean' ? { binary: file.binary } : {}),
+    }));
+  if (!Array.isArray(summary.agents) || !summary.agents.every((agent) => typeof agent === 'string')) return null;
+  return {
+    id: summary.id,
+    sid: summary.sid,
+    turnId: summary.turnId,
+    checkpointMsgId: typeof summary.checkpointMsgId === 'string' ? summary.checkpointMsgId : undefined,
+    files,
+    status: resolution.kind === 'unavailable' ? 'unavailable' : summary.status === 'partial' || summary.status === 'unavailable' ? summary.status : 'complete',
+    derivedUnavailable: summary.derivedUnavailable === true,
+    unavailableReason: typeof summary.unavailableReason === 'string' ? summary.unavailableReason : undefined,
+    reliableCandidatePaths: Array.isArray(summary.reliableCandidatePaths) ? summary.reliableCandidatePaths.filter((path): path is string => typeof path === 'string') : undefined,
+    unattributedCount: typeof summary.unattributedCount === 'number' ? summary.unattributedCount : undefined,
+    agents: summary.agents as string[],
+    durationMs: typeof summary.durationMs === 'number' ? summary.durationMs : undefined,
+    semantic: summary.semantic && typeof summary.semantic === 'object' ? summary.semantic as ArtifactSummary['semantic'] : undefined,
+  };
 }
 
 /**
@@ -467,6 +550,19 @@ function dispatch(evt: SessionEvent): void {
     return;
   }
 
+  if (type === 'agent_log') {
+    // Provider logs are not user content. Only an explicit host-labelled
+    // public summary may enter the production process; raw CLI thinking and
+    // unknown visibility remain diagnostics.
+    if (payload.visibility !== 'public_summary' || !emitter) return;
+    const summary = readableSummary(payload);
+    if (!summary.trim()) return;
+    const ctxMsg = ensureStreamingAsst(sid, emitter, ts);
+    if (!ctxMsg) return;
+    enqueueStreamText(sid, emitter, ctxMsg.id, 'thinking', ts, summary, 'public_summary');
+    return;
+  }
+
   if (type === 'user_input' || event.source === 'user') {
     if (isOwnUserInput((payload as UserInputPayload).clientMsgId)) return;
     const content = typeof payload.content === 'string' ? payload.content : '';
@@ -533,6 +629,8 @@ function dispatch(evt: SessionEvent): void {
     const anchor = liveAnchor(emitter, event.ts);
     const msg = ensureStreamingAsst(sid, emitter, ts, anchor);
     if (!msg) return;
+    const turnId = typeof payload.turnId === 'string' ? payload.turnId : undefined;
+    if (turnId) patchMsg(sid, emitter, msg.id, (current) => ({ ...current, turnId }));
     _seals.set(sealKey(sid, emitter, msg.id), { text: 0, thinking: 0 });
     return;
   }
@@ -551,14 +649,14 @@ function dispatch(evt: SessionEvent): void {
       const txt = chunk.text ?? '';
       if (!txt) return;
       chatFirstToken(emitter);
-      enqueueStreamText(sid, emitter, ctxMsg.id, 'text', ts, txt);
+      enqueueStreamText(sid, emitter, ctxMsg.id, 'text', ts, txt, chunk.visibility);
       return;
     }
     if (chunk.type === 'thinking') {
       const txt = chunk.text ?? '';
       if (!txt) return;
       chatFirstToken(emitter);
-      enqueueStreamText(sid, emitter, ctxMsg.id, 'thinking', ts, txt);
+      enqueueStreamText(sid, emitter, ctxMsg.id, 'thinking', ts, txt, chunk.visibility);
       return;
     }
     if (chunk.type === 'tool_call') {
@@ -566,7 +664,8 @@ function dispatch(evt: SessionEvent): void {
       if (!callId) return;
       let parsedArgs: unknown = chunk.arguments ?? '';
       try { parsedArgs = JSON.parse(chunk.arguments ?? ''); } catch { /* partial */ }
-      const tc: ToolCall = { callId, name: chunk.name ?? 'tool', args: parsedArgs, status: 'running' };
+      const normalized = normalizeToolCall(chunk.name ?? 'tool', parsedArgs);
+      const tc: ToolCall = { callId, name: normalized.name, args: normalized.args, status: 'running' };
       patchMsg(sid, emitter, ctxMsg.id, (m) => ({
         ...m,
         toolCalls: m.toolCalls.some((tcl) => tcl.callId === callId) ? m.toolCalls.map((tcl) => (tcl.callId === callId ? { ...tcl, ...tc } : tcl)) : [...m.toolCalls, { ...tc, at: m.text.length }],
@@ -580,7 +679,7 @@ function dispatch(evt: SessionEvent): void {
       if (!callId) return;
       const delta = chunk.arguments_delta ?? '';
       if (!delta) return;
-      enqueueDelta(sid, emitter, ctxMsg.id, callId, chunk.name ?? 'tool', delta);
+      enqueueDelta(sid, emitter, ctxMsg.id, callId, normalizeToolCall(chunk.name ?? 'tool', {}).name, delta);
       return;
     }
     return;
@@ -596,11 +695,13 @@ function dispatch(evt: SessionEvent): void {
     if (!callId) return;
     const msg = ensureStreamingAsst(sid, emitter, ts);
     if (!msg) return;
+    const normalized = normalizeToolCall(typeof payload.name === 'string' ? payload.name : 'tool', payload.input ?? {});
     const tc: ToolCall = {
       callId,
-      name: typeof payload.name === 'string' ? payload.name : 'tool',
-      args: payload.input ?? {},
+      name: normalized.name,
+      args: normalized.args,
       status: 'running',
+      ...(payload.permissionPrompt === true ? { permissionPrompt: true } : {}),
     };
     patchMsg(sid, emitter, msg.id, (m) => ({
       ...m,
@@ -610,10 +711,15 @@ function dispatch(evt: SessionEvent): void {
       segments: upsertToolSegment(m.segments ?? [], ts, tc),
       status: 'streaming',
     }));
-    const fileArgs = payload.input && typeof payload.input === 'object'
-      ? payload.input as Record<string, unknown>
+    const fileArgs = normalized.args && typeof normalized.args === 'object'
+      ? normalized.args as Record<string, unknown>
       : undefined;
-    extractFileTouch(sid, emitter, callId, tc.name, fileArgs, ts);
+    // CliEventBridge records the durable server-side touch and also publishes
+    // a hook call below. Do not create a second UI touch for this transient
+    // copy; native stream events still use this extraction path.
+    if (payload.bridgeSource !== 'cli-event-bridge') {
+      extractFileTouch(sid, emitter, callId, tc.name, fileArgs, ts);
+    }
     return;
   }
 
@@ -658,13 +764,20 @@ function dispatch(evt: SessionEvent): void {
     if (!ctxMsg) return;
     dropPendingDelta(sid, callId);
     const ts2 = event.ts ?? Date.now();
-    const tc: ToolCall = { callId, name: p.name ?? p.toolCall?.name ?? 'tool', args: p.args ?? {}, status: 'running' };
+    const normalized = normalizeHookToolCall(p.name ?? p.toolCall?.name ?? 'tool', p.args ?? {});
+    const tc: ToolCall = {
+      callId,
+      name: normalized.name,
+      args: normalized.args,
+      status: 'running',
+      ...(p.permissionPrompt === true ? { permissionPrompt: true } : {}),
+    };
     patchMsg(sid, emitter, ctxMsg.id, (m) => ({
       ...m,
       toolCalls: m.toolCalls.some((tcl) => tcl.callId === callId) ? m.toolCalls.map((tcl) => (tcl.callId === callId ? { ...tcl, ...tc } : tcl)) : [...m.toolCalls, { ...tc, at: m.text.length }],
       segments: upsertToolSegment(m.segments ?? [], ts2, tc),
     }));
-    extractFileTouch(sid, emitter, callId, tc.name, p.args, ts2);
+    extractFileTouch(sid, emitter, callId, tc.name, normalized.args as Record<string, unknown>, ts2);
     return;
   }
 
@@ -674,10 +787,15 @@ function dispatch(evt: SessionEvent): void {
     const ctxMsg = ensureStreamingAsst(sid, emitter, ts);
     if (!ctxMsg) return;
     const callId = p.callId;
+    const inferredName = inferToolNameFromResult(p.result);
+    const resultName = p.name ? normalizeHookToolCall(p.name, {}).name : undefined;
     const apply = (tc: ToolCall): ToolCall => {
-      const matched = callId ? tc.callId === callId : (tc.name === p.name && tc.status === 'running');
+      const matched = callId ? tc.callId === callId : (!!resultName && tc.name === resultName && tc.status === 'running');
       if (!matched) return tc;
-      return { ...tc, status: p.error ? 'error' : 'done', error: p.error };
+      const merged = mergeToolResult(tc, p);
+      return inferredName && (tc.name === 'tool' || tc.name === 'DeferExecuteTool')
+        ? { ...merged, name: inferredName }
+        : merged;
     };
     patchMsg(sid, emitter, ctxMsg.id, (m) => ({
       ...m,
@@ -688,16 +806,53 @@ function dispatch(evt: SessionEvent): void {
     return;
   }
 
+  if (type === 'artifact:resolved') {
+    if (!emitter) return;
+    const artifact = artifactFromPayload(payload);
+    if (!artifact) return; // no_change is a terminal fact with no card.
+    const latest = findLatestAsst(sid, emitter, artifact.turnId);
+    if (!latest) return;
+    patchMsg(sid, emitter, latest.id, (message) => ({
+      ...message,
+      artifact,
+      artifactAnchorSeq: typeof payload.anchorSeq === 'number' ? payload.anchorSeq : undefined,
+      turnId: message.turnId ?? artifact.turnId,
+    }));
+    return;
+  }
+
   if (type === 'hook:turnEnd') {
     const p = payload as HookTurnEndPayload;
     if (!emitter) return;
+    // A provider may emit a turn-end while ask_user is still waiting. This is
+    // a lifecycle checkpoint, not final settle: keep the assistant streaming
+    // and leave the Ask card mounted/expanded until its result arrives.
     const ctxMsg = findStreamingAsst(sid, emitter)?.msg;
+    const pendingAsk = ctxMsg
+      ? hasPendingAskUser([
+        ...ctxMsg.toolCalls,
+        ...(ctxMsg.segments?.flatMap((segment) => segment.kind === 'tool' ? [segment.tool] : []) ?? []),
+      ])
+      : false;
+    if (p.waitingForInput || (pendingAsk && !p.error && !p.aborted)) return;
     if (ctxMsg) {
       const endTs = event.ts ?? Date.now();
       patchMsg(sid, emitter, ctxMsg.id, (m) => {
-        const durationMs = endTs - m.ts;
-        if (p.error) return { ...m, status: 'error', errorMessage: p.error, durationMs };
-        return { ...m, status: 'done', durationMs };
+        const durationMs = typeof p.durationMs === 'number'
+          ? Math.max(0, p.durationMs)
+          : Math.max(0, endTs - m.ts);
+        const turnId = p.turnId ?? m.turnId;
+        if (p.error || p.aborted) {
+          return {
+            ...m,
+            ...(turnId ? { turnId } : {}),
+            status: 'error',
+            ...(p.aborted ? { turnAborted: true } : {}),
+            errorMessage: p.error ?? 'Turn interrupted',
+            durationMs,
+          };
+        }
+        return { ...m, ...(turnId ? { turnId } : {}), status: 'done', durationMs };
       });
     }
     // 清掉本 turn 的封口游标 —— 按 (sid,emitter) 前缀全清,不依赖收尾时 findStreamingAsst
@@ -708,7 +863,11 @@ function dispatch(evt: SessionEvent): void {
     for (const k of _seals.keys()) if (k.startsWith(sealPrefix)) _seals.delete(k);
     // 原生路同样三值:取消不是故障,也不是成功。两个执行口的判据必须同形 —— 只在一口
     // 分辨取消,同一件事在两条入口下就长得不一样,监控没法比对。
-    chatTurnEnd(emitter, p.aborted ? 'cancelled' : p.error ? 'error' : 'ok', p.error);
+    chatTurnEnd(
+      emitter,
+      p.error ? 'error' : p.aborted ? 'cancelled' : 'ok',
+      p.error ?? (p.aborted ? 'Turn interrupted' : undefined),
+    );
     useChatStore.getState().setStreaming(sid, emitter, false);
     if (!p.error && !p.aborted) useChatStore.getState().flushQueuedForAgent(sid, emitter);
     return;
@@ -798,12 +957,16 @@ function applyTurnSnapshot(frame: TurnSnapshotFrame): void {
   noteAppliedSeq(sid, p.sgen, p.seq);
 
   const anchor = liveAnchor(emitterId, p.startedAt);
-  const toolCalls: ToolCall[] = (p.toolCalls ?? []).map((tc) => ({
-    callId: tc.callId,
-    name: tc.name,
-    args: tc.args ?? {},
-    status: tc.status === 'error' ? 'error' : tc.status === 'done' ? 'done' : 'running',
-  }));
+  const toolCalls: ToolCall[] = (p.toolCalls ?? []).map((tc) => {
+    const normalized = normalizeToolCall(tc.name, tc.args ?? {});
+    return {
+      callId: tc.callId,
+      name: normalized.name,
+      args: normalized.args,
+      ...(tc.permissionPrompt ? { permissionPrompt: true } : {}),
+      status: tc.status === 'error' ? 'error' : tc.status === 'done' ? 'done' : 'running',
+    };
+  });
   let segments: ChatMessage['segments'] = [];
   if (p.thinking) segments = appendChatSegment(segments ?? [], { kind: 'thinking', ts: p.startedAt, text: p.thinking });
   if (p.text) segments = appendChatSegment(segments ?? [], { kind: 'text', ts: p.startedAt, text: p.text });

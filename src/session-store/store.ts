@@ -44,6 +44,7 @@ import { resolveReplyLanguage } from '@forgeax/interface/lib/reply-language';
 // sendMessage 后已发出 2 个请求"这条回归断言从 2 变 0)。该模块顶层无副作用,与同包已
 // 静态引入的 lib/sse 等同级,不引入新耦合。
 import { beginChatTurn, chatFirstToken, chatTurnEnd } from '@forgeax/interface/lib/trace';
+import { replayPermissionEvents } from '@forgeax/interface/lib/permission-stream';
 import { TurnAccumulator } from '../event-engine/turn-accumulator';
 import {
   parseEventLines,
@@ -59,7 +60,10 @@ import {
   rendererToolCallToLegacy,
   type MessageEffects,
 } from '../event-engine/message-builder';
+import { normalizeToolCall } from '../event-engine/tool-name';
+import { hasPendingAskUser } from '../task-flow/ask-user-protocol';
 import type { StoredEvent, ToolCallMessage } from '../event-engine/types';
+import type { ArtifactSummary } from '@forgeax/types/artifact-summary';
 
 // ── Local types (chat-owned) ────────────────────────────────────────────────
 
@@ -77,6 +81,111 @@ export interface SendMessageOpts {
   target?: { sid: string; agentId: string };
   /** Internal acceptance callback; invoked after the pinned target is validated. */
   onAccepted?: () => void;
+}
+
+function artifactSummaryFromStoredPayload(payload: Record<string, unknown>): ArtifactSummary | null {
+  const resolution = payload.resolution && typeof payload.resolution === 'object'
+    ? payload.resolution as Record<string, unknown> : null;
+  if (!resolution || (resolution.kind !== 'summary' && resolution.kind !== 'unavailable')) return null;
+  const raw = resolution.summary;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const summary = raw as Record<string, unknown>;
+  if (typeof summary.id !== 'string' || typeof summary.sid !== 'string' || typeof summary.turnId !== 'string' || !Array.isArray(summary.files)) return null;
+  const files = summary.files.flatMap((item): ArtifactSummary['files'] => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const file = item as Record<string, unknown>;
+    if (typeof file.path !== 'string' || !['edit', 'new', 'del'].includes(String(file.change))) return [];
+    return [{
+      path: file.path,
+      change: file.change as 'edit' | 'new' | 'del',
+      ...(typeof file.insertions === 'number' ? { insertions: file.insertions } : {}),
+      ...(typeof file.deletions === 'number' ? { deletions: file.deletions } : {}),
+      ...(typeof file.binary === 'boolean' ? { binary: file.binary } : {}),
+    }];
+  });
+  const agents = Array.isArray(summary.agents) ? summary.agents.filter((agent): agent is string => typeof agent === 'string') : [];
+  return {
+    id: summary.id,
+    sid: summary.sid,
+    turnId: summary.turnId,
+    checkpointMsgId: typeof summary.checkpointMsgId === 'string' ? summary.checkpointMsgId : undefined,
+    files,
+    status: resolution.kind === 'unavailable' ? 'unavailable' : summary.status === 'partial' ? 'partial' : 'complete',
+    derivedUnavailable: summary.derivedUnavailable === true,
+    unavailableReason: typeof summary.unavailableReason === 'string' ? summary.unavailableReason : undefined,
+    reliableCandidatePaths: Array.isArray(summary.reliableCandidatePaths) ? summary.reliableCandidatePaths.filter((path): path is string => typeof path === 'string') : undefined,
+    unattributedCount: typeof summary.unattributedCount === 'number' ? summary.unattributedCount : undefined,
+    agents,
+    durationMs: typeof summary.durationMs === 'number' ? summary.durationMs : undefined,
+    semantic: summary.semantic && typeof summary.semantic === 'object' ? summary.semantic as ArtifactSummary['semantic'] : undefined,
+  };
+}
+
+/**
+ * Older CLI turns predate `payload.permissionPrompt` on hook:toolCall. The
+ * durable permission event still carries the exact AskUserQuestion input, so
+ * recover the provenance by matching the normalized question shape. This is a
+ * replay-only migration: it does not guess from provider names or result
+ * prose, and native ask_user calls without a matching permission event stay
+ * on the native AskUserCard path.
+ */
+function askQuestionSignature(value: unknown): string | null {
+  let source = value;
+  if (typeof source === 'string') {
+    try { source = JSON.parse(source) as unknown; } catch { return null; }
+  }
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return null;
+  const root = source as Record<string, unknown>;
+  const rawQuestions = Array.isArray(root.questions)
+    ? root.questions
+    : typeof root.question === 'string' ? [root] : [];
+  if (rawQuestions.length === 0) return null;
+  const questions = rawQuestions.flatMap((raw): Array<Record<string, unknown>> => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+    const question = raw as Record<string, unknown>;
+    if (typeof question.question !== 'string' || !question.question.trim()) return [];
+    const options = Array.isArray(question.options)
+      ? question.options.flatMap((option): Array<Record<string, string>> => {
+        if (typeof option === 'string') return [{ label: option }];
+        if (!option || typeof option !== 'object' || Array.isArray(option)) return [];
+        const item = option as Record<string, unknown>;
+        if (typeof item.label !== 'string') return [];
+        return [{
+          label: item.label,
+          ...(typeof item.description === 'string' ? { description: item.description } : {}),
+        }];
+      })
+      : [];
+    return [{
+      question: question.question,
+      ...(typeof question.header === 'string' ? { header: question.header } : {}),
+      multiSelect: question.multiSelect === true,
+      options,
+    }];
+  });
+  return questions.length > 0 ? JSON.stringify(questions) : null;
+}
+
+function markReplayPermissionAsks(events: StoredEvent[]): StoredEvent[] {
+  const signatures = new Set<string>();
+  for (const event of events) {
+    if (event.type !== 'permission:request' && event.type !== 'permission:resolved') continue;
+    const payload = event.payload ?? {};
+    const toolName = typeof payload.toolName === 'string' ? payload.toolName : '';
+    if (normalizeToolCall(toolName, {}).name !== 'ask_user') continue;
+    const signature = askQuestionSignature(payload.input);
+    if (signature) signatures.add(signature);
+  }
+  if (signatures.size === 0) return events;
+  return events.map((event) => {
+    if (event.type !== 'hook:toolCall') return event;
+    const payload = event.payload ?? {};
+    const name = typeof payload.name === 'string' ? payload.name : '';
+    if (normalizeToolCall(name, {}).name !== 'ask_user' || payload.permissionPrompt === true) return event;
+    const signature = askQuestionSignature(payload.args);
+    if (!signature || !signatures.has(signature)) return event;
+    return { ...event, payload: { ...payload, permissionPrompt: true } };
+  });
 }
 
 function toChatAttachments(raw: Array<Record<string, unknown>> | undefined): ChatAttachment[] | undefined {
@@ -181,15 +290,22 @@ export function appendChatSegment(
   segments: ChatSegment[],
   next:
     | { kind: 'text'; ts: number; text: string }
-    | { kind: 'thinking'; ts: number; text: string },
+    | { kind: 'thinking'; ts: number; text: string; visibility?: 'public_summary' | 'private_reasoning' },
 ): ChatSegment[] {
   if (!next.text) return segments;
   const last = segments[segments.length - 1];
-  if (last && last.kind === next.kind) {
+  const sameThinkingVisibility = last?.kind === 'thinking' && next.kind === 'thinking'
+    && last.visibility === next.visibility;
+  if (last && last.kind === next.kind && (next.kind !== 'thinking' || sameThinkingVisibility)) {
     const merged: ChatSegment =
       next.kind === 'text'
         ? { kind: 'text', ts: last.ts, text: (last as { text: string }).text + next.text }
-        : { kind: 'thinking', ts: last.ts, text: (last as { text: string }).text + next.text };
+        : {
+          kind: 'thinking',
+          ts: last.ts,
+          text: (last as { text: string }).text + next.text,
+          ...(next.visibility ? { visibility: next.visibility } : {}),
+        };
     return [...segments.slice(0, -1), merged];
   }
   return [...segments, next];
@@ -272,7 +388,7 @@ function consumeAguiEvents(events: AguiStoredEvent[]): {
       }
       case 'TOOL_CALL_START': {
         const id = (ev.toolCallId as string | undefined) ?? '';
-        const name = (ev.toolCallName as string | undefined) ?? '';
+        const name = normalizeToolCall((ev.toolCallName as string | undefined) ?? '', {}).name;
         if (!id || tcMap.has(id)) break;
         upsertTc(id, ts, { callId: id, name, args: '', status: 'running' });
         break;
@@ -315,9 +431,10 @@ function consumeAguiEvents(events: AguiStoredEvent[]): {
       }
       case 'STEP_STARTED': {
         const id = `step:${stored.seq}`;
+        const name = normalizeToolCall((ev.stepName as string | undefined) ?? 'step', {}).name;
         upsertTc(id, ts, {
           callId: id,
-          name: (ev.stepName as string | undefined) ?? 'step',
+          name,
           args: ev.input ?? null,
           status: 'running',
         });
@@ -570,9 +687,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         },
       );
       const pendingRw = findPendingRewind(rawEvents);
-      const events = trimToCompactBoundary(
+      const events = markReplayPermissionAsks(trimToCompactBoundary(
         applyRewindMask(rawEvents, pendingRw ? { keepBoundaryVisible: pendingRw.boundaryId } : {}),
-      );
+      ));
+      // Permission cards use a side channel rather than ChatMessage, so feed
+      // their durable request/resolution events through the same reducer on
+      // replay. This is what keeps a resolved CLI AskUserQuestion as a
+      // collapsed summary after a refresh.
+      replayPermissionEvents(sid, events);
       if (events.length === 0) {
         // Don't wipe a populated slot. Cold-start (slot has only daemon-tick-*
         // live bubbles or nothing) clears to the surviving daemon bubbles.
@@ -625,7 +747,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       let pendingUserAssistantId: string | null = null;
       let openTurnStartedAt: number | null = null;
       let openTurnAssistantId: string | null = null;
-      const lastAssistant = (): ChatMessage | undefined => {
+      const lastAssistant = (turnId?: string): ChatMessage | undefined => {
+        if (turnId) {
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const message = messages[i]!;
+            if (message.role === 'assistant' && message.turnId === turnId) return message;
+          }
+        }
         for (let i = messages.length - 1; i >= 0; i--) {
           if (messages[i]!.role === 'assistant') return messages[i];
         }
@@ -649,9 +777,34 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         }
 
         const assistantBeforeFeed = lastAssistant()?.id ?? null;
-        acc.feed(ev);
+        const turnPayload = ev.type === 'hook:turnEnd'
+          ? ev.payload as Record<string, unknown> | undefined
+          : undefined;
+        const currentAssistant = lastAssistant();
+        const pendingAskBeforeFeed = ev.type === 'hook:turnEnd'
+          && ownAgentEvent
+          && !turnPayload?.error
+          && turnPayload?.aborted !== true
+          && (turnPayload?.waitingForInput === true || (currentAssistant
+            ? hasPendingAskUser([
+              ...currentAssistant.toolCalls,
+              ...(currentAssistant.segments?.flatMap((segment) => segment.kind === 'tool' ? [segment.tool] : []) ?? []),
+            ])
+            : false));
+        // TurnAccumulator treats a normal turn-end as a seal boundary. A
+        // provider may omit waitingForInput, so do not feed that boundary
+        // while the Ask User call is still unresolved.
+        if (!pendingAskBeforeFeed) acc.feed(ev);
 
         const tail = lastAssistant();
+        if (ev.type === 'hook:turnStart' && ownAgentEvent) {
+          const turnId = typeof (ev.payload as Record<string, unknown> | undefined)?.turnId === 'string'
+            ? (ev.payload as Record<string, unknown>).turnId as string : undefined;
+          if (turnId && tail) {
+            const index = messages.findIndex((message) => message.id === tail.id);
+            if (index >= 0) messages[index] = { ...messages[index]!, turnId };
+          }
+        }
         if (ev.type === 'user_input') {
           // Human user_input creates a new assistant skeleton and is a real
           // turn boundary. Inter-agent user_input renders as a system row and
@@ -666,10 +819,49 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             tail && !knownAssistantIds.has(tail.id)) {
           openTurnAssistantId = tail.id;
         }
+        if (ev.type === 'artifact:resolved' && ownAgentEvent) {
+          const artifact = artifactSummaryFromStoredPayload(ev.payload ?? {});
+          if (artifact) {
+            const target = lastAssistant(artifact.turnId);
+            if (target) {
+              const index = messages.findIndex((message) => message.id === target.id);
+              if (index >= 0) messages[index] = {
+                ...messages[index]!,
+                artifact,
+                artifactAnchorSeq: typeof ev.seq === 'number' ? ev.seq : undefined,
+                turnId: messages[index]!.turnId ?? artifact.turnId,
+              };
+            }
+          }
+        }
         for (const m of messages) {
           if (m.role === 'assistant') knownAssistantIds.add(m.id);
         }
         if (ev.type === 'hook:turnEnd' && ownAgentEvent) {
+          // A provider may emit a lifecycle checkpoint while Ask User is
+          // waiting. Keep the replay cursor and streaming assistant alive
+          // until the later final turn-end.
+          if (pendingAskBeforeFeed) continue;
+
+          const targetId = openTurnAssistantId ?? lastAssistant()?.id;
+          const targetIndex = targetId
+            ? messages.findIndex((message) => message.id === targetId)
+            : -1;
+          if (targetIndex >= 0) {
+            const target = messages[targetIndex]!;
+            const startedAt = openTurnStartedAt ?? target.ts;
+            const endTs = ev.ts ?? Date.now();
+            const durationMs = typeof turnPayload?.durationMs === 'number'
+              ? Math.max(0, turnPayload.durationMs)
+              : Math.max(0, endTs - startedAt);
+            messages[targetIndex] = {
+              ...target,
+              status: turnPayload?.error || turnPayload?.aborted === true ? 'error' : 'done',
+              ...(turnPayload?.aborted === true ? { turnAborted: true } : {}),
+              ...(typeof turnPayload?.error === 'string' ? { errorMessage: turnPayload.error } : {}),
+              durationMs,
+            };
+          }
           openTurnStartedAt = null;
           openTurnAssistantId = null;
         }
@@ -1174,7 +1366,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
       ...(displayAttachments ? { attachments: displayAttachments } : {}),
     };
-    const asstMsg: ChatMessage = { id: newId(), role: 'assistant', text: '', toolCalls: [], status: 'streaming', ts: Date.now() };
+    const turnOverride = startTab?.providerOverride ?? null;
+    const asstMsg: ChatMessage = {
+      id: newId(), role: 'assistant', text: '', toolCalls: [], status: 'streaming', ts: Date.now(),
+      // The selected kernel is already known before transport starts. Include
+      // it in the optimistic shell so the immediate Forge card does not gain
+      // its provider badge only after the first upstream event arrives.
+      ...(turnOverride ? { providerId: turnOverride } : {}),
+    };
     const old = _abortByTab.get(startSid);
     if (old) {
       old.controller.abort();
@@ -1198,8 +1397,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, userMsg, asstMsg]);
     clearAgentStreamSuppression(startSid, activeAgent);
     setStreaming(true);
-
-    const turnOverride = startTab?.providerOverride ?? null;
 
     // R3 provider routing: null/'forgeax' → native EventBus; else cli bridge.
     const isForgeaXNative = turnOverride === null || turnOverride === 'forgeax';
@@ -1259,9 +1456,24 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     let streamError: string | undefined;
     let streamCancelled = false;
     try {
+      // The model picker persists its selection in this session agent's
+      // agent.json. Rented kernels cannot infer that selection from
+      // providerOverride alone: omitting it makes Codex/Claude fall back to
+      // their CLI-global model, so a visible Luna selection can silently run
+      // Sol. Resolve immediately before the request so the turn and the label
+      // share one source of truth.
+      let selectedModel: string | undefined;
+      try {
+        const { getAgentModel } = await import('@forgeax/interface/lib/model-config');
+        const state = await getAgentModel(startSid, activeAgent);
+        selectedModel = state.selected?.trim() || undefined;
+      } catch {
+        // Keep provider-native fallback when an old/unscaffolded session has no
+        // agent model record; failure to read optional routing must not block chat.
+      }
       res = await fetch('/api/cli/chat', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: wireText, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(traceparent ? { traceparent } : {}), ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
+        body: JSON.stringify({ message: wireText, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(traceparent ? { traceparent } : {}), ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
         signal,
       });
     } catch (e) {
@@ -1339,7 +1551,16 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         }
       }
     };
-    const sseTextBuf = new Map<string, { mainEvent: boolean; emitterId: string | null; chunks: Array<{ kind: 'text' | 'thinking'; text: string }>; providerId?: string }>();
+    const sseTextBuf = new Map<string, {
+      mainEvent: boolean;
+      emitterId: string | null;
+      chunks: Array<{
+        kind: 'text' | 'thinking';
+        text: string;
+        visibility?: 'public_summary' | 'private_reasoning';
+      }>;
+      providerId?: string;
+    }>();
     let sseTextLastFlush = 0;
     const flushSseTextBuf = (): void => {
       if (sseTextBuf.size === 0) return;
@@ -1355,7 +1576,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             let thinking = m.thinking ?? '';
             for (const ch of b.chunks) {
               if (ch.kind === 'text') text += ch.text; else thinking += ch.text;
-              segments = appendChatSegment(segments, { kind: ch.kind, ts, text: ch.text });
+              segments = appendChatSegment(segments, ch.kind === 'thinking'
+                ? { kind: 'thinking', ts, text: ch.text, ...(ch.visibility ? { visibility: ch.visibility } : {}) }
+                : { kind: 'text', ts, text: ch.text });
             }
             return { ...m, text, thinking, segments, providerId: m.providerId ?? b.providerId };
           });
@@ -1369,11 +1592,18 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         }
       }
     };
-    const bufText = (mainEvent: boolean, emitterId: string | null, kind: 'text' | 'thinking', text: string, providerId?: string): void => {
+    const bufText = (
+      mainEvent: boolean,
+      emitterId: string | null,
+      kind: 'text' | 'thinking',
+      text: string,
+      providerId?: string,
+      visibility?: 'public_summary' | 'private_reasoning',
+    ): void => {
       const key = emitterId ?? '__main__';
       let b = sseTextBuf.get(key);
       if (!b) { b = { mainEvent, emitterId, chunks: [], providerId }; sseTextBuf.set(key, b); }
-      b.chunks.push({ kind, text });
+      b.chunks.push({ kind, text, ...(kind === 'thinking' && visibility ? { visibility } : {}) });
       if (providerId && !b.providerId) b.providerId = providerId;
     };
 
@@ -1408,12 +1638,42 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             if (text) { if (mainEvent) noteFirstToken(); bufText(mainEvent, emitterId ?? null, 'text', text, providerId); if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL) flushSseTextBuf(); }
           } else if (frame.event === 'thinking') {
             const text = String(payload.text ?? '');
-            if (text) { if (mainEvent) noteFirstToken(); bufText(mainEvent, emitterId ?? null, 'thinking', text, providerId); if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL) flushSseTextBuf(); }
+            const visibility = payload.visibility === 'public_summary' || payload.visibility === 'private_reasoning'
+              ? payload.visibility
+              : undefined;
+            if (text) { if (mainEvent) noteFirstToken(); bufText(mainEvent, emitterId ?? null, 'thinking', text, providerId, visibility); if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL) flushSseTextBuf(); }
           } else if (frame.event === 'tool-call') {
             const callId = String(payload.callId ?? '');
             if (callId) {
-              const tc: ToolCall = { callId, name: String(payload.name ?? 'tool'), args: payload.args ?? {}, status: 'running' };
-              if (mainEvent) patchAsst((m) => ({ ...m, toolCalls: [...m.toolCalls, { ...tc, at: m.text.length }], segments: upsertToolSegment(m.segments ?? [], nowTs, tc) }));
+              const normalized = normalizeToolCall(String(payload.name ?? 'tool'), payload.args ?? {});
+              const tc: ToolCall = {
+                callId,
+                name: normalized.name,
+                args: normalized.args,
+                status: 'running',
+                // Legacy CLI AskUserQuestion uses the permission side-channel.
+                // Native kernel turns mark structured ask_user explicitly with
+                // permissionPrompt:false and must render AskUserCard instead.
+                ...(normalized.name === 'ask_user' && payload.permissionPrompt !== false ? { permissionPrompt: true } : {}),
+              };
+              if (mainEvent) patchAsst((m) => {
+                // A streaming CLI emits argument deltas before the final
+                // tool-call event. Merge that final event into the existing
+                // call instead of appending a second call with the same id.
+                // This also prevents duplicate AskUser cards and duplicate
+                // process entries on fast provider paths.
+                const existing = m.toolCalls.find((tool) => tool.callId === callId);
+                const merged = existing
+                  ? { ...existing, ...tc, at: existing.at ?? m.text.length }
+                  : { ...tc, at: m.text.length };
+                return {
+                  ...m,
+                  toolCalls: existing
+                    ? m.toolCalls.map((tool) => tool.callId === callId ? merged : tool)
+                    : [...m.toolCalls, merged],
+                  segments: upsertToolSegment(m.segments ?? [], nowTs, merged),
+                };
+              });
               else if (emitterId) patchSub(emitterId, (r) => ({ ...r, toolCalls: [...r.toolCalls, tc] }));
             }
           } else if (frame.event === 'tool-call-delta') {
@@ -1422,7 +1682,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             if (callId && delta) {
               const prev = sseDeltaBuf.get(callId);
               if (prev) prev.accumulated += delta;
-              else sseDeltaBuf.set(callId, { callId, name: String(payload.name ?? 'tool'), accumulated: delta, mainEvent, emitterId: emitterId ?? null });
+              else sseDeltaBuf.set(callId, { callId, name: normalizeToolCall(String(payload.name ?? 'tool'), {}).name, accumulated: delta, mainEvent, emitterId: emitterId ?? null });
               if (Date.now() - sseLastFlush >= SSE_DELTA_INTERVAL) flushSseDeltaBuf();
             }
           } else if (frame.event === 'tool-result') {

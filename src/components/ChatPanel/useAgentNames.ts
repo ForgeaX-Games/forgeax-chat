@@ -11,20 +11,52 @@ import { workbenchAgentsUrl } from '@forgeax/interface/lib/workbench-lang';
  * per page load and shared across every consumer via a module-level cache —
  * a SubAgentCard-heavy transcript must not fan out N identical requests.
  */
-let cache: Record<string, string> | null = null;
+export interface AgentProfile {
+  id: string;
+  name: string;
+  personName?: string;
+  role?: string;
+  title?: string;
+  subtitle?: string;
+  avatar?: string;
+  color?: string;
+}
+
+let cache: Record<string, AgentProfile> | null = null;
 let cacheLang: Locale | null = null;
-let inflight: Promise<Record<string, string>> | null = null;
+let inflight: Promise<Record<string, AgentProfile>> | null = null;
 const subscribers = new Set<() => void>();
 
-function load(lang: Locale): Promise<Record<string, string>> {
+function load(lang: Locale): Promise<Record<string, AgentProfile>> {
   if (cache && cacheLang === lang) return Promise.resolve(cache);
   if (!inflight) {
     inflight = fetch(workbenchAgentsUrl())
-      .then((r) => r.json() as Promise<{ agents?: Array<{ id?: string; name?: string }> }>)
+      .then((r) => r.json() as Promise<{
+        agents?: Array<{
+          id?: string;
+          name?: string;
+          personName?: string;
+          role?: string;
+          naming?: { title?: string; sub?: string };
+          avatar?: string;
+          color?: string;
+        }>;
+      }>)
       .then((j) => {
-        const map: Record<string, string> = {};
+        const map: Record<string, AgentProfile> = {};
         for (const a of j.agents ?? []) {
-          if (a.id) map[a.id] = a.name?.trim() || a.id;
+          if (a.id) {
+            map[a.id] = {
+              id: a.id,
+              name: a.name?.trim() || a.id,
+              personName: a.personName?.trim() || undefined,
+              role: a.role?.trim() || undefined,
+              title: a.naming?.title?.trim() || undefined,
+              subtitle: a.naming?.sub?.trim() || undefined,
+              avatar: a.avatar?.trim() || undefined,
+              color: a.color?.trim() || undefined,
+            };
+          }
         }
         cache = map;
         cacheLang = lang;
@@ -53,7 +85,7 @@ export function shortAgentId(ref: string): string {
   return tail.split('#')[0] ?? tail;
 }
 
-export function useAgentNames(): (id: string | null | undefined) => string {
+function useAgentCatalog(): (id: string | null | undefined) => AgentProfile | null {
   const lang = getLocale();
   const [, force] = useState(0);
   useEffect(() => {
@@ -72,8 +104,20 @@ export function useAgentNames(): (id: string | null | undefined) => string {
     };
   }, [lang]);
   return (id) => {
-    if (!id) return '';
+    if (!id) return null;
     const short = shortAgentId(id);
-    return (cache && (cache[id] ?? cache[short])) || short;
+    return (cache && (cache[id] ?? cache[short])) ?? {
+      id: short,
+      name: short,
+    };
   };
+}
+
+export function useAgentNames(): (id: string | null | undefined) => string {
+  const resolve = useAgentCatalog();
+  return (id) => resolve(id)?.name ?? '';
+}
+
+export function useAgentProfiles(): (id: string | null | undefined) => AgentProfile | null {
+  return useAgentCatalog();
 }

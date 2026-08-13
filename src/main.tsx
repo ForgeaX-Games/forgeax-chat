@@ -25,6 +25,8 @@ import { subscribePerceptionStream } from '@forgeax/interface/lib/perception-str
 import { syncBrowserPrefsFromServer, startBrowserPrefsSync } from '@forgeax/interface/lib/browser-prefs-sync';
 import { useShellStore } from '@forgeax/interface/store';
 import { installHealthBridge } from '@forgeax/interface/components/StatusBar/healthBridge';
+import { bootstrapAppHost } from '@forgeax/interface/appHostBootstrap';
+import { HostProvider } from '@forgeax/interface/core/app-shell';
 import { subscribeSessionStream, subscribeDaemonTick } from './session-store';
 import { ChatPanel } from './components/ChatPanel/ChatPanel';
 
@@ -34,7 +36,7 @@ const SHELL_CSS = `
 .forgeax-standalone-shell > * { flex: 1 1 auto; min-width: 0; min-height: 0; }
 `;
 
-function boot(): void {
+async function boot(): Promise<void> {
   // Dark-only today; index.html already dual-marks data-theme + .dark for no-flash.
   applyTheme('dark');
   initI18n();
@@ -67,18 +69,23 @@ function boot(): void {
   }
   (window as unknown as { __forgeaxBoot?: { done?: () => void } }).__forgeaxBoot?.done?.();
 
+  // The standalone chat surface does not mount the full interface shell, but
+  // it still needs the app-host command registry for task-flow actions.
+  const appHost = await bootstrapAppHost();
   createRoot(rootEl).render(
     <StrictMode>
       <ErrorBoundary scope="chat-standalone">
         <BrandProvider>
-          <style>{SHELL_CSS}</style>
-          <div className="forgeax-standalone-shell studio-shell studio-shell--preview-skin">
-            <ChatPanel />
-          </div>
+          <HostProvider value={appHost.host}>
+            <style>{SHELL_CSS}</style>
+            <div className="forgeax-standalone-shell studio-shell studio-shell--preview-skin">
+              <ChatPanel />
+            </div>
+          </HostProvider>
         </BrandProvider>
       </ErrorBoundary>
     </StrictMode>,
   );
 }
 
-boot();
+void boot();

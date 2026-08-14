@@ -35,6 +35,7 @@ import { recordLastModel } from '@forgeax/interface/lib/model-prefs';
 import { ModelPicker } from '@forgeax/interface/components/ModelPicker';
 import ContextRing from './ContextRing';
 import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
+import { runCliPrewarm } from './cli-prewarm';
 interface CliProviderInfo {
   id: string;
   displayName: string;
@@ -116,6 +117,7 @@ const PROVIDER_DISPLAY_FALLBACK: Record<string, string> = {
   'cursor-agent': 'Cursor',
   'codebuddy': 'a peer agent CLI',
   'kimi-code': 'Kimi Code',
+  'deepseek-harness': 'DeepSeek Harness',
 };
 
 // Concise one-line description per provider/kernel id → i18n key. Every dropdown
@@ -130,6 +132,7 @@ const PROVIDER_DESC_I18N: Record<string, string> = {
   'cursor-agent': 'composer.cliDescCursor',
   'codebuddy': 'composer.cliDescCodebuddy',
   'kimi-code': 'composer.cliDescKimiCode',
+  'deepseek-harness': 'composer.cliDescDeepSeekHarness',
 };
 
 // Provider (model-source) switching is owned by Settings › Providers now — it's
@@ -600,24 +603,22 @@ export function Composer({ highlight = false }: { highlight?: boolean } = {}) {
     if (!provider || !provider.health.ok) return;
     const attemptKey = `${activeSid}\u0000${activeAgent}\u0000${providerOverride}`;
     if (cliPrewarmSucceeded.current.has(attemptKey) || cliPrewarmInFlight.current.has(attemptKey)) return;
-    cliPrewarmInFlight.current.add(attemptKey);
-    void fetch('/api/cli/warm', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: activeSid,
-        // Keep the legacy wire field for older hosts; the server canonicalizes
-        // the provider-native key from (sessionId, agentId).
-        threadId: activeSid,
-        agentId: activeAgent,
-        providerOverride,
+    void runCliPrewarm({
+      attemptKey,
+      inFlight: cliPrewarmInFlight.current,
+      succeeded: cliPrewarmSucceeded.current,
+      request: (endpoint) => fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: activeSid,
+          // Keep the legacy wire field for older hosts; the server canonicalizes
+          // the provider-native key from (sessionId, agentId).
+          threadId: activeSid,
+          agentId: activeAgent,
+          providerOverride,
+        }),
       }),
-    }).then(async (response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const result = await response.json() as { ok?: boolean; error?: string };
-      if (result.ok === false) throw new Error(result.error ?? 'prewarm failed');
-      cliPrewarmInFlight.current.delete(attemptKey);
-      cliPrewarmSucceeded.current.add(attemptKey);
     }).catch((error) => {
       // Prewarm is an optimization. A provider failure must remain visible on
       // the real turn and must never block composing or sending a message.

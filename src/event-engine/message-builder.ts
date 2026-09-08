@@ -327,6 +327,7 @@ export function buildSubCallbacks(
 export function makeInMemEffects(
   messages: ChatMessage[],
   newId: () => string,
+  eventTimestamp: () => number = Date.now,
 ): MessageEffects {
   const findCurrentAsstIdx = (): number => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -365,18 +366,18 @@ export function makeInMemEffects(
           text: '',
           toolCalls: [],
           status: 'streaming',
-          ts: Date.now(),
+          ts: eventTimestamp(),
         });
         mainSealed = false;
       }
-      const idx = ensureAsst(Date.now());
+      const idx = ensureAsst(eventTimestamp());
       messages[idx] = mut(messages[idx]!);
     },
     sealMain: () => {
       mainSealed = true;
     },
     applySub: (emitterId, mut) => {
-      const idx = ensureAsst(Date.now());
+      const idx = ensureAsst(eventTimestamp());
       const host = messages[idx]!;
       const subAgents = { ...(host.subAgents ?? {}) };
       const prev: SubAgentRun = subAgents[emitterId] ?? {
@@ -384,7 +385,7 @@ export function makeInMemEffects(
         text: '',
         toolCalls: [],
         status: 'streaming',
-        startedAt: Date.now(),
+        startedAt: eventTimestamp(),
       };
       subAgents[emitterId] = mut(prev);
       messages[idx] = { ...host, subAgents };

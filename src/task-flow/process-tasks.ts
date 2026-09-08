@@ -40,6 +40,8 @@ export function tasksFromProcess(process: ProcessTrace): Task[] {
     content: item.content,
     activeForm: item.activeForm,
     status: item.status,
+    demotedFromActive: item.status === 'in_progress'
+      && process.phase !== 'running' && process.phase !== 'waiting_for_input',
     steps: [],
     agentId: item.agentId,
   }));

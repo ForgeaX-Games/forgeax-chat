@@ -1,6 +1,6 @@
 import { useTranslation } from '@forgeax/interface/i18n';
-import { CheckCircle2, Loader2 } from 'lucide-react';
-import type { Task } from '../../task-flow/model';
+import { CheckCircle2, CircleAlert, CirclePause, Loader2 } from 'lucide-react';
+import type { ProcessPhase, Task } from '../../task-flow/model';
 import { useAgentIdentities } from './agent-identity';
 import { useOpenAgentThread } from './use-agent-thread';
 import { AgentIdentityAvatar } from './AgentIdentityAvatar';
@@ -12,13 +12,16 @@ import { AgentIdentityAvatar } from './AgentIdentityAvatar';
  * with that agent's function label — the same identity the task card repeats
  * in its header, so a reader can scan the plan and the execution in one pass.
  */
-export function PlanCard({ tasks, fallbackAgentId }: { tasks: Task[]; fallbackAgentId?: string }) {
+export function PlanCard({ tasks, phase, fallbackAgentId }: { tasks: Task[]; phase: ProcessPhase; fallbackAgentId?: string }) {
   const { t } = useTranslation();
   const identify = useAgentIdentities();
   const openAgent = useOpenAgentThread();
   if (!tasks.length) return null;
   const owner = identify(fallbackAgentId);
   const settled = tasks.every((task) => task.status === 'completed' || task.status === 'cancelled');
+  const live = phase === 'running' || phase === 'waiting_for_input';
+  const failed = phase === 'error' || phase === 'aborted';
+  const state = failed ? 'stopped' : settled ? 'done' : live ? 'running' : 'stopped';
   const title = t('taskFlow.planTitle', { count: tasks.length });
   const marker = String(tasks.length);
   const at = title.indexOf(marker);
@@ -30,8 +33,10 @@ export function PlanCard({ tasks, fallbackAgentId }: { tasks: Task[]; fallbackAg
           {owner?.name ?? 'FORGEAX'}
         </span>
         <span className="tx-plan-owner-role">{t('taskFlow.planLabel')}</span>
-        <span className={`tx-plan-owner-state ${settled ? 'is-done' : 'is-running'}`}>
-          {settled ? <CheckCircle2 size={14} /> : <Loader2 size={14} className="spin" />}
+        <span className={`tx-plan-owner-state is-${state}`}>
+          {failed ? <CircleAlert size={14} />
+            : settled ? <CheckCircle2 size={14} />
+              : live ? <Loader2 size={14} className="spin" /> : <CirclePause size={14} />}
         </span>
       </header>
       <header className="tx-plan-title">
@@ -43,7 +48,7 @@ export function PlanCard({ tasks, fallbackAgentId }: { tasks: Task[]; fallbackAg
         {tasks.map((task) => {
           const identity = identify(task.agentId ?? fallbackAgentId);
           return (
-            <div className={`tx-plan-row tx-status-${task.status}`} key={task.id}>
+            <div className={`tx-plan-row tx-status-${task.demotedFromActive ? 'pending' : task.status}`} key={task.id}>
               <span className="tx-plan-dot" aria-hidden="true" />
               {identity && (
                 <button

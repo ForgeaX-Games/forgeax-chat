@@ -166,7 +166,7 @@ function TodoExecution({ process }: { process: ProcessTrace }) {
       </button>
       {open && (
         <div className="tx-live-task-flow">
-          <PlanCard tasks={tasks} fallbackAgentId={fallbackAgentId} />
+          <PlanCard tasks={tasks} phase={process.phase} fallbackAgentId={fallbackAgentId} />
           {visibleTasks.map((task) => (
             <TaskCard
               key={task.id}

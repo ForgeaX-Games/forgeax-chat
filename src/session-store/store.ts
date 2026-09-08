@@ -715,7 +715,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
       // Replay through TurnAccumulator — same callbacks as live SSE.
       const messages: ChatMessage[] = [];
-      const replayEffects = makeInMemEffects(messages, newId);
+      let replayTimestamp = 0;
+      const replayEffects = makeInMemEffects(messages, newId, () => replayTimestamp);
       let replayContextPct = 0;
       const mainCbs = buildMainCallbacks(replayEffects);
       let curPid: string | undefined;
@@ -741,7 +742,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           mainCbs.onUpdateMessage?.(callId, merged);
           if (merged.kind === 'tool_call') {
             const tc = rendererToolCallToLegacy(merged as ToolCallMessage);
-            replayEffects.applyMain((m) => ({ ...m, segments: upsertToolSegment(m.segments ?? [], Date.now(), tc) }));
+            replayEffects.applyMain((m) => ({ ...m, segments: upsertToolSegment(m.segments ?? [], merged.timestamp ?? replayTimestamp, tc) }));
           }
         },
         // Match the live stream path: a zero/invalid usage report must not
@@ -773,6 +774,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         return undefined;
       };
       for (const ev of sorted) {
+        replayTimestamp = ev.ts ?? Date.now();
         const p = (ev as { type?: string; payload?: { providerId?: unknown } }).payload;
         const pid = p && typeof p.providerId === 'string' && p.providerId ? p.providerId : undefined;
         if (ev.type === 'user_input' || ev.type === 'hook:turnStart') curPid = pid;

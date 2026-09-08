@@ -93,3 +93,27 @@ describe('tasksFromProcess', () => {
     expect(tasks[1]?.steps[0]?.thinking).toEqual(['Preparing the implementation']);
   });
 });
+
+// A finished turn does not certify the agent's unfinished checklist.
+describe('terminal todo presentation', () => {
+  for (const phase of ['done', 'error', 'aborted', 'running', 'waiting_for_input'] as const) {
+    test(`preserves snapshots and demotes stale active tasks only when ${phase} is terminal`, () => {
+      const items = [
+        { id: 'done', content: 'Design', status: 'completed' as const },
+        { id: 'active', content: 'Reshape', status: 'in_progress' as const },
+        { id: 'pending', content: 'Verify', status: 'pending' as const },
+        { id: 'cancelled', content: 'Optional', status: 'cancelled' as const },
+      ];
+      const process: ProcessTrace = {
+        id: 'turn', phase, startedAt: 1, agentIds: ['sino'],
+        todo: { items, updatedAt: 2 },
+        entries: [{ kind: 'todo_snapshot', id: 'todo', ts: 2, items }],
+      };
+      const original = JSON.stringify(process);
+      const tasks = tasksFromProcess(process);
+      expect(tasks.map(task => task.status)).toEqual(items.map(item => item.status));
+      expect(tasks[1]?.demotedFromActive === true).toBe(phase !== 'running' && phase !== 'waiting_for_input');
+      expect(JSON.stringify(process)).toBe(original);
+    });
+  }
+});

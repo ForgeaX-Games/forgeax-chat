@@ -180,8 +180,10 @@ export class TurnAccumulator {
     if (event.type.startsWith('_')) return;
 
     if (event.type === 'user_input') {
-      this.commitPending();
       const msg = formatEvent(event, this.viewerId);
+      // Delegation traffic is a system card inside the open parent turn.
+      // Only actual human input commits that turn and finalizes its tools.
+      if (msg?.kind === 'user_input') this.commitPending();
       if (msg) {
         this.cb.onTurn({
           agent: 'user',
@@ -213,7 +215,7 @@ export class TurnAccumulator {
       case 'hook:turnEnd':
         if (payload.waitingForInput === true) break;
         this.cb.onMeta?.({ thinking: false });
-        this.finalizeTurn(emitter, payload.aborted === true || typeof payload.error === 'string');
+        this.finalizeTurn(emitter, payload.aborted === true || typeof payload.error === 'string', event.ts ?? Date.now());
         break;
 
       case 'hook:assistantMessage': {
@@ -381,14 +383,14 @@ export class TurnAccumulator {
    * pushMessage, streamText is empty and we just commit. The streamText branch
    * is a fallback for when turnEnd fires before/without a hook:assistantMessage.
    */
-  private finalizeTurn(agent: string, interrupted = false): void {
+  private finalizeTurn(agent: string, interrupted = false, timestamp = Date.now()): void {
     if (this.streamText) {
       this.currentMessages.push({
         kind: 'assistant_complete',
         text: this.streamText.trim(),
         thinking: this.thinkingText.trim(),
         agent: agent || this.currentAgent,
-        timestamp: Date.now(),
+        timestamp,
       });
     }
 

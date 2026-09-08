@@ -33,7 +33,8 @@ function replay(events: StoredEvent[], viewerId: string): ChatMessage[] {
   const messages: ChatMessage[] = [];
   let seq = 0;
   const newId = () => `m${seq++}`;
-  const eff = makeInMemEffects(messages, newId);
+  let eventTimestamp = 0;
+  const eff = makeInMemEffects(messages, newId, () => eventTimestamp);
   const mainCbs = buildMainCallbacks(eff);
   const acc = new TurnAccumulator(
     {
@@ -46,7 +47,10 @@ function replay(events: StoredEvent[], viewerId: string): ChatMessage[] {
     },
     viewerId,
   );
-  for (const ev of [...events].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))) acc.feed(ev);
+  for (const ev of [...events].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))) {
+    eventTimestamp = ev.ts ?? Date.now();
+    acc.feed(ev);
+  }
   acc.flush();
   return messages;
 }
@@ -138,5 +142,43 @@ describe('replay ordering — inter-agent cards interleave with multi-turn forge
     expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant', 'system', 'assistant']);
     expect(msgs[1]!.text).toBe('first');
     expect(msgs[3]!.text).toBe('second');
+  });
+});
+
+
+describe('delegation inside an open parent turn', () => {
+  it('keeps outgoing child input and its tool result in the same parent reply', () => {
+    const events: StoredEvent[] = [
+      { type: 'user_input', source: 'user', ts: 100, payload: { content: 'delegate one inspection' } },
+      { type: 'hook:turnStart', emitterId: 'forge', ts: 110 },
+      { type: 'hook:toolCall', emitterId: 'forge', ts: 120, payload: { name: 'delegate_to_subagent', callId: 'delegate1', args: {} } },
+      { type: 'user_input', source: 'agent', emitterId: 'forge', to: 'sino', ts: 130, payload: { content: 'inspect' } },
+      { type: 'hook:toolResult', emitterId: 'forge', ts: 140, payload: { name: 'delegate_to_subagent', callId: 'delegate1', ok: true, result: 'accepted' } },
+      asstMsg('forge', 150, 'Delegated.'),
+      { type: 'hook:turnEnd', emitterId: 'forge', ts: 160 },
+      { type: 'user_input', source: 'agent', emitterId: 'sino', to: 'forge', ts: 170, payload: { content: 'inspection complete' } },
+      { type: 'hook:turnStart', emitterId: 'forge', ts: 180 },
+      asstMsg('forge', 190, 'Inspection complete.'),
+      { type: 'hook:turnEnd', emitterId: 'forge', ts: 200 },
+    ];
+    const restored = replay(events, 'forge');
+    const replies = restored.filter((message) => message.role === 'assistant');
+    expect(replies.map((message) => message.text)).toEqual(['Delegated.', 'Inspection complete.']);
+    expect(replies[0]?.toolCalls).toHaveLength(1);
+    expect(replies[0]?.toolCalls[0]?.status).not.toBe('error');
+    expect(replies.map((message) => message.ts)).toEqual([100, 190]);
+    expect(replay(events, 'forge').map(({ role, text, ts }) => ({ role, text, ts }))).toEqual(restored.map(({ role, text, ts }) => ({ role, text, ts })));
+  });
+  it('keeps real human input as a boundary for an interrupted parent', () => {
+    const restored = replay([
+      { type: 'user_input', source: 'user', ts: 10, payload: { content: 'first' } },
+      { type: 'hook:turnStart', emitterId: 'forge', ts: 11 },
+      asstMsg('forge', 12, 'First reply.'),
+      { type: 'user_input', source: 'user', ts: 20, payload: { content: 'second' } },
+      { type: 'hook:turnStart', emitterId: 'forge', ts: 21 },
+      asstMsg('forge', 22, 'Second reply.'),
+      { type: 'hook:turnEnd', emitterId: 'forge', ts: 23 },
+    ], 'forge');
+    expect(restored.filter((message) => message.role === 'assistant').map((message) => [message.text, message.ts])).toEqual([['First reply.', 10], ['Second reply.', 20]]);
   });
 });

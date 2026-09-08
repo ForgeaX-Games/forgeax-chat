@@ -59,7 +59,7 @@ function valuesOf(draft: QuestionDraft | undefined): string[] {
   ];
 }
 
-function displayQuestion(
+export function displayQuestion(
   question: AskUserQuestion,
   index: number,
   count: number,
@@ -67,7 +67,9 @@ function displayQuestion(
   progress: (current: number, total: number) => string,
 ): string {
   const text = question.question?.trim() || fallback;
-  if (count <= 1) return text;
+  // A header (产物 / 厂商 / 输入) already names the slot. Numbering is for
+  // untitled multi-asks only. count<=1 never numbered.
+  if (count <= 1 || question.header?.trim()) return text;
   return `${progress(index + 1, count)} · ${text}`;
 }
 

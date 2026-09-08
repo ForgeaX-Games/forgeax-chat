@@ -4,7 +4,7 @@ import { useTaskFlowUiStore } from '../../task-flow/ui-store';
 import type { Task } from '../../task-flow/model';
 import { StepRow } from './StepRow';
 import { useAgentIdentities } from './agent-identity';
-import { useAgentThreadNav } from './use-agent-thread';
+import { useOpenAgentThread } from './use-agent-thread';
 import { defaultStepOpen, defaultTaskOpen } from './process-display';
 import { AgentIdentityAvatar } from './AgentIdentityAvatar';
 
@@ -33,7 +33,7 @@ export function TaskCard({
   const openSteps = useTaskFlowUiStore((state) => state.openSteps);
   const toggleStep = useTaskFlowUiStore((state) => state.toggleStep);
   const identity = useAgentIdentities()(task.agentId ?? fallbackAgentId);
-  const { openAgent } = useAgentThreadNav();
+  const openAgent = useOpenAgentThread();
   const done = task.status === 'completed';
   return (
     <section

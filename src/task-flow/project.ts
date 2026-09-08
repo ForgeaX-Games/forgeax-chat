@@ -807,7 +807,7 @@ export function projectWorkTimeline(
     // segment has moved into the process; otherwise a late todo_write turns
     // `keep` empty and React unmounts the whole reply until another ordinary
     // segment arrives.
-    if (keep.size > 0 || entries.length > 0 || (!entries.length && message.text) || message.status === 'streaming') {
+    if (keep.size > 0 || entries.length > 0 || (!entries.length && message.text) || message.status === 'streaming' || message.status === 'error') {
       timeline.push({
         kind: 'message',
         messageId: message.id,

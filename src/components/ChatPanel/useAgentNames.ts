@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import { getLocale, subscribe, type Locale } from '@forgeax/interface/i18n';
-import { workbenchAgentsUrl } from '@forgeax/interface/lib/workbench-lang';
+import { agentCatalogUrl } from '@forgeax/agents/lib/agent-api-url';
 
 /**
  * Module-cached agent id → display name resolver.
  *
- * Source of truth is the same `/api/workbench/agents` catalog the capsule
+ * Source of truth is the same `/api/agents` catalog the capsule
  * (ChatAgentCapsule) and settings use, so names read consistently across
  * surfaces (e.g. "主线制作人" / "核心玩法师"). The catalog is fetched ONCE
  * per page load and shared across every consumer via a module-level cache —
@@ -30,7 +30,7 @@ const subscribers = new Set<() => void>();
 function load(lang: Locale): Promise<Record<string, AgentProfile>> {
   if (cache && cacheLang === lang) return Promise.resolve(cache);
   if (!inflight) {
-    inflight = fetch(workbenchAgentsUrl())
+    inflight = fetch(agentCatalogUrl())
       .then((r) => r.json() as Promise<{
         agents?: Array<{
           id?: string;

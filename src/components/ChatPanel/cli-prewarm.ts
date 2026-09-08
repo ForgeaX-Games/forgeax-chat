@@ -1,5 +1,8 @@
 export const CLI_PREWARM_MAX_ATTEMPTS = 2;
 export const CLI_PREWARM_ENDPOINT = '/api/cli/warm';
+// Prewarm is optional. After a complete retry cycle fails, pause this provider
+// briefly so fast session switching cannot multiply a shared provider outage.
+export const CLI_PREWARM_COOLDOWN_MS = 5_000;
 const CLI_PREWARM_BASE_DELAY_MS = 100;
 const CLI_PREWARM_MAX_DELAY_MS = 1_000;
 
@@ -7,10 +10,17 @@ type Sleep = (delayMs: number) => Promise<void>;
 
 interface PrewarmState {
   attemptKey: string;
+  /** Shared per provider, unlike attemptKey which is per session/agent. */
+  cooldownKey: string;
   inFlight: Set<string>;
+  /** Prevent concurrent requests for one provider across different sessions. */
+  providerInFlight: Set<string>;
   succeeded: Set<string>;
+  /** Maps provider keys to their exclusive cooldown deadline. */
+  cooldowns: Map<string, number>;
   request: (endpoint: typeof CLI_PREWARM_ENDPOINT) => Promise<Response>;
   sleep?: Sleep;
+  now?: () => number;
 }
 
 interface PrewarmOptions {
@@ -23,6 +33,12 @@ const sleep = (delayMs: number): Promise<void> =>
 
 function retryDelayMs(attempt: number): number {
   return Math.min(CLI_PREWARM_BASE_DELAY_MS * (2 ** attempt), CLI_PREWARM_MAX_DELAY_MS);
+}
+
+function clearExpiredCooldowns(cooldowns: Map<string, number>, now: number): void {
+  for (const [key, expiresAt] of cooldowns) {
+    if (expiresAt <= now) cooldowns.delete(key);
+  }
 }
 
 async function prewarmWithRetry(
@@ -51,21 +67,34 @@ async function prewarmWithRetry(
 
 /**
  * Start one keyed prewarm without making it part of the real message turn.
- * Only a fully successful warm is terminal; every exit path releases inFlight.
+ * Only a fully successful warm is terminal. A complete failed retry cycle
+ * pauses the provider briefly; expired entries are cleared opportunistically.
  */
 export async function runCliPrewarm({
   attemptKey,
+  cooldownKey,
   inFlight,
+  providerInFlight,
   succeeded,
+  cooldowns,
   request,
   sleep: wait,
+  now: getNow = Date.now,
 }: PrewarmState): Promise<void> {
-  if (succeeded.has(attemptKey) || inFlight.has(attemptKey)) return;
+  const now = getNow();
+  clearExpiredCooldowns(cooldowns, now);
+  if ((cooldowns.get(cooldownKey) ?? 0) > now) return;
+  if (succeeded.has(attemptKey) || inFlight.has(attemptKey) || providerInFlight.has(cooldownKey)) return;
   inFlight.add(attemptKey);
+  providerInFlight.add(cooldownKey);
   try {
     await prewarmWithRetry(() => request(CLI_PREWARM_ENDPOINT), { sleep: wait });
     succeeded.add(attemptKey);
+  } catch (error) {
+    cooldowns.set(cooldownKey, getNow() + CLI_PREWARM_COOLDOWN_MS);
+    throw error;
   } finally {
     inFlight.delete(attemptKey);
+    providerInFlight.delete(cooldownKey);
   }
 }

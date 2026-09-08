@@ -12,6 +12,8 @@ import { ArrowUp } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
 import { useChatStore, useActiveStreaming, type PendingRewind, type RewindDirtyNotice } from '../../session-store';
 import { rewindPreview, type RewindPreview, type FileDiffStat } from '@forgeax/interface/lib/checkpoint-api';
+import { useSummonSelection } from './summon-selection';
+import { rewindSendOptions } from './rewind-send-options';
 
 type RewindMode = 'both' | 'conversation' | 'code';
 
@@ -144,6 +146,7 @@ export function RewindInlineEditor({ sid, initialText, isStreaming }: {
 }) {
   const { t } = useTranslation();
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const { resolvedSummonAgentIdRef } = useSummonSelection();
   const performRewindCancel = useChatStore((s) => s.performRewindCancel);
   const [text, setText] = useState(initialText);
   // 仅防发送重复触发的瞬时 ref —— 不用 state 当永久闸,否则 enqueue 后会把
@@ -170,10 +173,11 @@ export function RewindInlineEditor({ sid, initialText, isStreaming }: {
     const msg = text.trim();
     if (!msg || sendingRef.current) return;
     sendingRef.current = true;
+    const sendOptions = rewindSendOptions(resolvedSummonAgentIdRef.current, isStreaming);
     // 发送即定格:server /messages 先 finalizePending 再打新快照,被回退段由
     // rewind:finalized 从列表移除(本编辑器随之卸载)。模型仍在回复时立即终止上一轮
     // (handoff:'steer' = 中断在飞 turn 并把本条作为下一轮),而非排队等它跑完。
-    void sendMessage(msg, isStreaming ? { handoff: 'steer' } : undefined);
+    void sendMessage(msg, sendOptions);
   };
 
   // Redo(恢复):始终可点。失败(网络 / 已定格 409)不静默 —— 既给提示,也
@@ -238,6 +242,7 @@ export function BubbleEditInline({ sid, msgId, initialText, hasCode, isStreaming
   const { t } = useTranslation();
   const performRewind = useChatStore((s) => s.performRewind);
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const { resolvedSummonAgentIdRef } = useSummonSelection();
   const [text, setText] = useState(initialText);
   const [phase, setPhase] = useState<'editing' | 'confirming'>('editing');
   const [preview, setPreview] = useState<RewindPreview | null>(null);
@@ -266,6 +271,9 @@ export function BubbleEditInline({ sid, msgId, initialText, hasCode, isStreaming
     if (sendingRef.current) return;
     const msg = text.trim();
     if (!msg) return;
+    // Snapshot before the asynchronous rewind: selection changes while the
+    // confirmation/rewind request is in flight must not rewrite this message.
+    const sendOptions = rewindSendOptions(resolvedSummonAgentIdRef.current, isStreaming);
     sendingRef.current = true;
     setBusy(true);
     setErr(null);
@@ -273,7 +281,7 @@ export function BubbleEditInline({ sid, msgId, initialText, hasCode, isStreaming
       await performRewind(sid, msgId, mode);
       // 发送即触发 server finalizePending 定格;本组件随 rewind:finalized 卸载。
       // 模型仍在回复时立即终止上一轮(handoff:'steer' 中断在飞 turn 并把本条作为下一轮),不排队等它跑完。
-      await sendMessage(msg, isStreaming ? { handoff: 'steer' } : undefined);
+      await sendMessage(msg, sendOptions);
     } catch (e) {
       sendingRef.current = false;
       setBusy(false);

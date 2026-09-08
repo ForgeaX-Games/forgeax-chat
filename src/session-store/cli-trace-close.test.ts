@@ -21,9 +21,11 @@ const initialWarn = console.warn;
 /** 记录 trace 生命周期调用 —— 断言的是"收没收口",不是 span 内容(那由 trace.test.ts 管)。 */
 const ended: Array<{ outcome: 'ok' | 'cancelled' | 'error'; err?: string }> = [];
 let began = 0;
+let toolResults = 0;
 mock.module('@forgeax/interface/lib/trace', () => ({
   beginChatTurn: () => { began += 1; return { traceparent: '00-' + 'a'.repeat(32) + '-' + 'b'.repeat(16) + '-01' }; },
   chatFirstToken: () => {},
+  chatToolResult: () => { toolResults += 1; },
   chatTurnEnd: (_agentId: string, outcome: 'ok' | 'cancelled' | 'error', err?: string) => { ended.push({ outcome, ...(err ? { err } : {}) }); },
 }));
 
@@ -33,7 +35,7 @@ function setTarget(sid: string): void {
 }
 
 beforeEach(() => {
-  ended.length = 0; began = 0;
+  ended.length = 0; began = 0; toolResults = 0;
   _chatInternals.abortByTab.clear();
   useChatStore.setState({ ...initialChatState, bySid: {}, queuedMessages: {} }, true);
   useShellStore.setState({ ...initialShellState, tabs: [], activeSid: null, busyByAgentBySid: {} }, true);
@@ -92,7 +94,7 @@ describe('CLI 桥的 trace 收口', () => {
   });
 
   it('正常读完:收口且标成成功 —— 否则 trace 里全是假失败', async () => {
-    const body = 'event: token\ndata: {"text":"hi"}\n\nevent: done\ndata: {}\n\n';
+    const body = 'event: tool-result\ndata: {"callId":"tool-1","ok":true,"result":"done"}\n\nevent: token\ndata: {"text":"hi"}\n\nevent: done\ndata: {}\n\n';
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       if (String(input) !== '/api/cli/chat') return new Response('{}', { status: 200 });
       return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
@@ -103,6 +105,7 @@ describe('CLI 桥的 trace 收口', () => {
 
     expect(ended).toHaveLength(1);
     expect(ended[0]!.outcome).toBe('ok');
+    expect(toolResults).toBe(1);
   });
 
   // ↓ 补上此前缺的两个终点。它们缺席不是小事:取消被记成失败的 bug 之所以没被抓到,

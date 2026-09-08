@@ -354,6 +354,17 @@ describe('projectWorkTimeline', () => {
     durationMs: 1_200,
   });
 
+  it('keeps an error-only assistant message visible so its retry detail is not dropped', () => {
+    const failed = message('a1', 'assistant', [], 'error');
+    (failed as TaskFlowMessage & { errorMessage?: string }).errorMessage = 'history resync failed';
+    const result = projectWorkTimeline([
+      message('u1', 'user', [{ kind: 'text', text: 'Continue', ts: 1 }]),
+      failed,
+    ]);
+    expect(result.timeline).toContainEqual({ kind: 'message', messageId: 'a1', segmentIndexes: [] });
+    expect(Object.keys(result.processesById)).toHaveLength(0);
+  });
+
   it('keeps an empty streaming assistant visible before the first response byte', () => {
     const result = projectWorkTimeline([
       message('u1', 'user', [{ kind: 'text', text: 'Build it', ts: 1 }]),

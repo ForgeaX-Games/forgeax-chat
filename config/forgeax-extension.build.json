@@ -1,0 +1,8 @@
+{
+  "id": "forgeax.agent.chat",
+  "version": "1.0.0",
+  "input": "forgeax-extension.json",
+  "entry": "src/extension/agent-baseline.ts",
+  "output": "dist/forgeax-agent-chat.fxe",
+  "signer": { "issuer": "https://marketplace.forgeax.dev", "subject": "forgeax-agent-chat", "keyId": "m3-baseline" }
+}

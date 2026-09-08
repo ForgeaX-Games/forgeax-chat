@@ -160,7 +160,7 @@
  * Two coupled behaviours:
  *
  * 1. `.as-avatar-btn.placeholder`: when cli daemon is down and AgentSwitcher
- *    has fallen back to /api/workbench/agents, each marketplace agent shows
+ *    has fallen back to /api/agents, each marketplace agent shows
  *    as a dim 0.55-opacity avatar. Click triggers the existing `.as-hint`
  *    toast ("cli 未启动") instead of switching activeAgent (which would wedge
  *    the next /api/chat send with a non-runnable id). Status dot is omitted
@@ -551,10 +551,20 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
   color: rgba(196,163,255,0.95);
 }
 
+.cp-working-dots {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 14px;
+}
+
 .cp-thread {
   flex: 1;
   overflow-y: auto;
-  padding: 64px 14px 8px;
+  /* The agent capsule remains mounted for controller state but is visually
+     retired above. Do not reserve space for its old absolute-positioned UI. */
+  padding: 0 14px 8px;
   display: flex; flex-direction: column;
 }
 
@@ -1025,11 +1035,7 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
 
 /* FORGE 卡 */
 .forge-card {
-  position: relative; /* anchor for .kc-copy-btn */
-  /* Total width of kc-header's right-side controls (kc-status 16 + kc-chev 16
-     + 8px gap + 8px padding-right ≈ 48). If you add a new icon to kc-header,
-     bump this value — .kc-copy-btn computes its right offset from it. */
-  --kc-header-controls: 48px;
+  position: relative;
   background: transparent;
   border: 0;
   border-radius: 0;
@@ -1040,18 +1046,11 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
   overflow: visible;
   transition: border-color 0.3s, box-shadow 0.3s;
 }
-/* When the provider pill is rendered (.kc-provider — "forgeax" / "claude"…),
-   it sits left of kc-status and the copy button must clear it too. Pill width
-   varies with provider-id text (9px mono); ~80px covers names up to ~10 chars
-   plus the 6px margin and 8px flex gap. Without this rule, .kc-copy-btn lands
-   on top of the pill on hover. */
-.forge-card:has(.kc-provider) {
-  --kc-header-controls: calc(48px + 80px);
-}
-/* Message-level Copy. right = controls width + 10px gap so it lands cleanly
-   left of the kc-status icon, regardless of how many header icons exist. */
+/* Message-level Copy participates in header layout. Keeping it in flow avoids
+   guessing the combined width of the timestamp, provider and status controls. */
 .kc-copy-btn {
-  position: absolute; top: 7px; right: calc(var(--kc-header-controls) + 10px); z-index: 2;
+  position: static; margin-left: auto; flex: none;
+  min-width: 64px;
   display: inline-flex; align-items: center; gap: 3px;
   padding: 2px 6px; font-size: 10px; line-height: 1;
   background: rgba(255,255,255,0.04);
@@ -1126,14 +1125,9 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
 }
 .kc-header {
   width: 100%;
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
   padding: 0 0 8px;
   background: transparent; border: none;
-  /* iter-98 audit: chat-panel is fixed 340px → kc-header ≈328px after padding.
-     kc-name has flex:1 so it absorbs leftover space; the 8px flex gap is
-     non-shrinkable; logo(20)+status(16)+chev(16)+3×gap(8)=76px of fixed
-     chrome, leaving ~252px for the FORGE label whose intrinsic width is only
-     ~46px at letter-spacing:0.10em. Layout never crunches at any viewport. */
 }
 .kc-logo {
   width: 28px; height: 28px; border-radius: 50%; object-fit: cover;
@@ -1179,7 +1173,12 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
   opacity: 0.85;
   letter-spacing: 0.02em;
   cursor: help;
-  margin-left: 6px;
+  margin-left: 0;
+  min-width: 0;
+  max-width: 104px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .kc-status, .kc-chev {
   width: 16px; height: 16px;
@@ -1188,9 +1187,8 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
 }
 .kc-chev { color: rgba(255,255,255,0.5); }
 
-/* Live work-state word in the agent bubble header (top-right). `.kc-name`
-   (flex:1) shoves it to the right edge, so it sits just left of the provider/
-   status/chevron cluster. Reads the same 9-bucket emotion state that drives
+/* Live work-state word in the agent bubble header. It reads the same 9-bucket
+   emotion state that drives
    the avatar webm, so face + text stay in sync; only mounted while the turn
    is running/waiting (ForgeCard guards it).
 
@@ -1760,6 +1758,20 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
 .composer-bar {
   display: flex; align-items: center; gap: 4px;
   padding: 0 8px 8px;
+  min-width: 0;
+  overflow: visible;
+}
+.composer-bar.cb-at-menu-layout {
+  display: grid;
+}
+.composer-toolbar-controls {
+  grid-area: 1 / 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
 }
 .cb-btn {
   background: none; border: none; cursor: pointer; padding: 0;
@@ -2257,7 +2269,7 @@ button.cp-bus-chip.is-link:hover {
   transform: translateY(-1px);
   filter: brightness(1.18);
 }
-button.cp-bus-chip.is-link.k-workbench:hover     { background: rgba(212, 255,  72, 0.22); border-color: rgba(212, 255,  72, 0.55); box-shadow: none; }
+button.cp-bus-chip.is-link.k-extension:hover     { background: rgba(212, 255,  72, 0.22); border-color: rgba(212, 255,  72, 0.55); box-shadow: none; }
 button.cp-bus-chip.is-link.k-agent:hover         { background: rgba(168,  85, 247, 0.22); border-color: rgba(168,  85, 247, 0.55); box-shadow: none; }
 button.cp-bus-chip.is-link.k-cli-provider:hover  { background: rgba(108, 196, 255, 0.22); border-color: rgba(108, 196, 255, 0.55); box-shadow: none; }
 button.cp-bus-chip.is-link.k-model-binding:hover { background: rgba(126, 231, 196, 0.22); border-color: rgba(126, 231, 196, 0.55); box-shadow: none; }
@@ -2273,7 +2285,7 @@ button.cp-bus-chip.is-link:active {
 }
 /* Kind palette — kept in lockstep with .ss-kind-chip.k-* (Sidebar footer)
  * and .ba-chip.k-* (BusAdminPanel) so the player's color memory transfers. */
-.cp-bus-chip.k-workbench     { background: rgba(212, 255,  72, 0.10); border-color: rgba(212, 255,  72, 0.32); color: var(--primary); }
+.cp-bus-chip.k-extension     { background: rgba(212, 255,  72, 0.10); border-color: rgba(212, 255,  72, 0.32); color: var(--primary); }
 .cp-bus-chip.k-agent         { background: rgba(168,  85, 247, 0.12); border-color: rgba(168,  85, 247, 0.35); color: var(--color-role-orchestrator); }
 .cp-bus-chip.k-cli-provider  { background: rgba(108, 196, 255, 0.10); border-color: rgba(108, 196, 255, 0.34); color: var(--color-kind-cli-provider); }
 .cp-bus-chip.k-model-binding { background: rgba(126, 231, 196, 0.10); border-color: rgba(126, 231, 196, 0.32); color: var(--accent-mint); }
@@ -2614,26 +2626,26 @@ button.cp-empty-events-row.is-link:focus-visible {
   text-align: center;
 }
 
-/* workbench / lime #d4ff48 */
-.cp-empty-events-row.fam-workbench .cp-empty-events-row-dot {
+/* page / lime #d4ff48 */
+.cp-empty-events-row.fam-extension .cp-empty-events-row-dot {
   background: var(--primary);
   box-shadow: none;
 }
-.cp-empty-events-row.fam-workbench .cp-empty-events-row-kind {
+.cp-empty-events-row.fam-extension .cp-empty-events-row-kind {
   color: rgba(212, 255, 72, 0.92);
   background: rgba(212, 255, 72, 0.08);
   border-color: rgba(212, 255, 72, 0.28);
 }
-.cp-empty-events-row.fam-workbench .cp-empty-events-row-name {
+.cp-empty-events-row.fam-extension .cp-empty-events-row-name {
   color: rgba(212, 255, 72, 0.86);
 }
-button.cp-empty-events-row.is-link.fam-workbench:hover {
+button.cp-empty-events-row.is-link.fam-extension:hover {
   background: rgba(212, 255, 72, 0.08);
   border-color: rgba(212, 255, 72, 0.32);
   box-shadow: none;
   color: rgba(255, 255, 255, 0.94);
 }
-button.cp-empty-events-row.is-link.fam-workbench:focus-visible {
+button.cp-empty-events-row.is-link.fam-extension:focus-visible {
   outline: 2px solid rgba(212, 255, 72, 0.55);
 }
 
@@ -2801,7 +2813,7 @@ button.cp-empty-events-row.is-link.fam-tool:focus-visible {
  * (setMode('bus') + setPendingBusExpandId(mb.id)). Reuses the same teal hue
  * family as the static strip so the affordance reads as "same row, now
  * clickable" rather than a new color. Matches the deep-link pipeline used
- * by AgentsPanel .ac-bus-pill.is-link / Sidebar wb-* placeholder backlink /
+ * by AgentsPanel .ac-bus-pill.is-link / Sidebar extension placeholder backlink /
  * BusAdminPanel .ba-backlink — 10th surface to route through pendingBusExpandId.
  */
 button.cb-mb-row {
@@ -3120,6 +3132,8 @@ button.cb-mb-row {
   align-items: baseline;
   gap: 6px;
   padding: 5px 8px;
+  height: 25px;
+  box-sizing: border-box;
   background: none;
   border: none;
   border-radius: 4px;
@@ -3187,7 +3201,7 @@ button.cb-mb-row {
  * (Bus admin section header), and .ac-role-dot.r-orchestrator (Sidebar
  * AgentsPanel role dots). 5th surface for violet=agent.
  */
-.cb-at { position: relative; }
+.cb-at { position: relative; display: inline-flex; flex: 0 0 auto; min-width: 24px; }
 .cb-at-btn {
   opacity: 1;
   cursor: pointer;
@@ -3202,13 +3216,55 @@ button.cb-mb-row {
   color: var(--color-text-primary);
   background: var(--color-interaction-hover);
 }
+.cb-at-chip {
+  width: fit-content;
+  min-width: 0;
+  flex: 0 1 auto;
+  max-width: 148px;
+  gap: 5px;
+  padding: 0 7px 0 4px;
+}
+.cb-at-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  max-width: 86px;
+}
+.cb-at-chip-avatar { width: 18px; height: 18px; }
+.cb-at-chip-clear {
+  display: inline-flex;
+  position: absolute;
+  left: 4px;
+  top: 3px;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-1);
+  color: rgba(255,255,255,.9);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  font-size: 14px;
+  line-height: 1;
+}
+.cb-at:hover .cb-at-chip-avatar,
+.cb-at:focus-within .cb-at-chip-avatar { visibility: hidden; }
+.cb-at:hover .cb-at-chip-clear,
+.cb-at:focus-within .cb-at-chip-clear { opacity: 1; pointer-events: auto; }
+.cb-at-chip-clear:hover,
+.cb-at-chip-clear:focus-visible { background: rgba(255,255,255,.12); outline: none; }
+.cb-at-chip-chevron { flex: 0 0 auto; }
 .cb-at-menu {
   position: absolute;
   bottom: 30px;
   left: -4px;
   z-index: 5;
-  min-width: 280px;
-  max-width: 380px;
+  min-width: 260px;
+  max-width: 360px;
   background: var(--bg-1);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
@@ -3217,6 +3273,29 @@ button.cb-mb-row {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+/* The specialist menu overlays the toolbar row through its own grid-area
+ * anchor. Keeping that anchor a sibling (not an ancestor) of the controls
+ * preserves the existing containing block for CLI/model popovers. */
+.cb-at-menu-anchor {
+  grid-area: 1 / 1;
+  position: relative;
+  align-self: stretch;
+  min-width: 0;
+  pointer-events: none;
+}
+.cb-at-menu-anchor > .cb-at-menu {
+  bottom: calc(100% + 8px);
+  left: 8px;
+  right: auto;
+  width: 360px;
+  min-width: 360px;
+  max-width: 360px;
+  height: 420px;
+  max-height: 420px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  pointer-events: auto;
 }
 .cb-at-menu-head {
   display: inline-flex;
@@ -3256,6 +3335,8 @@ button.cb-mb-row {
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
+  height: 25px;
+  box-sizing: border-box;
   background: none;
   border: none;
   border-radius: 4px;
@@ -3266,6 +3347,8 @@ button.cb-mb-row {
   font-size: 11px;
   line-height: 1.35;
   width: 100%;
+  min-width: 0;
+  flex-shrink: 0;
   transition: background-color 110ms ease;
 }
 .cb-at-item:hover,
@@ -3282,6 +3365,7 @@ button.cb-mb-row {
   background: rgba(196, 163, 255, 0.16);
   box-shadow: 0 0 0 1px rgba(196, 163, 255, 0.62) inset;
 }
+.cb-at-item.is-selected { background: rgba(196, 163, 255, 0.10); }
 .cb-at-avatar {
   display: inline-flex;
   align-items: center;
@@ -3297,6 +3381,19 @@ button.cb-mb-row {
   border: 1px solid rgba(255, 255, 255, 0.18);
   flex-shrink: 0;
   line-height: 1;
+  overflow: hidden;
+  padding: 0;
+}
+.cb-at-item .cb-at-avatar,
+.cb-at-avatar.cb-at-chip-avatar {
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+}
+.cb-at-item .cb-at-avatar {
+  width: 15px;
+  height: 15px;
+  font-size: 8px;
 }
 .cb-at-role-orchestrator { border-color: rgba(196, 163, 255, 0.62); color: var(--color-role-orchestrator); }
 .cb-at-role-pillar       { border-color: rgba(212, 255, 72, 0.62); color: var(--primary); }
@@ -3308,7 +3405,7 @@ button.cb-mb-row {
 .cb-at-id {
   color: var(--color-role-orchestrator);
   font-family: var(--font-mono);
-  font-weight: 600;
+  font-weight: 700;
   font-size: 10.5px;
   flex-shrink: 0;
   white-space: nowrap;
@@ -3324,13 +3421,13 @@ button.cb-mb-row {
 }
 .cb-at-role {
   color: rgba(255, 255, 255, 0.42);
-  font-size: 9.5px;
+  font-size: 10px;
   font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .cb-at-bus-pill {
   color: rgba(125, 211, 252, 0.92);

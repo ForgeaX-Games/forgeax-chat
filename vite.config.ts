@@ -2,7 +2,7 @@
 // (not imported from interface). Defaults to :18931; override FORGEAX_CHAT_PORT.
 //
 // NOTE (submodule path): alias targets currently point at the studio-monorepo
-// sibling packages (`../interface`, `../contracts/types`, …). When this package
+// sibling packages (`../interface`, `../design`, …). When this package
 // becomes a self-contained submodule that vendors interface (the editor
 // pattern), flip INTERFACE_DIR / SIB to the vendored locations (e.g.
 // `./packages/interface`).
@@ -56,7 +56,6 @@ export default defineConfig({
       '@forgeax/design/tokens.css': resolve(INTERFACE_DIR, 'packages/design/tokens.css'),
       '@forgeax/design': resolve(INTERFACE_DIR, 'packages/design/index.ts'),
       '@forgeax/types': sib('contracts/types/src/index.ts'),
-      '@forgeax/host-sdk': sib('host-sdk/src/index.ts'),
     },
   },
   optimizeDeps: { exclude: ['@forgeax/engine-runtime'] },

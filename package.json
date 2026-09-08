@@ -1,10 +1,11 @@
 {
+  "packageManager": "bun@1.4.0",
   "name": "@forgeax/chat",
   "version": "0.1.0",
   "private": false,
   "license": "Apache-2.0",
   "type": "module",
-  "description": "forgeax chat L2 app — the Forge chat surface, composer, message rendering, and chat/session ownership.",
+  "description": "ForgeaX independent chat app — the Forge conversation surface, composer, message rendering, and chat/session ownership.",
   "repository": {
     "type": "git",
     "url": "https://github.com/ForgeaX-Games/forgeax-studio.git",
@@ -22,12 +23,14 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "forgeax-extension": "bun scripts/forgeax-extension.ts"
   },
   "dependencies": {
-    "@forgeax/design": "workspace:*",
+    "@forgeax/design": "0.1.0",
     "@forgeax/interface": "workspace:*",
-    "@forgeax/ai-workbench": "workspace:*",
+    "@forgeax/agents": "0.1.0",
+    "@forgeax/types": "^0.1.2",
     "lucide-react": "^0.460.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

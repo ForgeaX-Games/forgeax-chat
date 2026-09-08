@@ -3,11 +3,11 @@
  *  `/loop` daemons stream their per-tick output over the `/ws` daemon channel
  *  as `daemon-tick-start|event|end` frames keyed by a unique `tickId`. Each tick
  *  renders as one assistant bubble in the source thread's active-agent slot.
- *  Moved out of L1 alongside the rest of the message domain; L1's daemon WS
+ *  Moved out of Interface alongside the rest of the message domain; the shared daemon WS
  *  keeps the non-chat frames (`telemetry` / `workspace-changed`).
  *
  *  This opens its OWN ws connection (server broadcasts to all clients), so the
- *  chat bundle owns its daemon-tick wiring end-to-end without an L1 callback.
+ *  chat bundle owns its daemon-tick wiring end-to-end without an Interface callback.
  */
 import { useShellStore, type ChatMessage } from '@forgeax/interface/store';
 import { useChatStore } from './store';
@@ -89,7 +89,7 @@ useShellStore.subscribe((s) => {
 });
 
 // R5/P1 — no longer opens its OWN socket. daemon-tick-* frames now arrive on the
-// shared L1 broadcast stream (one `/ws` per page, opened by bootBroadcast). chat
+// shared Interface broadcast stream (one `/ws` per page, opened by bootBroadcast). chat
 // boot calls subscribeDaemonTick() to register its handler; the actual socket is
 // the single broadcast primitive. This removes the duplicate broadcast socket R4
 // introduced (back to two sockets: sid session-event + one broadcast).

@@ -2,11 +2,12 @@
  *
  *  This is the real home of the *message-content* domain extracted from
  *  `@forgeax/interface`'s monolithic `useShellStore`. The session REGISTRY
- *  (`tabs` / `activeSid` / agent binding) and agent-runtime state stay in L1;
+ *  (`tabs` / `activeSid` / agent binding) and agent-runtime state stay in the
+ *  shared interface base;
  *  this store owns only what is chat-private: the conversation messages, their
  *  streaming/replay pipeline, the client-side send queue, and rewind UI state.
  *
- *  KEYING — the big simplification vs the old L1 design
+ *  KEYING — the big simplification vs the old shared-store design
  *  ----------------------------------------------------
  *  The old store nested messages inside each `ChatTab` and maintained a triple
  *  mirror (`tab.messages` ↔ `tab.messagesByAgent[agentId]` ↔ top-level
@@ -16,12 +17,12 @@
  *      bySid[sid].messagesByAgent[agentId] -> ChatMessage[]
  *
  *  There is NO active mirror. Components derive the visible thread with a
- *  selector that reads the active `(sid, agentId)` from L1's registry and looks
+ *  selector that reads the active `(sid, agentId)` from the shared registry and looks
  *  up the bucket here — so switching agents is just selecting a different
  *  bucket, and the slot-swap bookkeeping disappears entirely.
  *
- *  L1 COORDINATION
- *  ---------------
+ *  SHARED REGISTRY COORDINATION
+ *  ----------------------------
  *  Registry facts (active sid, a tab's pinned agentId, the per-tab provider
  *  override) are read on demand from `useShellStore.getState()`. This store never
  *  writes the registry; the registry never writes messages.
@@ -43,7 +44,7 @@ import { resolveReplyLanguage } from '@forgeax/interface/lib/reply-language';
 // 派发顺序(2026-08-06:为拿 traceparent 在 fetch 前插了一句 await import,"连续两次
 // sendMessage 后已发出 2 个请求"这条回归断言从 2 变 0)。该模块顶层无副作用,与同包已
 // 静态引入的 lib/sse 等同级,不引入新耦合。
-import { beginChatTurn, chatFirstToken, chatTurnEnd } from '@forgeax/interface/lib/trace';
+import { beginChatTurn, chatFirstToken, chatToolResult, chatTurnEnd } from '@forgeax/interface/lib/trace';
 import { replayPermissionEvents } from '@forgeax/interface/lib/permission-stream';
 import { TurnAccumulator } from '../event-engine/turn-accumulator';
 import {
@@ -70,8 +71,11 @@ import type { ArtifactSummary } from '@forgeax/types/artifact-summary';
 /** One client-side queued message awaiting its turn (Cursor-style queue). */
 export interface QueuedMessage {
   id: string;
+  /** Optimistic user bubble rendered at enqueue time. */
+  optimisticMessageId?: string;
   text: string;
   ts: number;
+  summonAgentId?: string | null;
 }
 
 export interface SendMessageOpts {
@@ -81,6 +85,10 @@ export interface SendMessageOpts {
   target?: { sid: string; agentId: string };
   /** Internal acceptance callback; invoked after the pinned target is validated. */
   onAccepted?: () => void;
+  /** Per-message specialist snapshot; never read from mutable Composer state. */
+  summonAgentId?: string | null;
+  /** Internal queue hand-off: reuse the user bubble already in the timeline. */
+  existingUserMessageId?: string;
 }
 
 function artifactSummaryFromStoredPayload(payload: Record<string, unknown>): ArtifactSummary | null {
@@ -247,7 +255,7 @@ const EMPTY_CONV: ConvSlice = {
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
-// ── Module-private runtime maps (moved verbatim from L1 store) ───────────────
+// ── Module-private runtime maps (moved verbatim from the shared store) ───────
 
 function newId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -282,7 +290,7 @@ function closeThreadHistoryTails(sid: string): void {
   _tailsByTab.delete(sid);
 }
 
-// ── Pure segment reducers (moved from L1; chat owns them now) ────────────────
+// ── Pure segment reducers (moved from Interface; Chat owns them now) ─────────
 
 /** Push `chunk` into `segments`, coalescing into the last segment when it
  *  matches kind (text↔text, thinking↔thinking). Tool segments never coalesce. */
@@ -548,7 +556,7 @@ interface ChatStoreState {
   ) => void;
 
   // ── Message queue (Cursor-style "keep typing while streaming") ──
-  enqueueMessage: (text: string) => void;
+  enqueueMessage: (text: string, opts?: Pick<SendMessageOpts, 'summonAgentId'>) => void;
   dequeueMessage: (id: string) => void;
   clearQueue: () => void;
   flushQueuedForAgent: (sid: string, agentId: string) => void;
@@ -557,7 +565,7 @@ interface ChatStoreState {
   clearMessages: () => void;
 }
 
-/** Active `(sid, agentId)` resolved from L1's registry. */
+/** Active `(sid, agentId)` resolved from the shared Interface registry. */
 function activeTarget(): { sid: string | null; agentId: string | null } {
   const s = useShellStore.getState();
   const sid = s.activeSid;
@@ -637,12 +645,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // After Stop, ignore late setStreaming(true) until the next user send.
     // Otherwise abort races / late WS frames flip the Stop button back on.
     if (val && isAgentStreamSuppressed(sid, agentId)) return;
-    // Mirror the per-(sid, agentId) busy flag into L1 so registry surfaces
+    // Mirror the per-(sid, agentId) busy flag into the shared registry so its surfaces
     // (SessionSwitcher / AgentsPanel) can render a spinner without importing
-    // chat message state. L1 owns the flag's storage; chat owns its truth.
+    // chat message state. Interface owns the flag's storage; chat owns its truth.
     useShellStore.getState().setAgentBusy(sid, agentId, val);
     set((s) => {
       const conv = s.bySid[sid] ?? EMPTY_CONV;
+      if (Boolean(conv.streamingByAgent[agentId]) === val) return s;
       return {
         bySid: {
           ...s.bySid,
@@ -735,7 +744,11 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             replayEffects.applyMain((m) => ({ ...m, segments: upsertToolSegment(m.segments ?? [], Date.now(), tc) }));
           }
         },
-        onMeta: (m) => { if (m.contextPct !== undefined) replayContextPct = m.contextPct; },
+        // Match the live stream path: a zero/invalid usage report must not
+        // erase the last valid context percentage from the replay.
+        onMeta: (m) => {
+          if (m.contextPct !== undefined && m.contextPct > 0) replayContextPct = m.contextPct;
+        },
         onTurn: (turn) => {
           mainCbs.onTurn?.(turn);
           if (turn.agent && turn.agent !== 'user') replayEffects.sealMain?.();
@@ -1030,20 +1043,49 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     }
   },
 
-  enqueueMessage: (text) => {
+  enqueueMessage: (text, opts) => {
     const t = text.trim();
     if (!t) return;
     const { sid, agentId } = activeTarget();
     if (!sid || !agentId) return;
     const key = `${sid}::${agentId}`;
+    const ts = Date.now();
+    const optimisticMessageId = newId();
     const item: QueuedMessage = {
       id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      optimisticMessageId,
       text: t,
-      ts: Date.now(),
+      ts,
+      ...(opts && 'summonAgentId' in opts ? { summonAgentId: opts.summonAgentId } : {}),
     };
-    set((s) => ({
-      queuedMessages: { ...s.queuedMessages, [key]: [...(s.queuedMessages[key] ?? []), item] },
-    }));
+    const userMsg: ChatMessage = {
+      id: optimisticMessageId,
+      role: 'user',
+      text: expandPillsForDisplay(t),
+      toolCalls: [],
+      status: 'done',
+      ts,
+    };
+    // Queue state and its optimistic timeline bubble are one atomic commit. A
+    // message typed during a long reply is therefore visible immediately and
+    // keeps its chronological position when the queued turn starts later.
+    set((s) => {
+      const conv = s.bySid[sid] ?? EMPTY_CONV;
+      const messages = conv.messagesByAgent[agentId] ?? EMPTY_MESSAGES;
+      return {
+        queuedMessages: { ...s.queuedMessages, [key]: [...(s.queuedMessages[key] ?? []), item] },
+        bySid: {
+          ...s.bySid,
+          [sid]: {
+            ...conv,
+            messagesByAgent: {
+              ...conv.messagesByAgent,
+              [agentId]: [...messages, userMsg],
+            },
+          },
+        },
+      };
+    });
   },
 
   dequeueMessage: (id) => {
@@ -1052,7 +1094,25 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const key = `${sid}::${agentId}`;
     set((s) => {
       const cur = s.queuedMessages[key] ?? [];
-      return { queuedMessages: { ...s.queuedMessages, [key]: cur.filter((m) => m.id !== id) } };
+      const removed = cur.find((m) => m.id === id);
+      if (!removed) return s;
+      const conv = s.bySid[sid];
+      const messages = conv?.messagesByAgent[agentId];
+      return {
+        queuedMessages: { ...s.queuedMessages, [key]: cur.filter((m) => m.id !== id) },
+        ...(removed.optimisticMessageId && conv && messages ? {
+          bySid: {
+            ...s.bySid,
+            [sid]: {
+              ...conv,
+              messagesByAgent: {
+                ...conv.messagesByAgent,
+                [agentId]: messages.filter((m) => m.id !== removed.optimisticMessageId),
+              },
+            },
+          },
+        } : {}),
+      };
     });
   },
 
@@ -1062,9 +1122,28 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const key = `${sid}::${agentId}`;
     set((s) => {
       if (!(key in s.queuedMessages)) return {};
+      const optimisticIds = new Set(
+        (s.queuedMessages[key] ?? []).flatMap((item) => item.optimisticMessageId ? [item.optimisticMessageId] : []),
+      );
       const next = { ...s.queuedMessages };
       delete next[key];
-      return { queuedMessages: next };
+      const conv = s.bySid[sid];
+      const messages = conv?.messagesByAgent[agentId];
+      return {
+        queuedMessages: next,
+        ...(optimisticIds.size > 0 && conv && messages ? {
+          bySid: {
+            ...s.bySid,
+            [sid]: {
+              ...conv,
+              messagesByAgent: {
+                ...conv.messagesByAgent,
+                [agentId]: messages.filter((m) => !optimisticIds.has(m.id)),
+              },
+            },
+          },
+        } : {}),
+      };
     });
   },
 
@@ -1076,6 +1155,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // Invalid/stale targets therefore leave the queue intact for recovery.
     void get().sendMessage(head.text, {
       target: { sid, agentId },
+      ...(head.optimisticMessageId ? { existingUserMessageId: head.optimisticMessageId } : {}),
+      ...('summonAgentId' in head ? { summonAgentId: head.summonAgentId } : {}),
       onAccepted: () => set((s) => {
         const cur = s.queuedMessages[key] ?? [];
         if (cur[0]?.id !== head.id) return {};
@@ -1094,6 +1175,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const c = _abortByTab.get(sid);
     const ownsActiveController = Boolean(c && agentId && c.agentId === agentId);
     if (ownsActiveController) c!.controller.abort();
+    // Cancellation is a terminal liveness fact even when the backend's abort
+    // event is delayed or never reaches this tab. The later turnEnd remains
+    // harmless because chatTurnEnd is idempotent.
+    if (agentId) {
+      try { chatTurnEnd(agentId, 'cancelled'); } catch { /* observability must not block Stop */ }
+    }
 
     const runId = conv?.runId ?? null;
     if (runId) {
@@ -1145,6 +1232,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // directive into composeTurnRequest's dynamicSuffix, keeping the visible
     // user message clean (no directive leaks into the bubble or replay history).
     const replyLanguage = resolveReplyLanguage(trimmed);
+    const summonAgentId = opts?.summonAgentId;
+    const hasSummonSnapshot = !!opts && 'summonAgentId' in opts;
     const target = opts?.target ?? activeTarget();
     const startSid = target.sid;
     if (!startSid) { console.warn('[chat.sendMessage] no active session'); return; }
@@ -1350,7 +1439,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
         const r = await emitForgeaXMessage(startSid, wireText, {
           to: candidate,
-          payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
+          payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(hasSummonSnapshot ? { summonAgentId } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
           handoff: 'steer',
         });
         if (!r.ok) throw new Error(r.error ?? 'emit failed');
@@ -1363,7 +1452,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     }
 
     const userMsg: ChatMessage = {
-      id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
+      id: opts?.existingUserMessageId ?? newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
       ...(displayAttachments ? { attachments: displayAttachments } : {}),
     };
     const turnOverride = startTab?.providerOverride ?? null;
@@ -1394,9 +1483,26 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     if (startTab && !startTab.displayName) {
       useShellStore.getState().renameTab(startSid, wireText.slice(0, 40).replace(/\s+/g, ' '));
     }
-    get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, userMsg, asstMsg]);
+    get().patchMessages(startSid, activeAgent, (msgs) => {
+      const existingIndex = opts?.existingUserMessageId
+        ? msgs.findIndex((message) => message.id === opts.existingUserMessageId)
+        : -1;
+      if (existingIndex < 0) return [...msgs, userMsg, asstMsg];
+      const next = msgs.slice();
+      // Keep the enqueue timestamp and exact position; only refresh payload
+      // fields that may have been normalized during send preparation.
+      next[existingIndex] = { ...userMsg, ts: msgs[existingIndex].ts };
+      next.push(asstMsg);
+      return next;
+    });
     clearAgentStreamSuppression(startSid, activeAgent);
     setStreaming(true);
+
+    // Both native EventBus and CLI turns are echoed over the session stream.
+    // Tag the request before either transport starts so the initiating tab can
+    // keep its optimistic user bubble while other tabs still render the echo.
+    const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    markEmittedClientMsg(clientMsgId);
 
     // R3 provider routing: null/'forgeax' → native EventBus; else cli bridge.
     const isForgeaXNative = turnOverride === null || turnOverride === 'forgeax';
@@ -1404,12 +1510,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       try {
         const { emitForgeaXMessage } = await import('../session-bridge');
         const candidate = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : undefined;
-        const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        markEmittedClientMsg(clientMsgId);
         const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
         const r = await emitForgeaXMessage(startSid, wireText, {
           to: candidate,
-          payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
+          payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(hasSummonSnapshot ? { summonAgentId } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
         });
         if (!r.ok) throw new Error(r.error ?? 'emit failed');
         if (r.msgId) {
@@ -1447,6 +1551,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const noteFirstToken = (): void => {
       try { chatFirstToken(activeAgent); } catch { /* 观测绝不反噬聊天 */ }
     };
+    const noteToolResult = (): void => {
+      try { chatToolResult(activeAgent); } catch { /* 观测绝不反噬聊天 */ }
+    };
     // 三值,不是布尔:取消不是故障(标成 error 会让 trace 里全是假失败),但也**不能并进成功**
     // —— 那等于亲手销毁取消信号,误触取消风暴在监控里就和健康流量长得一模一样。
     const endTrace = (outcome: 'ok' | 'cancelled' | 'error', errMessage?: string): void => {
@@ -1473,7 +1580,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       }
       res = await fetch('/api/cli/chat', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: wireText, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(traceparent ? { traceparent } : {}), ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
+        body: JSON.stringify({ message: wireText, clientMsgId, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(hasSummonSnapshot ? { summonAgentId } : {}), ...(traceparent ? { traceparent } : {}), ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
         signal,
       });
     } catch (e) {
@@ -1687,6 +1794,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             }
           } else if (frame.event === 'tool-result') {
             flushSseDeltaBuf();
+            if (mainEvent) noteToolResult();
             const callId = String(payload.callId ?? '');
             const ok = payload.ok !== false;
             // 经我们代理的第三方 MCP 工具,结果是 `{text, structuredContent}` 形状
@@ -1855,7 +1963,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 }));
 
 // ── convenience selector hooks (resolve the active (sid, agentId) target) ────
-// Components read the visible thread by composing L1's registry (which sid /
+// Components read the visible thread by composing the shared registry (which sid /
 // agent is active) with this store's per-(sid,agentId) buckets.
 
 function useActiveSid(): string | null {
@@ -1872,7 +1980,7 @@ export function useActiveMessages(): ChatMessage[] {
   return useChatStore((s) => (sid && agentId ? (s.bySid[sid]?.messagesByAgent[agentId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES));
 }
 /** Streaming flag for the active (sid, agentId).
- *  OR L1 busyByAgentBySid —— boot 时 `_syncActiveAgentRunning` 从 list_agents.running
+ *  OR interface busyByAgentBySid —— boot 时 `_syncActiveAgentRunning` 从 list_agents.running
  *  写入,避免刷新后错过 turnStart/snapshot 时 Send 误亮。 */
 export function useActiveStreaming(): boolean {
   const sid = useActiveSid();
@@ -1983,7 +2091,7 @@ export function isCliSseTurnActive(sid: string, agentId: string): boolean {
   return (_cliSseTurns.get(`${sid}::${agentId}`) ?? 0) > 0;
 }
 
-// ── registry GC: when L1 drops a session tab, tear down its chat-side state ──
+// ── registry GC: when Interface drops a session tab, tear down chat-side state ──
 let _prevSids: string[] = [];
 useShellStore.subscribe((s) => {
   const sids = s.tabs.map((tb) => tb.sid);

@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from '@forgeax/interface/i18n';
-import { workbenchAgentsUrl } from '@forgeax/interface/lib/workbench-lang';
+import { agentCatalogUrl } from '@forgeax/agents/lib/agent-api-url';
 import { useShellStore } from '@forgeax/interface/store';
 import { useBusSnapshot } from '@forgeax/interface/lib/use-bus-snapshot';
 import { publish } from '@forgeax/interface/lib/bus';
 import { useActiveStreamingByAgent } from '../../session-store';
 import { onSessionEvent } from '../../session-bridge';
-import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
-import { resolveNaming } from '@forgeax/ai-workbench/lib/agent-name';
+import { AgentAvatarVideo } from '@forgeax/agents/components/AgentAvatarVideo/AgentAvatarVideo';
+import { resolveNaming } from '@forgeax/agents/lib/agent-name';
+import { agentIdFromRef, parkedAgentIdFromInterAgentHandoff } from './handoff-focus';
+import { openAgentWorkspace } from '../../lib/open-agent-workspace';
 
-type WorkbenchAgent = {
+type CatalogAgent = {
   id: string;
   name: string;
   role: string;
@@ -83,10 +85,8 @@ function randomHandoffAction(): string {
   return PAT_HANDOFF_ACTIONS[Math.floor(Math.random() * PAT_HANDOFF_ACTIONS.length)]!;
 }
 
-/** agent 引用 (path / fullId) → 末段 base id, 去掉 "forge/" 前缀和 "#1" 实例后缀. */
 function tailOf(ref: string): string {
-  const last = ref.split('/').pop() ?? ref;
-  return last.split('#')[0] ?? last;
+  return agentIdFromRef(ref);
 }
 
 function pageSizeForWidth(width: number): number {
@@ -143,7 +143,7 @@ export function ChatAgentCapsule() {
 
   const streamingByAgent = useActiveStreamingByAgent();
 
-  const [agents, setAgents] = useState<WorkbenchAgent[]>([]);
+  const [agents, setAgents] = useState<CatalogAgent[]>([]);
   const [unreadAgents, setUnreadAgents] = useState<Set<string>>(new Set());
   const [pageIndex, setPageIndex] = useState(0);
   const [pageSize, setPageSize] = useState(MAX_PAGE_SIZE);
@@ -191,7 +191,7 @@ export function ChatAgentCapsule() {
     return `${activeAgentId ?? ''}::${working}::${unread}`;
   }, [activeAgentId, streamingByAgent, unreadAgents]);
   const visibleAgents = useMemo(() => {
-    const priorityScore = (agent: WorkbenchAgent): number => {
+    const priorityScore = (agent: CatalogAgent): number => {
       if (agent.id === activeAgentId && streamingByAgent[agent.id]) return 0;
       if (streamingByAgent[agent.id]) return 1;
       if (agent.id === activeAgentId) return 2;
@@ -282,9 +282,9 @@ export function ChatAgentCapsule() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(workbenchAgentsUrl())
+    fetch(agentCatalogUrl())
       .then((r) => r.json())
-      .then((j: { agents?: WorkbenchAgent[] }) => {
+      .then((j: { agents?: CatalogAgent[] }) => {
         if (cancelled) return;
         const list = j.agents ?? [];
         const main = list.find((a) => a.isMain)?.id;
@@ -378,19 +378,19 @@ export function ChatAgentCapsule() {
     return onSessionEvent('chat-agent-capsule-pat', (msg) => {
       if (msg.sid !== activeSid) return;
       const ev = msg.event;
-      if (ev.type !== 'user_input' || ev.source !== 'agent') return;
       const from = msg.emitterId ?? '';
       const to = typeof ev.to === 'string' ? ev.to : '';
-      if (!from || !to) return;
-      if ((ev.payload as { narrativeAutoNudge?: boolean })?.narrativeAutoNudge) return;
+      const toTail = parkedAgentIdFromInterAgentHandoff(msg);
+      if (!toTail) return;
       const fromTail = tailOf(from);
-      const toTail = tailOf(to);
-      if (!fromTail || !toTail || fromTail === toTail) return;
       const key = `${from}->${to}@${ev.ts}`;
       if (lastHandoffKeyRef.current === key) return; // 同一事件去重
       lastHandoffKeyRef.current = key;
       recentHandoffFromRef.current = { id: fromTail, ts: Date.now() };
       showPatBubble(`${resolveName(from)}拍了拍${resolveName(to)}，并${randomHandoffAction()}`);
+      // Stay on the current thread. Per-turn specialist summon talks through
+      // Forge; auto-pinning every agent user_input ping-ponged the tab
+      // (Forge → Gen3D → Forge) and stole the composer.
     });
   }, [activeSid, agents, showPatBubble]);
 
@@ -605,6 +605,9 @@ export function ChatAgentCapsule() {
               title={agentTitle}
               onClick={() => {
                 if (activeSid) setTabAgent(activeSid, a.id);
+                if (!a.isMain) {
+                  void openAgentWorkspace(a.id, { switchChat: false, fallback: 'none' });
+                }
               }}
             >
               <span className="cas-avatar-wrap">

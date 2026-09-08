@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "id": "forgeax.agent.chat",
+  "version": "1.0.0",
+  "kind": "agent",
+  "displayName": { "en": "ForgeaX Agent Chat" },
+  "entry": { "backend": "./dist/agent-baseline.js" },
+  "contributes": {
+    "contributions": ["chat.conversation"],
+    "capabilities": ["agent.session.read", "agent.session.write"]
+  },
+  "permissions": ["session:read", "session:write"]
+}

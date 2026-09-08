@@ -50,10 +50,9 @@ export function trimToTurnBoundary(events: StoredEvent[]): StoredEvent[] {
  * a compact_boundary was summarised into its `payload.summary` and no
  * longer needs to be replayed event-by-event in the UI.
  *
- * Includes the boundary event itself so callers can render a "session
- * summary" affordance from `payload.summary` if they want; TurnAccumulator
- * doesn't recognise the type today and silently skips it (acceptable —
- * historical context lives in the summary, not in raw replay).
+ * Includes the boundary event for history consumers. The shared chat visibility
+ * policy deliberately excludes it from conversation rendering: its raw summary
+ * belongs to kernel recovery/diagnostics, not to a user-facing message bubble.
  *
  * If no compact_boundary is present, returns events unchanged.
  */
@@ -87,7 +86,9 @@ export function replayEvents(events: StoredEvent[], viewerId?: string): ReplayRe
     },
     onMeta: (m) => {
       if (m.session) sessionId = m.session;
-      if (m.contextPct !== undefined) contextPct = m.contextPct;
+      // Match the live stream and store replay paths: zero/invalid usage must
+      // not erase the last positive context percentage.
+      if (m.contextPct !== undefined && m.contextPct > 0) contextPct = m.contextPct;
     },
   }, viewerId);
 

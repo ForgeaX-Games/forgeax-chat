@@ -25,6 +25,7 @@ import { registerSubagentFormatters } from './subagent-events';
 import { stringifyToolResult, truncateToolResult } from './tool-result';
 import { normalizeToolCall } from './tool-name';
 import { t } from '@/i18n';
+import { isChatMessageEvent } from './chat-visibility';
 
 // ── Minimal LLMMessage shape (matches wire format from forgeax-server) ──
 
@@ -452,6 +453,8 @@ registerFormatter('tick', (event) => {
 
 export function formatEvent(event: StoredEvent, viewerId?: string): RendererMessage | null {
   const p = (event.payload ?? {}) as Record<string, unknown>;
+  // Apply before error/warning shortcuts too: diagnostics may carry both.
+  if (!isChatMessageEvent(event.type, p)) return null;
 
   if (p.error && event.type !== 'hook:toolResult') {
     return systemMsg(event, p.visual_display ? String(p.visual_display) : String(p.error), 'error');
@@ -522,7 +525,7 @@ export function formatEvent(event: StoredEvent, viewerId?: string): RendererMess
   const text = vis ?? displayContent(p.content);
   if (!text) return null;
 
-  // Fallback for unrecognized non-hook events: emit structured direction /
+  // Fallback for explicitly allowed non-hook events: emit structured direction /
   // from / to so the UI can render an icon / color of its choice.
   const dir = classifyDirection(event, viewerId);
   const isSelfEmit = !!viewerId && event.emitterId === viewerId;

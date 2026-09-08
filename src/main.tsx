@@ -1,13 +1,13 @@
 // Standalone chat app entry — OWNS its own boot, mirroring
 // packages/editor/standalone/main.tsx. interface is consumed purely as a parts
-// library (store + L1 init side-effects + ErrorBoundary/BrandProvider); the IDE
+// library (store + shared init side-effects + ErrorBoundary/BrandProvider); the IDE
 // product shell (<App>: TopBar / DockShell / SurfaceKeepAliveLayer / overlays)
-// is studio's (L3) concern and is NOT rendered here.
+// is a product-assembly concern and is NOT rendered here.
 //
 // Why only <ChatPanel/> (no DockShell/surfaces): an app dev server proxies only
 // /api·/ws, so mounting DockShell's surface iframes would SPA-fall back to this
 // app's own index.html and nest infinitely. We mount just the chat surface
-// full-viewport over the booted L1 store + chat session stream.
+// full-viewport over the booted shared store + chat session stream.
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@forgeax/interface/styles/global.css';

@@ -33,10 +33,11 @@ import { SubagentCallIndex, handleSubagentEvent } from './subagent-events';
 //
 // Replaces ink-renderer's ContextRing.ratioFromAssistantMessage which called
 // the framework's getModelSpec(). For the web UI we maintain a small static
-// map; unknown models fall back to 200k (claude-tier default). Update entries
-// as new models land on the forgeax-default agent. Future improvement: ship
-// the contextWindow on the hook:assistantMessage payload itself so the UI
-// doesn't need to maintain this table.
+// map; unknown models fall back to 200k (claude-tier default). Model ids often
+// carry provider/tier suffixes (for example `gpt-5.6-sol`), so resolution below
+// is exact-first and then prefix-aware rather than exact-only. Future
+// improvement: ship the contextWindow on the hook:assistantMessage payload
+// itself so the UI doesn't need to maintain this table.
 // 2026-06-02 — values mirror the SSOT catalog (~/.forgeax/key/models.json ::
 // <model>.contextWindow). The previous table hard-coded the whole opus line at
 // 200000 AND omitted opus-4-8 / 4-7 entirely (→ they fell through to the 200k
@@ -58,6 +59,7 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'claude-haiku-4-5': 200000,
   'claude-haiku-4-5-20251001': 200000,
   'gpt-5.5': 1050000,
+  'gpt-5.6': 1050000,
   'gpt-5.4': 1050000,
   'gpt-5.4-mini': 400000,
   'gpt-5.2': 400000,
@@ -74,22 +76,49 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 
 const DEFAULT_CONTEXT_WINDOW = 200000;
 
+const MODEL_CONTEXT_WINDOW_PREFIXES = Object.entries(MODEL_CONTEXT_WINDOWS)
+  .sort(([a], [b]) => b.length - a.length);
+
+function contextWindowForModel(model: unknown): number {
+  const normalized = typeof model === 'string' ? model.trim().toLowerCase() : undefined;
+  if (!normalized) return DEFAULT_CONTEXT_WINDOW;
+
+  const exact = MODEL_CONTEXT_WINDOWS[normalized];
+  if (exact !== undefined) return exact;
+
+  return MODEL_CONTEXT_WINDOW_PREFIXES.find(([prefix]) => normalized.startsWith(prefix))?.[1]
+    ?? DEFAULT_CONTEXT_WINDOW;
+}
+
+function safeTokenCount(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+/** Return a UI-safe fill ratio. The ring represents a bounded window, so an
+ * over-limit provider report is rendered as full rather than leaking values
+ * such as 366% into the composer and SVG dash math. */
+function contextRatioFromUsage(
+  usage: { inputTokens?: number; outputTokens?: number },
+  model: unknown,
+): number {
+  const total = safeTokenCount(usage.inputTokens) + safeTokenCount(usage.outputTokens);
+  const cw = contextWindowForModel(model);
+  if (!(cw > 0)) return 0;
+  return Math.min(1, total / cw);
+}
+
 export function ratioFromUsage(
   usage: { inputTokens?: number; outputTokens?: number },
-  model: string,
+  model: unknown,
 ): number {
-  const total = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
-  const cw = MODEL_CONTEXT_WINDOWS[model] ?? DEFAULT_CONTEXT_WINDOW;
-  return cw > 0 ? Math.round((total / cw) * 100) : 0;
+  return Math.round(contextRatioFromUsage(usage, model) * 100);
 }
 
 function ratioFromAssistantMessage(payload: Record<string, unknown>): number | null {
   const usage = payload.usage as { inputTokens?: number; outputTokens?: number } | undefined;
-  const model = payload.model as string | undefined;
+  const model = payload.model;
   if (!usage || !model) return null;
-  const total = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
-  const cw = MODEL_CONTEXT_WINDOWS[model] ?? DEFAULT_CONTEXT_WINDOW;
-  return cw > 0 ? total / cw : null;
+  return contextRatioFromUsage(usage, model);
 }
 
 // ── Callback interface ──

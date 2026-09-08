@@ -1,15 +1,16 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ExternalLink, ArrowDown, ArrowLeft, Undo2, ChevronDown, X } from 'lucide-react';
+import { ExternalLink, ArrowDown, ArrowLeft, ArrowRight, Undo2, ChevronDown, X } from 'lucide-react';
 import { loadOnboarding, saveOnboarding } from '@forgeax/interface/components/Onboarding/types';
 import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
+import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
 import { ForgeCard } from './ForgeCard';
 import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
 import { dropAskUserSession } from './message-parts/AskUserCard';
 import { ChatAgentCapsule } from './ChatAgentCapsule';
 import { RewindConfirmDialog, RewindBanner, DirtyNoticeBar, RewindInlineEditor, BubbleEditInline } from './RewindControls';
-import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
+import { AgentAvatarVideo } from '@forgeax/agents/components/AgentAvatarVideo/AgentAvatarVideo';
 import { useHost } from '@forgeax/interface/core/app-shell';
 import { useAgentNames, shortAgentId } from './useAgentNames';
 import { useShellStore } from '@forgeax/interface/store';
@@ -27,11 +28,15 @@ import { PillChip } from '../Composer/PillChip';
 import type { ChatAttachment } from '@forgeax/interface/store';
 import { useTranslation, t } from '@forgeax/interface/i18n';
 import { projectWorkTimeline } from '../../task-flow/project';
-import { useAgentThreadNav } from './use-agent-thread';
+import { hasPendingAskUser } from '../../task-flow/ask-user-protocol';
+import { useAgentThreadNav, useAskUserThreadFocus } from './use-agent-thread';
 import type { WorkTimelineItem } from '../../task-flow/model';
 import { ProcessAccordion } from './ProcessAccordion';
 import { ArtifactCard } from './ArtifactCard';
 import { createDeliverActions } from './deliver-actions';
+import { SummonSelectionContext } from './summon-selection';
+import { isProjectedRemnant } from './message-projection';
+import { canSummonSpecialistFromActiveThread } from './agent-key';
 import './ChatPanel.css';
 import './TaskFlow.css';
 
@@ -458,6 +463,22 @@ export function ChatPanel() {
     if (!s.done.firstChat) saveOnboarding({ ...s, done: { ...s.done, firstChat: true } });
   }, []);
   const showFirstHint = firstHintOpen && messages.length === 0;
+  // This stays local to the mounted chat surface. Composer owns the interaction
+  // rules; sibling rewind editors consume the same value only to snapshot it
+  // for their replacement message.
+  const [summonAgentId, setSummonAgentId] = useState<string | null>(null);
+  const [summonManual, setSummonManual] = useState(false);
+  // Composer owns the visible agent catalog. A mutable ref lets sibling rewind
+  // editors snapshot that same render-time resolution without an effect-shaped
+  // interval where a vanished agent could still be sent.
+  const resolvedSummonAgentIdRef = useRef<string | null>(null);
+  const summonSelection = useMemo(() => ({
+    summonAgentId,
+    setSummonAgentId,
+    summonManual,
+    setSummonManual,
+    resolvedSummonAgentIdRef,
+  }), [summonAgentId, summonManual]);
   useEffect(() => {
     if (firstHintOpen && messages.length > 0) dismissFirstHint();
   }, [firstHintOpen, messages.length, dismissFirstHint]);
@@ -576,10 +597,16 @@ export function ChatPanel() {
   // 持久化 tab 刷新场景 messages=[]，gate 开门重放。
   // 2026-05-20 重做：sid === threadId（一一对应），WAL replay 直接用 activeSid。
   const activeSid = projectionSid;
-  const activeAgentId = useShellStore(
-    (s) => s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null,
-  );
-  const { inSubAgentView, backToMain } = useAgentThreadNav();
+  const {
+    inSubAgentView,
+    rootAgentId,
+    activeAgentId,
+    backToMain,
+    parkedSubAgentId,
+    returnToSub,
+  } = useAgentThreadNav();
+  useAskUserThreadFocus(rootAgentId);
+  const resolveParkedName = useAgentNames();
   const loadSession = useChatStore((s) => s.loadSession);
   // Each (sid, agentPath) pair has its own ledger on disk + an independent
   // messagesByAgent slot in store. Reload whenever the (sid, agentPath) key
@@ -638,6 +665,13 @@ export function ChatPanel() {
   const pendingRewind = useActivePendingRewind();
   const rewindDirtyNotice = useActiveRewindDirtyNotice();
   const chatStreaming = useActiveStreaming();
+  const pendingPermission = usePendingPermission(activeSid);
+  const latestAssistant = messages.filter((message) => message.role === 'assistant').at(-1);
+  const waitingForAnswer = latestAssistant?.status === 'streaming' && hasPendingAskUser([
+    ...latestAssistant.toolCalls,
+    ...(latestAssistant.segments?.flatMap((segment) => segment.kind === 'tool' ? [segment.tool] : []) ?? []),
+  ]);
+  const showWorkingDots = chatStreaming && !pendingPermission && !waitingForAnswer;
   const checkpointMsgIds = useActiveCheckpointMsgIds();
   // 确认浮层:点「⟲ 回到这里」后置 {msgId};null = 关闭。
   const [rewindConfirm, setRewindConfirm] = useState<string | null>(null);
@@ -740,6 +774,7 @@ export function ChatPanel() {
     processesByHostMessageId.set(hostMessageId, hosted);
   }
   return (
+    <SummonSelectionContext.Provider value={summonSelection}>
     <aside className="chat-panel chat-rail glass-subtle" data-testid="chat-panel">
       <div className="cp-body">
         <ChatAgentCapsule />
@@ -828,17 +863,20 @@ export function ChatPanel() {
           // delegation turn whose thinking wasn't consumed): no projected text,
           // no projected tools, no sub-agents. Skip it — the round already
           // renders its content, so rendering the shell shows a bare THOUGHT card.
-          const isProjectedRemnant = m.role === 'assistant'
-            && m.segments !== undefined
-            && (timelineItem.segmentIndexes?.length ?? 0) < m.segments.length
-            && !projectedText.trim()
-            && (projectedTools?.length ?? 0) === 0
-            && !Object.keys(m.subAgents ?? {}).length
-            // An empty segment shell can still be the intentional owner of a
-            // ProcessAccordion. Dropping it also drops Worked-for and every
-            // Todo/process entry nested inside it.
-            && !processesByHostMessageId.has(m.id);
-          if (isProjectedRemnant) return null;
+          const projectedRemnant = m.role === 'assistant' && m.segments !== undefined
+            && isProjectedRemnant({
+              status: m.status,
+              segmentCount: m.segments.length,
+              projectedSegmentCount: timelineItem.segmentIndexes?.length ?? 0,
+              projectedText,
+              projectedToolCount: projectedTools?.length ?? 0,
+              subAgentCount: Object.keys(m.subAgents ?? {}).length,
+              // An empty segment shell can still be the intentional owner of a
+              // ProcessAccordion. Dropping it also drops Worked-for and every
+              // Todo/process entry nested inside it.
+              ownsProcess: processesByHostMessageId.has(m.id),
+            });
+          if (projectedRemnant) return null;
           if (isLocalEditTarget && activeSid) {
             return (
               <Fragment key={m.id}>
@@ -1021,17 +1059,35 @@ export function ChatPanel() {
           </button>
         </div>
       )}
-      {inSubAgentView
-        ? (
-          <div className="cp-subagent-bar">
-            <span className="cp-subagent-note">{t('taskFlow.subAgentReadOnly')}</span>
+      {(inSubAgentView || parkedSubAgentId) && (
+        <div className="cp-subagent-bar">
+          {inSubAgentView ? (
             <button type="button" className="cp-subagent-back" onClick={backToMain}>
               <ArrowLeft size={14} aria-hidden="true" />
               {t('taskFlow.backToMain')}
             </button>
-          </div>
-        )
-        : <Composer highlight={showFirstHint} />}
+          ) : parkedSubAgentId ? (
+            <button type="button" className="cp-subagent-back" onClick={returnToSub}>
+              {t('taskFlow.backToSub', {
+                name: resolveParkedName(parkedSubAgentId) || parkedSubAgentId,
+              })}
+              <ArrowRight size={14} aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
+      )}
+      {showWorkingDots && (
+        <div className="cp-working-dots" role="status" aria-label={t('taskFlow.processRunning')}>
+          <span className="dot-pulse" aria-hidden="true">
+            <span /><span /><span />
+          </span>
+        </div>
+      )}
+      <Composer
+        highlight={showFirstHint}
+        specialistSummonEnabled={canSummonSpecialistFromActiveThread(activeAgentId, rootAgentId)}
+      />
     </aside>
+    </SummonSelectionContext.Provider>
   );
 }

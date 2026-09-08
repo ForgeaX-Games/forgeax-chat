@@ -7,7 +7,7 @@ import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
 import type { ToolCall, SubAgentRun, ChatSegment } from '../../session-store';
 import { ProviderBadgePill } from '@forgeax/interface/lib/provider-badge';
 import { useDownsampledImage } from './useDownsampledImage';
-import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
+import { AgentAvatarVideo } from '@forgeax/agents/components/AgentAvatarVideo/AgentAvatarVideo';
 import { ForgeText } from './message-parts/ForgeText';
 import { ToolChipRow } from './message-parts/ToolChipRow';
 import { AskUserCard } from './message-parts/AskUserCard';
@@ -152,7 +152,6 @@ export function ForgeCard({
 
   return (
     <div className={`forge-card kc-${status}`}>
-      {status === 'done' && text.length > 0 && <KcCopyBtn text={text} />}
       <div className="kc-header">
         {/* ADR-0019: WEBM 状态机. 没 avatarRules (老资源/默认 agent) 时回退到原 PNG.
          *  size=28 跟 .kc-logo 对齐 (CSS 已从 20→28 + radius 4→50%). */}
@@ -182,14 +181,12 @@ export function ForgeCard({
           {status === 'waiting' && <Clock size={14} className="status-waiting" />}
           {status === 'error' && <AlertCircle size={14} className="status-error" />}
         </span>
+        {status === 'done' && text.length > 0 && <KcCopyBtn text={text} />}
       </div>
 
       <div className="kc-body">
           {status === 'running' && !text && (
             <div className="kc-loading">
-              <span className="dot-pulse" aria-hidden="true">
-                <span /><span /><span />
-              </span>
               <span className="kc-loading-label">
                 {t('forgeCard.thinking', { displayName })}{elapsedS > 0 && <span className="kc-elapsed"> · {elapsedS}s</span>}
               </span>

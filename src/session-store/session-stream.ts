@@ -6,10 +6,10 @@
  *  rewind state) is chat-private and lives in `useChatStore`. Registry-runtime
  *  facts the event also carries — live agent tree (`setLiveAgents`) and the
  *  file-activity ledger (`pushFileTouch` / `updateFileTouchStatus`) — stay in
- *  L1's `useShellStore`; this module writes both stores from one dispatch.
+ *  Interface's `useShellStore`; this module writes both stores from one dispatch.
  *
- *  Moved out of `@forgeax/interface/src/lib` in R4: once messages left the L1
- *  store, the event→message translator had to follow (L1 may not import chat).
+ *  Moved out of `@forgeax/interface/src/lib` when message ownership moved to Chat:
+ *  the event→message translator had to follow because Interface may not import Chat.
  */
 import {
   useShellStore,
@@ -29,11 +29,13 @@ import {
   type TurnSnapshotFrame,
 } from '../session-bridge';
 import { ratioFromUsage } from '../event-engine/turn-accumulator';
+import { isChatMessageEvent } from '../event-engine/chat-visibility';
 import { mergeToolResult } from '../event-engine/tool-result';
 import { inferToolNameFromResult, normalizeHookToolCall } from '../event-engine/event-formatter';
 import { normalizeToolCall } from '../event-engine/tool-name';
 import { hasPendingAskUser } from '../task-flow/ask-user-protocol';
-import { chatFirstToken, chatTurnEnd } from '@forgeax/interface/lib/trace';
+import { chatFirstToken, chatToolResult, chatTurnEnd } from '@forgeax/interface/lib/trace';
+import { reportPassiveFeedbackSignal } from '@forgeax/interface/lib/passive-feedback';
 import { t } from '@/i18n';
 import type { ArtifactResolvedPayload, ArtifactSummary } from '@forgeax/types/artifact-summary';
 import {
@@ -342,17 +344,24 @@ function ensureStreamingAsst(
   const streaming = findStreamingAsst(sid, agentId)?.msg;
   const adopt = byAnchor ?? streaming;
   if (adopt) {
-    patchMsg(sid, agentId, adopt.id, (m) => ({
-      ...m,
-      status: 'streaming',
-      ...(anchor ? { msgId: anchor } : {}),
-    }));
+    patchMsg(sid, agentId, adopt.id, (m) => markMessageStreaming(m, anchor));
     useChatStore.getState().setStreaming(sid, agentId, true);
     return adopt;
   }
   const spawned = spawnStreamingAsst(sid, agentId, ts, anchor);
   useChatStore.getState().setStreaming(sid, agentId, true);
   return spawned;
+}
+
+/** Pure/idempotent transition used for every streamed token. */
+export function markMessageStreaming(message: ChatMessage, anchor?: string): ChatMessage {
+  const anchorUnchanged = !anchor || message.msgId === anchor;
+  if (message.status === 'streaming' && anchorUnchanged) return message;
+  return {
+    ...message,
+    status: 'streaming',
+    ...(anchor ? { msgId: anchor } : {}),
+  };
 }
 
 function patchMessageInList(
@@ -521,7 +530,7 @@ function readableSummary(payload: Record<string, unknown>): string {
 
 // ─── dispatch ─────────────────────────────────────────────────────────────
 
-function dispatch(evt: SessionEvent): void {
+export function dispatchSessionEvent(evt: SessionEvent): void {
   const { sid, emitterId, event } = evt;
   const type = event.type;
 
@@ -530,6 +539,7 @@ function dispatch(evt: SessionEvent): void {
   if (!gateSessionEvent(sid, event.sgen, event.seq)) return;
 
   const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const visible = isChatMessageEvent(type, payload);
   const ts = event.ts ?? Date.now();
   const emitter = emitterId || (typeof event.to === 'string' ? event.to : null);
 
@@ -540,12 +550,12 @@ function dispatch(evt: SessionEvent): void {
     if (chunkType !== 'text' && chunkType !== 'thinking') flushPendingStreamText();
   }
 
-  if (payload.error && type !== 'hook:toolResult' && type !== 'agent_crash' && type !== 'hook:turnEnd') {
+  if (visible && payload.error && type !== 'hook:toolResult' && type !== 'agent_crash' && type !== 'hook:turnEnd') {
     pushSystemMessage(sid, emitter, { text: String(payload.error), level: 'error', source: emitterId ? `${emitterId}(${type})` : type, from: emitterId, ts });
     return;
   }
 
-  if (payload.warning && type !== 'hook:llmFallback' && type !== 'hook:llmRetry') {
+  if (visible && payload.warning && type !== 'hook:llmFallback' && type !== 'hook:llmRetry') {
     pushSystemMessage(sid, emitter, { text: String(payload.warning), level: 'warning', source: emitterId ? `${emitterId}(${type})` : type, from: emitterId, ts });
     return;
   }
@@ -563,7 +573,7 @@ function dispatch(evt: SessionEvent): void {
     return;
   }
 
-  if (type === 'user_input' || event.source === 'user') {
+  if (type === 'user_input' && visible) {
     if (isOwnUserInput((payload as UserInputPayload).clientMsgId)) return;
     const content = typeof payload.content === 'string' ? payload.content : '';
     if (!content) return;
@@ -726,6 +736,9 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'stream:tool_result') {
     if (!emitter) return;
     if (isCliSseTurnActive(sid, emitter)) return;
+    // A tool result is liveness evidence even when the provider has not
+    // emitted a text/thinking token and the live bubble is missing.
+    chatToolResult(emitter);
     const callId = typeof payload.toolUseId === 'string' ? payload.toolUseId : '';
     if (!callId) return;
     const ctx = findStreamingAsst(sid, emitter);
@@ -784,6 +797,9 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'hook:toolResult') {
     const p = payload as HookToolResultPayload;
     if (!emitter) return;
+    // Do this before UI lookup: a durable tool result must dismiss a stale
+    // watchdog even if a refresh/multi-tab race left no streaming message.
+    chatToolResult(emitter);
     const ctxMsg = ensureStreamingAsst(sid, emitter, ts);
     if (!ctxMsg) return;
     const callId = p.callId;
@@ -876,15 +892,18 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'hook:assistantMessage') {
     // per-step 收口 reconcile(D4):权威文本修正未封口尾部 —— cli 桥旁观 tab
     // (直播期间没有 stream:llm 的场景)正是靠这里把整段文本补上。
-    if (emitter && !isCliSseTurnActive(sid, emitter)) {
+    if (emitter) {
       const step = extractAuthoritative(payload);
       if (step) {
-        const msg = ensureStreamingAsst(sid, emitter, ts);
-        if (msg) reconcileAssistantStep(sid, emitter, msg, step, ts);
+        if (step.text || step.thinking) chatFirstToken(emitter);
+        if (!isCliSseTurnActive(sid, emitter)) {
+          const msg = ensureStreamingAsst(sid, emitter, ts);
+          if (msg) reconcileAssistantStep(sid, emitter, msg, step, ts);
+        }
       }
     }
     const usage = payload.usage as { inputTokens?: number; outputTokens?: number } | undefined;
-    const model = payload.model as string | undefined;
+    const model = payload.model;
     if (usage && model) {
       const pct = ratioFromUsage(usage, model);
       if (pct > 0) useChatStore.getState().patchConv(sid, { contextPct: pct });
@@ -895,10 +914,18 @@ function dispatch(evt: SessionEvent): void {
   if (type === 'agent_crash') {
     const errMsg = typeof payload.error === 'string' ? payload.error : typeof payload.message === 'string' ? payload.message : 'agent crash';
     if (emitter) {
+      // Close any earlier watchdog before enqueueing the terminal crash card;
+      // the crash feedback must remain visible instead of being immediately
+      // filtered by the recovery event from chatTurnEnd.
+      chatTurnEnd(emitter, 'error', errMsg);
       const ctxMsg = findStreamingAsst(sid, emitter)?.msg;
       if (ctxMsg) patchMsg(sid, emitter, ctxMsg.id, (m) => ({ ...m, status: 'error', errorMessage: errMsg }));
       useChatStore.getState().setStreaming(sid, emitter, false);
     }
+    reportPassiveFeedbackSignal({
+      code: 'agent_crash',
+      message: `${errMsg}\nsid=${sid}\nagent=${emitter ?? 'unknown'}`,
+    });
     pushSystemMessage(sid, emitter, { text: errMsg, level: 'error', source: emitterId ? `${emitterId}(agent_crash)` : 'agent_crash', from: emitterId, ts });
     return;
   }
@@ -935,6 +962,9 @@ function dispatch(evt: SessionEvent): void {
   }
   if (type === 'media_attachment' || type === 'agent_command' || type === 'tick' || type === 'breakpoint_continuation') return;
 
+  // Unknown/internal events must not fall through to readableSummary. Keep
+  // metadata handling above this boundary (agent tree, rewind, artifacts, etc.).
+  if (!visible) return;
   const viewer = activeAgentForSid(sid);
   const text = readableSummary(payload);
   if (!text) return;
@@ -1001,7 +1031,7 @@ function handleResumeGap(frame: { sid: string }): void {
 
 /** Boot 时调一次。重复调安全（按 key 注册，HMR 重载会覆盖旧 dispatch）。 */
 export function subscribeSessionStream(): void {
-  onSessionEvent('session-stream', (event) => enqueueSessionWork(() => dispatch(event)));
+  onSessionEvent('session-stream', (event) => enqueueSessionWork(() => dispatchSessionEvent(event)));
   onTurnSnapshot('session-stream', (frame) => enqueueSessionWork(() => applyTurnSnapshot(frame)));
   onResumeGap('session-stream', (frame) => enqueueSessionWork(() => handleResumeGap(frame)));
 }

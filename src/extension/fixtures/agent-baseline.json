@@ -1,0 +1,8 @@
+{
+  "id": "forgeax.agent.chat",
+  "version": "1.0.0",
+  "kind": "agent",
+  "contributions": ["chat.conversation"],
+  "capabilities": ["agent.session.read", "agent.session.write"],
+  "permissions": ["session:read", "session:write"]
+}

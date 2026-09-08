@@ -2,7 +2,7 @@ import { useTranslation } from '@forgeax/interface/i18n';
 import { CheckCircle2, Loader2 } from 'lucide-react';
 import type { Task } from '../../task-flow/model';
 import { useAgentIdentities } from './agent-identity';
-import { useAgentThreadNav } from './use-agent-thread';
+import { useOpenAgentThread } from './use-agent-thread';
 import { AgentIdentityAvatar } from './AgentIdentityAvatar';
 
 /**
@@ -15,7 +15,7 @@ import { AgentIdentityAvatar } from './AgentIdentityAvatar';
 export function PlanCard({ tasks, fallbackAgentId }: { tasks: Task[]; fallbackAgentId?: string }) {
   const { t } = useTranslation();
   const identify = useAgentIdentities();
-  const { openAgent } = useAgentThreadNav();
+  const openAgent = useOpenAgentThread();
   if (!tasks.length) return null;
   const owner = identify(fallbackAgentId);
   const settled = tasks.every((task) => task.status === 'completed' || task.status === 'cancelled');

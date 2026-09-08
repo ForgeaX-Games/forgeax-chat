@@ -1,4 +1,4 @@
-import { AgentAvatarVideo } from '@forgeax/ai-workbench/components/AgentAvatarVideo/AgentAvatarVideo';
+import { AgentAvatarVideo } from '@forgeax/agents/components/AgentAvatarVideo/AgentAvatarVideo';
 import type { AgentIdentity } from './agent-identity';
 
 function isImageSource(value: string): boolean {
@@ -8,19 +8,23 @@ function isImageSource(value: string): boolean {
 
 /** One avatar rule for every task-flow surface: video/art first, explicit
  * profile avatar second, and the display-name initials only as the final
- * fallback. */
+ * fallback. Catalog lists pass mode="idle"; Composer mention rows use shape="circle". */
 export function AgentIdentityAvatar({
   identity,
   agentId,
   size,
   className,
   fallbackImageSrc,
+  mode = 'conversational',
+  shape = 'circle',
 }: {
   identity: AgentIdentity | null;
   agentId?: string | null;
   size: number;
   className?: string;
   fallbackImageSrc?: string;
+  mode?: 'conversational' | 'idle';
+  shape?: 'circle' | 'square';
 }) {
   const resolvedId = agentId ?? identity?.id;
   const avatar = identity?.avatar?.trim();
@@ -38,15 +42,16 @@ export function AgentIdentityAvatar({
         height: size,
         color: identity?.accent,
         background: identity?.accent,
+        ...(shape === 'square' ? { borderRadius: 6 } : {}),
       }}
       title={identity?.name}
       aria-hidden="true"
     >
       <AgentAvatarVideo
         agentId={resolvedId}
-        mode="conversational"
+        mode={mode}
         size={size}
-        shape="circle"
+        shape={shape}
         fallback={fallback}
       />
     </span>

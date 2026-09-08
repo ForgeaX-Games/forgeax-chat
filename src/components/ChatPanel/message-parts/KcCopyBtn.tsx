@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CheckCircle2, Copy } from 'lucide-react';
+import { ClipboardCheck, Copy } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
 
 // Strip markdown syntax to plain text for clipboard. Users paste into
@@ -36,7 +36,8 @@ function stripMarkdown(s: string): string {
  * CodeBlock.tsx by letting users grab the whole assistant reply (plain text,
  * markdown stripped) without manual selection.
  *
- * stopPropagation is critical — the parent kc-header toggles collapse.
+ * stopPropagation keeps the shared button safe inside any clickable message
+ * container (the SubAgent variant, for example, lives near a collapse toggle).
  *
  * Props:
  *   text — markdown source to strip + copy
@@ -61,7 +62,7 @@ export function KcCopyBtn({ text, size = 'md' }: { text: string; size?: 'sm' | '
   const smCls = size === 'sm' ? ' mp-sm' : '';
   return (
     <button type="button" className={`kc-copy-btn${smCls}`} onClick={onCopy} title={t('kcCopyBtn.copyMessage')}>
-      {copied ? <CheckCircle2 size={11} /> : <Copy size={11} />}
+      {copied ? <ClipboardCheck size={11} /> : <Copy size={11} />}
       <span>{copied ? 'Copied' : 'Copy'}</span>
     </button>
   );

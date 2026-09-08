@@ -35,7 +35,7 @@ interface AgentItem {
   gradient: string;
   status: 'done' | 'running' | 'waiting';
   // P3.18 — placeholder mode: when cli daemon is idle and list_agents
-  // returns empty, AgentSwitcher falls back to /api/workbench/agents
+  // returns empty, AgentSwitcher falls back to /api/agents
   // (marketplace + bus union) and renders the 7 known agents as dim,
   // click-disabled placeholders. `placeholder=true` flips the avatar
   // into dim opacity, removes the status dot, and routes click to the
@@ -130,7 +130,7 @@ export function AgentSwitcher() {
     // client-side persona / dedupe logic — the cli authoritative list is
     // already canonical and the previous filesystem-walk impl was prone
     // to historical-residue noise.
-    // P3.18 — fallback fetch for cli-idle state. /api/workbench/agents returns
+    // P3.18 — fallback fetch for cli-idle state. /api/agents returns
     // the 7 marketplace agents (forge/iori/suzu/kotone/iro/tsumugi/cc-coder)
     // with `role` field; we render them as dim placeholders so the row never
     // collapses to a single `+` button (which leaves players with no signal
@@ -142,7 +142,7 @@ export function AgentSwitcher() {
     // 真后端没有该 session 的 agent，UI 必须如实反映，不能用 marketplace
     // 列表骗用户「这些 agent 就在你 session 里」。
     //
-    // 旧 `fetchPlaceholders()` + `/api/workbench/agents` 已删；marketplace 视图
+    // 旧 `fetchPlaceholders()` + `/api/agents` 已删；marketplace 视图
     // 只在 Bus Admin（plugins 面板）里露出，不再侵入聊天头像行。
     const emptyPlaceholders = (): AgentItem[] => [];
     const fetchAgents = async () => {

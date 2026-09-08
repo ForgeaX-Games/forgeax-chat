@@ -16,8 +16,8 @@
  */
 import { useEffect, useState } from 'react';
 import { useTranslation } from '@forgeax/interface/i18n';
-import { useAgentAvatarRules } from '@forgeax/ai-workbench/components/AgentAvatarVideo/useAgentAvatarRules';
-import { useAgentAvatarState } from '@forgeax/ai-workbench/components/AgentAvatarVideo/useAgentAvatarState';
+import { useAgentAvatarRules } from '@forgeax/agents/components/AgentAvatarVideo/useAgentAvatarRules';
+import { useAgentAvatarState } from '@forgeax/agents/components/AgentAvatarVideo/useAgentAvatarState';
 import { statusLabelKeysFor } from './agentStatusLabels';
 
 const ROTATE_MS = 3600;

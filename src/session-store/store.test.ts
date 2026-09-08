@@ -4,11 +4,13 @@ import {
   _chatInternals,
   clearAgentStreamSuppression,
   isAgentStreamSuppressed,
+  isOwnUserInput,
   useChatStore,
   appendChatSegment,
   type QueuedMessage,
   type SendMessageOpts,
 } from './store';
+import { markMessageStreaming } from './session-stream';
 
 const initialChatState = useChatStore.getState();
 const initialShellState = useShellStore.getState();
@@ -58,6 +60,138 @@ afterEach(() => {
 });
 
 describe('chat store turn targeting regressions', () => {
+  it('does not notify subscribers for repeated streaming state writes', () => {
+    const sid = 'sid-stream-idempotent';
+    const agentId = 'forge';
+    let notifications = 0;
+    const unsubscribe = useChatStore.subscribe(() => { notifications += 1; });
+
+    useChatStore.getState().setStreaming(sid, agentId, false);
+    useChatStore.getState().setStreaming(sid, agentId, true);
+    useChatStore.getState().setStreaming(sid, agentId, true);
+    useChatStore.getState().setStreaming(sid, agentId, false);
+    useChatStore.getState().setStreaming(sid, agentId, false);
+    unsubscribe();
+
+    expect(notifications).toBe(2);
+  });
+
+  it('keeps an already-streaming assistant referentially stable per token', () => {
+    const message = {
+      id: 'assistant-live',
+      msgId: 'live:turn-1',
+      role: 'assistant' as const,
+      text: 'partial',
+      toolCalls: [],
+      status: 'streaming' as const,
+      ts: 1,
+    };
+
+    expect(markMessageStreaming(message)).toBe(message);
+    expect(markMessageStreaming(message, 'live:turn-1')).toBe(message);
+    const adopted = markMessageStreaming(message, 'live:turn-2');
+    expect(adopted).not.toBe(message);
+    expect(adopted.msgId).toBe('live:turn-2');
+  });
+
+  it('renders queued user input immediately and keeps it while accepting the turn', () => {
+    const sid = 'sid-queue-timeline';
+    const agentId = 'forge';
+    const key = `${sid}::${agentId}`;
+    let accepted: SendMessageOpts['onAccepted'];
+    let received: SendMessageOpts | undefined;
+    setShellTarget(tab(sid, agentId));
+
+    useChatStore.getState().enqueueMessage('queued while replying');
+    const queuedItem = useChatStore.getState().queuedMessages[key]![0]!;
+    const optimistic = useChatStore.getState().readMessages(sid, agentId);
+    expect(optimistic.map((message) => [message.role, message.text])).toEqual([
+      ['user', 'queued while replying'],
+    ]);
+    expect(optimistic[0]?.id).toBe(queuedItem.optimisticMessageId);
+
+    useChatStore.setState({
+      sendMessage: async (_text, opts) => {
+        received = opts;
+        accepted = opts?.onAccepted;
+      },
+    });
+    useChatStore.getState().flushQueuedForAgent(sid, agentId);
+
+    expect(received?.existingUserMessageId).toBe(queuedItem.optimisticMessageId);
+    accepted?.();
+    expect(useChatStore.getState().queuedMessages[key]).toEqual([]);
+    expect(useChatStore.getState().readMessages(sid, agentId)[0]?.id).toBe(queuedItem.optimisticMessageId);
+  });
+
+  it('reuses the optimistic queue bubble instead of appending the user twice', async () => {
+    const sid = 'sid-queue-reuse';
+    const agentId = 'forge';
+    const key = `${sid}::${agentId}`;
+    setShellTarget(tab(sid, agentId, 'codex'));
+    globalThis.fetch = (async (input) => {
+      if (String(input) === '/api/cli/chat') {
+        return new Response('event: done\ndata: {"type":"done","stopReason":"end_turn"}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+
+    useChatStore.getState().enqueueMessage('queued once');
+    const item = useChatStore.getState().queuedMessages[key]![0]!;
+    await useChatStore.getState().sendMessage(item.text, {
+      target: { sid, agentId },
+      existingUserMessageId: item.optimisticMessageId,
+    });
+
+    const messages = useChatStore.getState().readMessages(sid, agentId);
+    expect(messages.filter((message) => message.role === 'user')).toHaveLength(1);
+    expect(messages[0]?.id).toBe(item.optimisticMessageId);
+    expect(messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+  });
+
+  it('removes optimistic queued bubbles when deleting or clearing the queue', () => {
+    const sid = 'sid-queue-remove';
+    const agentId = 'forge';
+    const key = `${sid}::${agentId}`;
+    setShellTarget(tab(sid, agentId));
+
+    useChatStore.getState().enqueueMessage('first');
+    useChatStore.getState().enqueueMessage('second');
+    const [first] = useChatStore.getState().queuedMessages[key]!;
+    useChatStore.getState().dequeueMessage(first!.id);
+    expect(useChatStore.getState().readMessages(sid, agentId).map((message) => message.text)).toEqual(['second']);
+
+    useChatStore.getState().clearQueue();
+    expect(useChatStore.getState().queuedMessages[key]).toBeUndefined();
+    expect(useChatStore.getState().readMessages(sid, agentId)).toEqual([]);
+  });
+
+  it('tags CLI requests so the initiating tab can drop its user_input echo', async () => {
+    const sid = 'sid-cli-user-input-dedupe';
+    let clientMsgId: string | undefined;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url === '/api/cli/chat') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { clientMsgId?: string };
+        clientMsgId = body.clientMsgId;
+        return new Response('event: done\ndata: {"type":"done","stopReason":"end_turn"}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    setShellTarget(tab(sid, 'forge', 'codex'));
+    await useChatStore.getState().sendMessage('one visible message');
+
+    expect(clientMsgId).toMatch(/^c-\d+-[a-z0-9]+$/);
+    expect(isOwnUserInput(clientMsgId)).toBe(true);
+  });
+
   it('pins a queued flush to sid/agent and dequeues only after acceptance', () => {
     const sid = 'sid-queue';
     const agentId = 'agent-a';
@@ -83,6 +217,46 @@ describe('chat store turn targeting regressions', () => {
 
     accepted?.();
     expect(useChatStore.getState().queuedMessages[key]).toEqual([second]);
+  });
+
+  it('keeps the specialist snapshot when a queued message flushes later', () => {
+    const sid = 'sid-summon-queue';
+    const agentId = 'forge';
+    const key = `${sid}::${agentId}`;
+    let received: SendMessageOpts | undefined;
+    setShellTarget(tab(sid, agentId));
+    useChatStore.getState().enqueueMessage('review this', { summonAgentId: 'iori' });
+    const item = useChatStore.getState().queuedMessages[key]![0]!;
+    // The user can alter the visible Composer before this old queue item flushes.
+    // Queue metadata, not the current selection, remains the source of truth.
+    const currentChipWouldNowBe = 'suzu';
+    expect(currentChipWouldNowBe).toBe('suzu');
+    useChatStore.setState((state) => ({
+      sendMessage: async (_text, opts) => { received = opts; },
+    }));
+
+    useChatStore.getState().flushQueuedForAgent(sid, agentId);
+
+    expect(received?.summonAgentId).toBe('iori');
+    expect(received?.target).toEqual({ sid, agentId });
+  });
+
+  it('preserves an explicit no-specialist snapshot for a later queued message', () => {
+    const sid = 'sid-clear-summon-queue';
+    const agentId = 'forge';
+    const key = `${sid}::${agentId}`;
+    let received: SendMessageOpts | undefined;
+    setShellTarget(tab(sid, agentId));
+    useChatStore.getState().enqueueMessage('first', { summonAgentId: 'iori' });
+    useChatStore.getState().enqueueMessage('after clear', { summonAgentId: null });
+    useChatStore.setState({
+      queuedMessages: { [key]: [useChatStore.getState().queuedMessages[key]![1]!] },
+      sendMessage: async (_text, opts) => { received = opts; },
+    });
+
+    useChatStore.getState().flushQueuedForAgent(sid, agentId);
+
+    expect(received).toHaveProperty('summonAgentId', null);
   });
 
   it('keeps an invalid/stale pinned target queued without fetching', async () => {
@@ -287,6 +461,39 @@ describe('chat store turn targeting regressions', () => {
     expect(assistants[0]?.msgId?.startsWith('live:')).not.toBe(true);
     expect(assistants[1]?.text).toBe('second');
     expect(assistants[1]?.msgId).toBe('live:forge:5');
+  });
+
+  it('keeps the last valid context percentage when replay sees empty usage', async () => {
+    const sid = 'sid-replay-context';
+    const agentId = 'forge';
+    setShellTarget(tab(sid, agentId));
+    const events = [
+      { type: 'hook:turnStart', source: 'agent:forge', emitterId: agentId, ts: 1, payload: {} },
+      {
+        type: 'hook:assistantMessage', source: 'agent:forge', emitterId: agentId, ts: 2,
+        payload: {
+          model: 'gpt-5.6-sol',
+          usage: { inputTokens: 735_000, outputTokens: 0 },
+          llmMessage: { role: 'assistant', content: 'first' },
+        },
+      },
+      {
+        type: 'hook:assistantMessage', source: 'agent:forge', emitterId: agentId, ts: 3,
+        payload: {
+          model: 'gpt-5.6-sol',
+          usage: { inputTokens: 0, outputTokens: 0 },
+          llmMessage: { role: 'assistant', content: 'second' },
+        },
+      },
+      { type: 'hook:turnEnd', source: 'agent:forge', emitterId: agentId, ts: 4, payload: {} },
+    ];
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      data: events.map((event) => JSON.stringify(event)).join('\n'),
+    }), { status: 200 })) as typeof fetch;
+
+    await useChatStore.getState().loadSession(sid, agentId);
+
+    expect(useChatStore.getState().bySid[sid]?.contextPct).toBe(70);
   });
 
   it('replays final turn duration without sealing an Ask waiting checkpoint', async () => {

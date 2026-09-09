@@ -936,6 +936,15 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
 .cp-handoffs-header { display: flex; align-items: center; justify-content: space-between; height: 24px; font-size: 11px; color: var(--color-text-secondary, #aaa); }
 .cp-handoffs-header button { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
 .cp-handoffs-scroll { height: 100px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; overflow-anchor: none; scrollbar-gutter: stable; }
+.cp-handoffs-resizable { position: relative; display: flex; flex-direction: column; box-sizing: border-box; }
+.cp-handoffs-resizable .cp-handoffs-header { flex-shrink: 0; }
+.cp-handoffs-resizable .cp-handoffs-scroll { flex: 1; height: auto; min-height: 0; }
+.cp-handoffs-divider { position: absolute; z-index: 5; top: -6px; left: 0; right: 0; height: 12px; cursor: ns-resize; touch-action: none; user-select: none; display: flex; align-items: center; justify-content: center; }
+.cp-handoffs-divider::before { content: ''; position: absolute; left: 0; right: 0; height: 2px; background: transparent; }
+.cp-handoffs-divider span { opacity: 0; z-index: 1; border-radius: 6px; padding: 0 10px; background: var(--color-bg, #242424); color: var(--color-text-secondary, #aaa); line-height: 16px; font-size: 14px; }
+.cp-handoffs-divider:hover span, .cp-handoffs-divider:focus-visible span, .cp-handoffs-divider.is-dragging span { opacity: 1; }
+.cp-handoffs-divider:hover::before, .cp-handoffs-divider:focus-visible::before, .cp-handoffs-divider.is-dragging::before { background: var(--color-text-secondary, #aaa); }
+.cp-handoffs-divider:focus-visible { outline: 2px solid var(--color-text-secondary, #aaa); }
 .cp-handoff-entry { min-height: 100px; box-sizing: border-box; padding: 4px 0; }
 .cp-handoff-entry .sys-line { width: 100%; box-sizing: border-box; }
 .cp-handoffs-scroll:focus-visible, .cp-handoffs button:focus-visible { outline: 2px solid var(--color-text-secondary, #aaa); outline-offset: -2px; }
@@ -5012,3 +5021,33 @@ button.cb-mbsel-menu-head {
   background: rgba(24, 26, 31, 0.98);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
 }
+
+/* Keep each handoff's navigation beside its title without stealing feed height. */
+.sys-pat-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+.sys-pat-heading .sys-pat-cap { min-width: 0; }
+.sys-pat-navigate {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.sys-pat-navigate:hover {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+.sys-pat-navigate:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }

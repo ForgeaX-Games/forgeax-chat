@@ -7,7 +7,8 @@ import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
 import { ForgeCard } from './ForgeCard';
 import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
-import { isAgentHandoff } from './handoff-messages';
+import { isAgentHandoff, handoffNavigationTarget } from './handoff-messages';
+import { HandoffPane } from './HandoffPane';
 import { dropAskUserSession } from './message-parts/AskUserCard';
 import { ChatAgentCapsule } from './ChatAgentCapsule';
 import { RewindConfirmDialog, RewindBanner, DirtyNoticeBar, RewindInlineEditor, BubbleEditInline } from './RewindControls';
@@ -30,6 +31,7 @@ import type { ChatAttachment } from '@forgeax/interface/store';
 import { useTranslation, t } from '@forgeax/interface/i18n';
 import { projectWorkTimeline } from '../../task-flow/project';
 import { hasPendingAskUser } from '../../task-flow/ask-user-protocol';
+import { openAgentWorkspace } from '../../lib/open-agent-workspace';
 import { useAgentThreadNav, useAskUserThreadFocus } from './use-agent-thread';
 import type { WorkTimelineItem } from '../../task-flow/model';
 import { ProcessAccordion } from './ProcessAccordion';
@@ -284,7 +286,7 @@ function patActionFor(seed: string, pool: readonly string[]): string {
   return pool[Math.abs(h) % pool.length]!;
 }
 
-function SystemLine({ m, onExpand }: { m: ChatMessage; onExpand?: () => void }) {
+function SystemLine({ m, onExpand, navigationTarget, onNavigate }: { m: ChatMessage; onExpand?: () => void; navigationTarget?: string | null; onNavigate?: (agentId: string) => void }) {
   const { t } = useTranslation();
   const resolveName = useAgentNames();
   const isError = m.level === 'error';
@@ -327,16 +329,25 @@ function SystemLine({ m, onExpand }: { m: ChatMessage; onExpand?: () => void }) 
     return (
       <div className={cls} data-direction={m.direction} data-level={m.level} data-pat="1" data-expanded={open}>
         <div className="sys-body sys-pat-body">
-          <div className="sys-pat-cap">
-            <AgentAvatarVideo
-              agentId={shortAgentId(m.from!)}
-              mode="idle"
-              size={20}
-              shape="circle"
-              className="sys-pat-avatar"
-              fallback={<span className="sys-icon" aria-hidden="true">{icon}</span>}
-            />
-            <span className="sys-pat-text">{patText}</span>
+          <div className="sys-pat-heading">
+            <div className="sys-pat-cap">
+              <AgentAvatarVideo
+                agentId={shortAgentId(m.from!)}
+                mode="idle"
+                size={20}
+                shape="circle"
+                className="sys-pat-avatar"
+                fallback={<span className="sys-icon" aria-hidden="true">{icon}</span>}
+              />
+              <span className="sys-pat-text">{patText}</span>
+            </div>
+            {navigationTarget && onNavigate && <button
+              type="button"
+              className="sys-pat-navigate"
+              title={t('taskFlow.goToSub', { name: resolveName(navigationTarget) || navigationTarget })}
+              aria-label={t('taskFlow.goToSub', { name: resolveName(navigationTarget) || navigationTarget })}
+              onClick={() => onNavigate(navigationTarget)}
+            ><ArrowRight size={14} aria-hidden="true" /></button>}
           </div>
           {m.text.trim() && (
             <div className="sys-pat-content">
@@ -392,7 +403,7 @@ function SystemLine({ m, onExpand }: { m: ChatMessage; onExpand?: () => void }) 
   );
 }
 
-function HandoffFeed({ messages }: { messages: ChatMessage[] }) {
+function HandoffFeed({ messages, sid, currentAgent, onNavigate }: { messages: ChatMessage[]; sid: string; currentAgent: string | null; onNavigate: (agentId: string) => void }) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
@@ -421,7 +432,7 @@ function HandoffFeed({ messages }: { messages: ChatMessage[] }) {
     olderAnchor.current = null;
   }, [latest?.id, latest?.text, start]);
   if (!latest) return null;
-  return <section className="cp-handoffs" aria-label={t('taskFlow.handoffs')}>
+  return <HandoffPane sid={sid} label={t('taskFlow.handoffs')}>
     <div className="cp-handoffs-header">
       <span>{t('taskFlow.handoffs')}</span>
       {!following && <button type="button" onClick={jumpLatest}>{t('taskFlow.latestHandoff')} <ArrowDown size={12} /></button>}
@@ -443,10 +454,10 @@ function HandoffFeed({ messages }: { messages: ChatMessage[] }) {
         setHistoryStart(Math.max(0, start - 50));
       }}>{t('chat.loadEarlier.label', { count: start })}</button>}
       {messages.slice(start).map(message => <div className="cp-handoff-entry" key={message.id} data-handoff-id={message.id}>
-        <SystemLine m={message} onExpand={pauseFollowing} />
+        <SystemLine m={message} onExpand={pauseFollowing} navigationTarget={handoffNavigationTarget(message, currentAgent)} onNavigate={onNavigate} />
       </div>)}
     </div>
-  </section>;
+  </HandoffPane>;
 }
 
 export function ChatPanel() {
@@ -620,11 +631,13 @@ export function ChatPanel() {
     rootAgentId,
     activeAgentId,
     backToMain,
-    parkedSubAgentId,
-    returnToSub,
+    openAgent,
   } = useAgentThreadNav();
   useAskUserThreadFocus(rootAgentId);
-  const resolveParkedName = useAgentNames();
+  const navigateHandoff = useCallback((agentId: string) => {
+    openAgent(agentId);
+    void openAgentWorkspace(agentId, { switchChat: false, fallback: 'none' });
+  }, [openAgent]);
   const loadSession = useChatStore((s) => s.loadSession);
   // Each (sid, agentPath) pair has its own ledger on disk + an independent
   // messagesByAgent slot in store. Reload whenever the (sid, agentPath) key
@@ -1075,7 +1088,7 @@ export function ChatPanel() {
         />
       )}
 
-      <HandoffFeed key={`${activeSid}:${activeAgentId}`} messages={handoffMessages} />
+      <HandoffFeed key={`${activeSid}:${activeAgentId}`} sid={activeSid ?? ''} messages={handoffMessages} currentAgent={activeAgentId ?? rootAgentId} onNavigate={navigateHandoff} />
       {showFirstHint && (
         <div className="cp-first-hint" role="note">
           <div className="cp-first-hint-copy">
@@ -1093,21 +1106,12 @@ export function ChatPanel() {
           </button>
         </div>
       )}
-      {(inSubAgentView || parkedSubAgentId) && (
+      {inSubAgentView && (
         <div className="cp-subagent-bar">
-          {inSubAgentView ? (
-            <button type="button" className="cp-subagent-back" onClick={backToMain}>
-              <ArrowLeft size={14} aria-hidden="true" />
-              {t('taskFlow.backToMain')}
-            </button>
-          ) : parkedSubAgentId ? (
-            <button type="button" className="cp-subagent-back" onClick={returnToSub}>
-              {t('taskFlow.goToSub', {
-                name: resolveParkedName(parkedSubAgentId) || parkedSubAgentId,
-              })}
-              <ArrowRight size={14} aria-hidden="true" />
-            </button>
-          ) : null}
+          <button type="button" className="cp-subagent-back" onClick={backToMain}>
+            <ArrowLeft size={14} aria-hidden="true" />
+            {t('taskFlow.backToMain')}
+          </button>
         </div>
       )}
       {showWorkingDots && (

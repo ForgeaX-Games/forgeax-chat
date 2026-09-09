@@ -1,3 +1,4 @@
+import { clipboardFiles } from './clipboard-files';
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import { parseSegments, type PillPayload, encodePill } from '@forgeax/interface/lib/composer-bridge';
 import './RichInput.css';
@@ -302,13 +303,8 @@ export const RichInput = forwardRef<RichInputHandle, Props>(function RichInput(
     // file manager) — the clipboard exposes it as file item(s), not text/plain.
     // Hand the files up so the composer can attach them; the default
     // contenteditable behavior would drop them.
-    const pastedFiles: File[] = [];
-    for (const it of Array.from(e.clipboardData.items)) {
-      if (it.kind === 'file') {
-        const f = it.getAsFile();
-        if (f) pastedFiles.push(f);
-      }
-    }
+    if (disabled) { e.preventDefault(); return; }
+    const pastedFiles = clipboardFiles(e.clipboardData);
     if (pastedFiles.length > 0 && onPasteFiles) {
       e.preventDefault();
       onPasteFiles(pastedFiles);

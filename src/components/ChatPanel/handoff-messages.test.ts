@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ChatMessage } from '../../session-store';
-import { isAgentHandoff } from './handoff-messages';
+import { isAgentHandoff, handoffNavigationTarget } from './handoff-messages';
 import { messageReadSnapshot, unreadMessageCount } from './unread-messages';
 
 const handoff = (from: string, to: string) => ({
@@ -23,4 +23,17 @@ test('handoffs do not create unread main messages; agent errors still do', () =>
   expect(messageReadSnapshot([message]).size).toBe(0);
   expect(unreadMessageCount([message], new Map())).toBe(0);
   expect(unreadMessageCount([{...message, level:'error'}], new Map())).toBe(1);
+});
+
+test('each handoff links its own counterpart for dispatch, completion and child views', () => {
+  expect(handoffNavigationTarget(handoff('forge', 'suzu'), 'forge')).toBe('suzu');
+  expect(handoffNavigationTarget(handoff('audio-designer', 'forge'), 'forge')).toBe('audio-designer');
+  expect(handoffNavigationTarget(handoff('forge', 'suzu'), 'suzu')).toBe('forge');
+  expect(handoffNavigationTarget(handoff('/root/forge#1', '/root/suzu#2'), 'forge')).toBe('suzu');
+});
+test('self messages and messages outside the visible thread offer no navigation', () => {
+  expect(handoffNavigationTarget(handoff('forge', 'forge'), 'forge')).toBeNull();
+  expect(handoffNavigationTarget(handoff('forge', 'suzu'), null)).toBeNull();
+  expect(handoffNavigationTarget(handoff('forge', 'suzu'), 'audio-designer')).toBeNull();
+  expect(handoffNavigationTarget({...handoff('forge', 'suzu'), level:'error'}, 'forge')).toBeNull();
 });

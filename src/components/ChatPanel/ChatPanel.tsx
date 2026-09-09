@@ -1044,16 +1044,21 @@ export function ChatPanel() {
         {rewindDirtyNotice && activeSid && (
           <DirtyNoticeBar sid={activeSid} notice={rewindDirtyNotice} />
         )}
+        {/* Approval belongs to the scrollable conversation, not the composer
+            dock. Keep it outside collapsed execution/handoff groups. */}
+        <PermissionPrompt />
         </div>
 
-        {unread > 0 && (
+        {(unread > 0 || (pendingPermission && !following)) && (
           <button
             className="cp-jump-latest"
             onClick={() => scrollToBottom()}
             title={t('chat.jumpLatest.tooltip')}
           >
             <ArrowDown size={13} strokeWidth={2.4} />
-            <span>{t('chat.jumpLatest.unread', { count: unread })}</span>
+            <span>{pendingPermission
+              ? t('permission.commandAriaLabel')
+              : t('chat.jumpLatest.unread', { count: unread })}</span>
           </button>
         )}
       </div>
@@ -1068,7 +1073,6 @@ export function ChatPanel() {
       )}
 
       <HandoffFeed key={`${activeSid}:${activeAgentId}`} messages={handoffMessages} />
-      <PermissionPrompt />
       {showFirstHint && (
         <div className="cp-first-hint" role="note">
           <div className="cp-first-hint-copy">

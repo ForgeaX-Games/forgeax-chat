@@ -42,18 +42,41 @@ function readQuestions(input: unknown): AskQuestion[] {
 
 export function PermissionPrompt(): ReactElement | null {
   const activeSid = useShellStore((s) => s.activeSid);
-  const pending = usePendingPermission(activeSid);
-  const resolvedAsk = useResolvedPermission(activeSid);
-  if (!activeSid) return null;
-  // Remount local selections and async ownership together when the request changes.
-  return <PermissionCard key={JSON.stringify([activeSid, pending?.reqId, pending?.toolName])}
-    activeSid={activeSid} pending={pending} resolvedAsk={resolvedAsk} />;
+  return activeSid ? <SessionPermissions key={activeSid} activeSid={activeSid} /> : null;
 }
 
-function PermissionCard({ activeSid, pending, resolvedAsk }: {
+interface Decision {
+  reqId: string;
+  allow: boolean;
+  titleKey: string;
+  target?: string;
+}
+
+function SessionPermissions({ activeSid }: { activeSid: string }): ReactElement {
+  const { t } = useTranslation();
+  const pending = usePendingPermission(activeSid);
+  const resolvedAsk = useResolvedPermission(activeSid);
+  const [decision, setDecision] = useState<Decision | null>(null);
+  useEffect(() => {
+    if (pending) setDecision(null);
+  }, [pending?.reqId]);
+  // Remount local selections and async ownership together when the request changes.
+  return <>
+    {decision && !pending && !resolvedAsk && <div className="permission-decision" role="status">
+      {decision.allow ? <Check size={14} aria-hidden="true" /> : <X size={14} aria-hidden="true" />}
+      <span>{t(decision.allow ? 'permission.allow' : 'permission.deny')} · {t(decision.titleKey)}</span>
+      {decision.target && <code title={decision.target}>{decision.target}</code>}
+    </div>}
+    <PermissionCard key={JSON.stringify([activeSid, pending?.reqId, pending?.toolName])}
+      activeSid={activeSid} pending={pending} resolvedAsk={resolvedAsk} onDecision={setDecision} />
+  </>;
+}
+
+function PermissionCard({ activeSid, pending, resolvedAsk, onDecision }: {
   activeSid: string;
   pending: ReturnType<typeof usePendingPermission>;
   resolvedAsk: ReturnType<typeof useResolvedPermission>;
+  onDecision: (decision: Decision) => void;
 }): ReactElement | null {
   const { t } = useTranslation();
   const mounted = useRef(true);
@@ -143,6 +166,10 @@ function PermissionCard({ activeSid, pending, resolvedAsk }: {
       const body = await response.json().catch(() => ({})) as { ok?: boolean; reason?: string };
       if (!mounted.current) return;
       if (!response.ok || body.ok !== true) throw new Error(body.reason || `Request failed (${response.status})`);
+      if (!isAsk) {
+        const result = permissionPresentation(pending);
+        onDecision({ reqId, allow, titleKey: result.titleKey, target: result.target });
+      }
       if (allow && answers && isAsk) {
         recordResolvedPermission(activeSid, {
           reqId,

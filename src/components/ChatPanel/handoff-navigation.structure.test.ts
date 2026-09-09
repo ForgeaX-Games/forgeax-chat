@@ -16,6 +16,15 @@ function section(text: string, from: string, until: string): string {
 }
 
 describe('inter-agent handoff navigation contract', () => {
+  it('labels entering a teammate as Go to and returning to the parent as Back to', () => {
+    const bar = section(source('ChatPanel.tsx'), '{(inSubAgentView || parkedSubAgentId)', '      <Composer');
+    const mainReturn = section(bar, 'onClick={backToMain}', '          ) : parkedSubAgentId');
+    assert.match(mainReturn, /taskFlow\.backToMain/);
+    const childEntry = bar.slice(bar.indexOf('onClick={returnToSub}'));
+    assert.match(childEntry, /taskFlow\.goToSub/);
+    assert.doesNotMatch(childEntry, /taskFlow\.backToSub/);
+  });
+
   it('does not auto-select a teammate from the dispatch event', () => {
     const capsuleListener = section(
       source('ChatAgentCapsule.tsx'),

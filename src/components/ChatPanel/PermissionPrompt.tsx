@@ -11,7 +11,7 @@
  *  长命令默认折叠:展开后仍限高可滚,收起按钮永远贴在命令块下方(Allow/Deny 上方),
  *  避免整段命令把审批按钮顶出视口后无法收回。 */
 
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { ShieldAlert, HelpCircle, Check, X, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
 import { useShellStore } from '@forgeax/interface/store';
@@ -22,12 +22,9 @@ import {
   clearPendingPermission,
   isAskUserToolName,
 } from '@forgeax/interface/lib/permission-stream';
+import { commandPreview, permissionPresentation, safePermissionText } from './permission-presentation';
+import './PermissionPrompt.css';
 
-/** Preview budget for the folded command body. Past this → show expand/collapse. */
-const CMD_PREVIEW_CHARS = 360;
-const CMD_PREVIEW_LINES = 6;
-/** Even when expanded, never let the command body eat the chat panel. */
-const CMD_EXPANDED_MAX_HEIGHT = 'min(40vh, 280px)';
 
 interface AskQuestion {
   question: string;
@@ -43,25 +40,30 @@ function readQuestions(input: unknown): AskQuestion[] {
   return qs.filter((q): q is AskQuestion => !!q && typeof q === 'object' && typeof (q as AskQuestion).question === 'string');
 }
 
-function isLongCommand(cmd: string): boolean {
-  return cmd.length > CMD_PREVIEW_CHARS || cmd.split('\n').length > CMD_PREVIEW_LINES;
-}
-
-function foldCommand(cmd: string): string {
-  const lines = cmd.split('\n');
-  if (lines.length > CMD_PREVIEW_LINES) {
-    return `${lines.slice(0, CMD_PREVIEW_LINES).join('\n')}\n…`;
-  }
-  if (cmd.length > CMD_PREVIEW_CHARS) return `${cmd.slice(0, CMD_PREVIEW_CHARS)}…`;
-  return cmd;
-}
-
 export function PermissionPrompt(): ReactElement | null {
-  const { t } = useTranslation();
   const activeSid = useShellStore((s) => s.activeSid);
   const pending = usePendingPermission(activeSid);
   const resolvedAsk = useResolvedPermission(activeSid);
+  if (!activeSid) return null;
+  // Remount local selections and async ownership together when the request changes.
+  return <PermissionCard key={JSON.stringify([activeSid, pending?.reqId, pending?.toolName])}
+    activeSid={activeSid} pending={pending} resolvedAsk={resolvedAsk} />;
+}
+
+function PermissionCard({ activeSid, pending, resolvedAsk }: {
+  activeSid: string;
+  pending: ReturnType<typeof usePendingPermission>;
+  resolvedAsk: ReturnType<typeof useResolvedPermission>;
+}): ReactElement | null {
+  const { t } = useTranslation();
+  const mounted = useRef(true);
+  const submitting = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [busy, setBusy] = useState(false);
+  const [busyDecision, setBusyDecision] = useState<boolean | null>(null);
   // AskUserQuestion: chosen labels per question index.
   const [picks, setPicks] = useState<Record<number, string[]>>({});
   // 「记住本会话」勾选(仅 trust-gate ask 卡 canRemember 时可见)。
@@ -70,17 +72,6 @@ export function PermissionPrompt(): ReactElement | null {
   const [cmdExpanded, setCmdExpanded] = useState(false);
   const [resolvedExpanded, setResolvedExpanded] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setPicks({});
-    setBusy(false);
-    setRemember(false);
-    setCmdExpanded(false);
-    setResolvedExpanded(false);
-    setPermissionError(null);
-  }, [pending?.reqId, pending?.toolName]);
-
-  if (!activeSid) return null;
 
   if (!pending) {
     if (!resolvedAsk || resolvedAsk.sid !== activeSid) return null;
@@ -130,8 +121,10 @@ export function PermissionPrompt(): ReactElement | null {
     answers?: Record<string, string>,
     answerValues?: Record<string, string[]>,
   ) => {
-    if (busy) return;
+    if (submitting.current) return;
+    submitting.current = true;
     setBusy(true);
+    setBusyDecision(allow);
     setPermissionError(null);
     const reqId = pending.reqId;
     try {
@@ -148,6 +141,7 @@ export function PermissionPrompt(): ReactElement | null {
         }),
       });
       const body = await response.json().catch(() => ({})) as { ok?: boolean; reason?: string };
+      if (!mounted.current) return;
       if (!response.ok || body.ok !== true) throw new Error(body.reason || `Request failed (${response.status})`);
       if (allow && answers && isAsk) {
         recordResolvedPermission(activeSid, {
@@ -161,12 +155,13 @@ export function PermissionPrompt(): ReactElement | null {
         setResolvedExpanded(false);
       }
       clearPendingPermission(activeSid, reqId);
-    } catch (cause) {
+    } catch {
       // Keep the pending card and the user's selections editable. The server
       // may still be waiting, and a transient UI/network failure is retryable.
-      setPermissionError(cause instanceof Error ? cause.message : t('askUser.submitFailed'));
+      if (mounted.current) setPermissionError(t('permission.submitFailed'));
     } finally {
-      setBusy(false);
+      submitting.current = false;
+      if (mounted.current) setBusy(false);
     }
   };
 
@@ -193,24 +188,24 @@ export function PermissionPrompt(): ReactElement | null {
   };
 
   const accent = askable ? 'var(--color-kind-cli-provider, #6db3f2)' : 'var(--color-status-amber, #d8a200)';
-  const command = pending.command || pending.toolName;
-  const cmdFoldable = !askable && isLongCommand(command);
-  const cmdFolded = cmdFoldable && !cmdExpanded;
+  const presentation = permissionPresentation(pending);
+  const preview = commandPreview(presentation.target ?? '');
 
   return (
     <div
-      role="alertdialog"
+      role="region"
+      className="permission-card"
+      aria-busy={busy}
       aria-label={askable ? t('permission.askAriaLabel') : t('permission.commandAriaLabel')}
-      style={{
-        margin: '8px 10px', padding: '10px 12px', borderRadius: 10,
-        border: `1px solid ${accent}`, background: 'var(--color-bg-elevated, #1c1f24)',
-        display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13,
-      }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: accent }}>
-        {askable ? <HelpCircle size={15} /> : <ShieldAlert size={15} />}
-        <span style={{ fontWeight: 600 }}>{askable ? t('permission.askTitle') : t('permission.commandTitle')}</span>
-        {!askable && <span style={{ opacity: 0.6, fontWeight: 400 }}>· {pending.toolName}</span>}
+      <div className="permission-card__header">
+        <span className="permission-card__icon" style={{ color: accent }} aria-hidden="true">
+          {askable ? <HelpCircle size={15} /> : <ShieldAlert size={15} />}
+        </span>
+        <span className="permission-card__title">{askable ? t('permission.askTitle') : t(presentation.titleKey)}</span>
+        {pending.agent && <span className="permission-card__agent">
+          <span>{t('permission.agentLabel')} · </span>{safePermissionText(pending.agent).slice(0, 100)}
+        </span>}
       </div>
 
       {askable ? (
@@ -225,6 +220,8 @@ export function PermissionPrompt(): ReactElement | null {
                     <button
                       key={opt.label}
                       type="button"
+                      disabled={busy}
+                      aria-pressed={sel}
                       title={opt.description}
                       onClick={() => toggle(qi, opt.label, q.multiSelect === true)}
                       style={{
@@ -243,7 +240,7 @@ export function PermissionPrompt(): ReactElement | null {
             </div>
           ))}
           {permissionError && <div role="alert" style={{ color: 'var(--color-status-red, #e06c75)', fontSize: 12 }}>{permissionError}</div>}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', marginTop: 2 }}>
+          <div className="permission-card__footer">
             {!allAnswered && (
               <span style={{ marginRight: 'auto', fontSize: 11, opacity: 0.6 }}>
                 {t('permission.selectBeforeSubmit')}
@@ -259,49 +256,36 @@ export function PermissionPrompt(): ReactElement | null {
         </>
       ) : (
         <>
-          {permissionError && <div role="alert" style={{ color: 'var(--color-status-red, #e06c75)', fontSize: 12 }}>{permissionError}</div>}
-          {pending.capability && (
-            <div style={{ fontSize: 11, opacity: 0.7 }}>
-              {t('permission.capabilityLabel', { capability: pending.capability })}
-            </div>
-          )}
-          <code style={{
-            display: 'block', padding: '6px 8px', borderRadius: 6,
-            background: 'var(--color-bg-base, #0e0e0e)', color: 'var(--color-text-primary, #ddd)',
-            wordBreak: 'break-all', whiteSpace: 'pre-wrap',
-            ...(cmdExpanded && cmdFoldable
-              ? { maxHeight: CMD_EXPANDED_MAX_HEIGHT, overflow: 'auto' }
-              : null),
-          }}>{cmdFolded ? foldCommand(command) : command}</code>
-          {cmdFoldable && (
-            <button
-              type="button"
-              onClick={() => setCmdExpanded((v) => !v)}
-              style={{
-                alignSelf: 'center', cursor: 'pointer',
-                padding: '3px 12px', borderRadius: 12, fontSize: 11, fontWeight: 600,
-                border: '1px solid rgba(216, 162, 0, 0.4)',
-                background: 'rgba(216, 162, 0, 0.12)', color: accent,
-              }}
-            >
-              {cmdExpanded
-                ? t('permission.collapse')
-                : t('permission.expand', { count: command.length })}
-            </button>
-          )}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end' }}>
+          {presentation.target ? <code className="permission-card__target">{cmdExpanded ? presentation.target : preview.text}</code>
+            : <span className="permission-card__muted">{t('permission.targetUnavailable')}</span>}
+          {preview.foldable && <button type="button" className="permission-card__disclosure"
+            aria-expanded={cmdExpanded} onClick={() => setCmdExpanded((value) => !value)}>
+            {cmdExpanded ? t('permission.collapse') : t('permission.expand', { count: presentation.target!.length })}
+          </button>}
+          {presentation.reason && <p className="permission-card__reason">
+            <span className="permission-card__muted">{t('permission.reasonLabel')} · </span>{presentation.reason}
+          </p>}
+          <details className="permission-card__details">
+            <summary>{t('permission.details')}</summary>
+            <code>{presentation.tool}</code>
+            {presentation.capability && <span>{t('permission.capabilityLabel', { capability: presentation.capability })}</span>}
+          </details>
+          {permissionError && <div role="alert" className="permission-card__error">{permissionError}</div>}
+          <div className="permission-card__footer">
             {pending.canRemember && (
-              <label style={{ marginRight: 'auto', display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, opacity: 0.85, cursor: 'pointer' }}>
-                <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-                {t('permission.rememberSession')}
+              <label className="permission-card__remember">
+                <input type="checkbox" disabled={busy} checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+                <span>{t('permission.rememberSession')}</span>
               </label>
             )}
-            <button onClick={() => reply(false)} disabled={busy} style={btn('ghost')}>
-              {busy ? <Loader2 size={13} className="spin" /> : <X size={13} />} {t('permission.deny')}
-            </button>
-            <button onClick={() => reply(true)} disabled={busy} style={btn('primary', accent)}>
-              {busy ? <Loader2 size={13} className="spin" /> : <Check size={13} />} {t('permission.allow')}
-            </button>
+            <div className="permission-card__actions">
+              <button type="button" onClick={() => reply(false)} disabled={busy} className="permission-card__button">
+                {busy && busyDecision === false ? <Loader2 size={13} className="spin" aria-hidden="true" /> : <X size={13} aria-hidden="true" />} {t('permission.deny')}
+              </button>
+              <button type="button" onClick={() => reply(true)} disabled={busy} className="permission-card__button permission-card__button--allow">
+                {busy && busyDecision === true ? <Loader2 size={13} className="spin" aria-hidden="true" /> : <Check size={13} aria-hidden="true" />} {t('permission.allow')}
+              </button>
+            </div>
           </div>
         </>
       )}

@@ -1,11 +1,16 @@
+import { executionFailureMessages } from './execution-failure';
 import { CheckCircle2, ChevronDown, ChevronRight } from 'lucide-react';
+import { useLayoutEffect, useRef } from 'react';
 import { useTranslation } from '@forgeax/interface/i18n';
 import { useTaskFlowUiStore } from '../../task-flow/ui-store';
 import type { Task } from '../../task-flow/model';
+import { isTaskComplete, taskProgress, taskProgressKey } from '../../task-flow/task-progress';
 import { StepRow } from './StepRow';
 import { useAgentIdentities } from './agent-identity';
 import { useOpenAgentThread } from './use-agent-thread';
 import { defaultStepOpen, defaultTaskOpen } from './process-display';
+import { ToolGroup } from './ToolGroup';
+import { canGroupTool, groupConsecutive } from './tool-groups';
 import { AgentIdentityAvatar } from './AgentIdentityAvatar';
 
 export function TaskCard({
@@ -23,9 +28,10 @@ export function TaskCard({
   defaultOpen?: boolean;
   sid?: string;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const failureCopy = executionFailureMessages(i18n?.language);
   const key = `${roundId}:${task.id}`;
-  const running = task.status === 'in_progress' && !task.demotedFromActive;
+  const running = task.status === 'in_progress' && !task.demotedFromActive && !task.terminalState;
   const open = useTaskFlowUiStore((state) => running
     ? true
     : state.openTasks[key] ?? defaultTaskOpen({ defaultOpen, archive, running }));
@@ -34,7 +40,30 @@ export function TaskCard({
   const toggleStep = useTaskFlowUiStore((state) => state.toggleStep);
   const identity = useAgentIdentities()(task.agentId ?? fallbackAgentId);
   const openAgent = useOpenAgentThread();
-  const done = task.status === 'completed';
+  const done = isTaskComplete(task);
+  const progressKey = taskProgressKey(sid, roundId, task.id);
+  const previousProgress = useTaskFlowUiStore((state) => state.taskProgress[progressKey] ?? 0);
+  const rememberProgress = useTaskFlowUiStore((state) => state.rememberTaskProgress);
+  const progress = taskProgress(task, previousProgress);
+  useLayoutEffect(() => {
+    // Persist across collapse/remount, but never carry a completed 100% into
+    // a task that is subsequently reopened by a new plan update.
+    if (running) rememberProgress(progressKey, progress);
+  }, [running, progressKey, progress, rememberProgress]);
+  const stepsRef = useRef<HTMLDivElement>(null);
+  const followStepsRef = useRef(true);
+  useLayoutEffect(() => {
+    const list = stepsRef.current;
+    if (!open || !list) return;
+    followStepsRef.current = true;
+    list.scrollTop = list.scrollHeight;
+    // Detail streaming and collapse animations change height after layout.
+    const observer = new ResizeObserver(() => {
+      if (followStepsRef.current) list.scrollTop = list.scrollHeight;
+    });
+    for (const child of list.children) observer.observe(child);
+    return () => observer.disconnect();
+  }, [task.id, task.steps.length, open]);
   return (
     <section
       className={`tx-task tx-task-${task.status} ${open ? 'is-open' : 'is-folded'} ${archive ? 'is-archive' : ''}`}
@@ -70,20 +99,30 @@ export function TaskCard({
             ? <><CheckCircle2 size={13} aria-hidden="true" />{t('taskFlow.statusDone')}</>
             : running
               ? <><span className="tx-spin" aria-hidden="true" />{t('taskFlow.statusRunning')}</>
-              : <>{t('taskFlow.statusPending')}</>}
+              : <>{task.terminalState === 'interrupted' ? failureCopy.interruptedTask
+                : task.terminalState === 'incomplete' ? failureCopy.unfinishedTask
+                  : task.status === 'cancelled' ? failureCopy.cancelledTask : t('taskFlow.statusPending')}</>}
         </span>
         {!running && (open
           ? <ChevronDown size={13} className="tx-th-cv" aria-hidden="true" />
           : <ChevronRight size={13} className="tx-th-cv" aria-hidden="true" />)}
       </button>
-      {running && (
-        <div className="tx-prog" aria-hidden="true">
-          <i style={{ width: `${progressOf(task)}%` }} />
+      {(running || done) && (
+        <div className="tx-prog" role="progressbar" aria-label={task.content}
+          aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+          <i style={{ width: `${progress}%` }} />
         </div>
       )}
       <div className="tx-steps-wrap">
-        <div className="tx-steps">
-          {task.steps.map((step, index) => (
+        <div className="tx-steps thin-scrollbar" ref={stepsRef} tabIndex={0}
+          onScroll={(event) => {
+            const list = event.currentTarget;
+            followStepsRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 2;
+          }}>
+          {groupConsecutive(task.steps, canGroupTool).map(group => {
+            const rows = group.map(step => {
+              const index = task.steps.indexOf(step);
+              return (
             <StepRow
               key={step.id}
               step={step}
@@ -109,16 +148,15 @@ export function TaskCard({
               sid={sid}
               agentId={task.agentId ?? fallbackAgentId}
             />
-          ))}
+              );
+            });
+            return canGroupTool(group[0])
+              ? <ToolGroup key={group[0].id} steps={group}>{rows}</ToolGroup>
+              : rows;
+          })}
           {!task.steps.length && <div className="tx-steps-empty">{t('taskFlow.stepsEmpty')}</div>}
         </div>
       </div>
     </section>
   );
-}
-
-function progressOf(task: Task): number {
-  if (!task.steps.length) return 8;
-  const finished = task.steps.filter((step) => step.status !== 'running' && step.status !== 'pending').length;
-  return Math.max(8, Math.round((finished / task.steps.length) * 100));
 }

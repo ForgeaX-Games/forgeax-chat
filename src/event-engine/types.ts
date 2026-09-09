@@ -103,6 +103,8 @@ export interface ToolResultMessage extends RendererMessageBase {
 
 export interface SystemMessage extends RendererMessageBase {
   kind: 'system';
+  /** Stable public lifecycle row identity. */
+  compactionId?: string;
   source: string;
   text: string;
   visualDisplay?: string;
@@ -127,6 +129,9 @@ export interface CompletedTurn {
   timestamp: number;
   /** The kernel ended this turn by cancellation or error. */
   interrupted?: boolean;
+  /** Preserve the public terminal cause for live/replay parity. */
+  error?: string;
+  aborted?: boolean;
   /** When true, this turn is still being built (live streaming). commitTurn replaces it. */
   _draft?: boolean;
 }

@@ -182,3 +182,36 @@ describe('delegation inside an open parent turn', () => {
     expect(restored.filter((message) => message.role === 'assistant').map((message) => [message.text, message.ts])).toEqual([['First reply.', 10], ['Second reply.', 20]]);
   });
 });
+
+it('preserves public failure details on history replay without turning a tool failure into cancellation', () => {
+  const error = 'protocol: tool "example" failed 2 consecutive times: {"content":"Invalid arguments…';
+  const messages = replay([
+    { type: 'hook:turnStart', emitterId: 'forge', ts: 1, payload: {} },
+    asstMsg('forge', 2, 'Working'),
+    { type: 'hook:turnEnd', emitterId: 'forge', ts: 3, payload: { error } },
+  ], 'forge');
+  const assistant = messages.find((message) => message.role === 'assistant');
+  expect(assistant).toMatchObject({ status: 'error', errorMessage: error, turnAborted: false });
+  const cancelled = replay([
+    { type: 'hook:turnStart', emitterId: 'forge', ts: 1, payload: {} },
+    asstMsg('forge', 2, 'Working'),
+    { type: 'hook:turnEnd', emitterId: 'forge', ts: 3, payload: { aborted: true } },
+  ], 'forge');
+  expect(cancelled.find((message) => message.role === 'assistant')).toMatchObject({ turnAborted: true, errorMessage: 'Turn interrupted' });
+});
+
+it('retains failures before the first assistant output without creating empty successful turns', () => {
+  for (const payload of [{ error: 'InputValidationError: missing value' }, { aborted: true }]) {
+    const messages = replay([
+      { type: 'hook:turnStart', emitterId: 'forge', ts: 1, payload: {} },
+      { type: 'hook:turnEnd', emitterId: 'forge', ts: 2, payload },
+    ], 'forge');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ status: 'error', turnAborted: 'aborted' in payload });
+    expect(messages[0]?.errorMessage).toBe('error' in payload ? payload.error : 'Turn interrupted');
+  }
+  expect(replay([
+    { type: 'hook:turnStart', emitterId: 'forge', ts: 1, payload: {} },
+    { type: 'hook:turnEnd', emitterId: 'forge', ts: 2, payload: {} },
+  ], 'forge')).toEqual([]);
+});

@@ -1318,7 +1318,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       const agentId = startTab?.agentId ?? null;
       let skill: { skillId: string; extensionId: string } | undefined;
       try {
-        const skillResp = await fetch('/api/skills');
+        const skillResp = await fetch(`/api/skills?sessionId=${encodeURIComponent(startSid)}`);
         if (skillResp.ok) {
           const data = (await skillResp.json()) as {
             skills?: Array<{

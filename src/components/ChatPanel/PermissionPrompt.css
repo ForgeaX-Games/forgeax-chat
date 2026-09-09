@@ -1,0 +1,53 @@
+.permission-card {
+  min-width: 0;
+  margin: 8px 10px;
+  padding: 12px;
+  border: 1px solid var(--color-border, #35373c);
+  border-radius: 10px;
+  background: var(--color-bg-elevated, #1c1f24);
+  color: var(--color-text-primary, #e4e4e7);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.permission-card *, .permission-card *::before, .permission-card *::after { box-sizing: border-box; }
+.permission-card__header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.permission-card__icon { display: inline-flex; flex: none; }
+.permission-card__title { font-size: 13px; font-weight: 600; }
+.permission-card__agent { margin-left: auto; color: var(--color-text-secondary, #a1a1aa); font-size: 11px; min-width: 0; }
+.permission-card__target {
+  display: block; margin: 0; padding: 7px 9px; border-radius: 6px;
+  background: var(--color-bg-base, #16181c); font-size: 12px;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  max-height: min(40vh, 240px); overflow: auto; user-select: text;
+}
+.permission-card__muted { color: var(--color-text-secondary, #a1a1aa); }
+.permission-card__reason { margin: 0; max-height: 100px; overflow: auto; }
+.permission-card__details { color: var(--color-text-secondary, #a1a1aa); font-size: 11px; }
+.permission-card__details summary { cursor: pointer; width: fit-content; }
+.permission-card__details[open] summary { margin-bottom: 4px; }
+.permission-card__details code, .permission-card__details span { display: block; white-space: pre-wrap; }
+.permission-card__disclosure {
+  align-self: flex-start; padding: 0; border: 0; background: transparent;
+  color: var(--color-text-secondary, #a1a1aa); font: inherit; font-size: 11px; cursor: pointer;
+}
+.permission-card__footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 12px; }
+.permission-card__remember {
+  display: flex; align-items: center; gap: 6px; margin-right: auto; min-width: 0;
+  color: var(--color-text-secondary, #a1a1aa); font-size: 11px; cursor: pointer;
+}
+.permission-card__remember input { margin: 0; width: 14px; height: 14px; flex: none; accent-color: var(--color-text-secondary, #a1a1aa); }
+.permission-card__actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-left: auto; }
+.permission-card__button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-height: 30px; padding: 4px 11px; border-radius: 6px; cursor: pointer; font: inherit; font-weight: 500;
+  border: 1px solid var(--color-border, #35373c); background: transparent; color: var(--color-text-primary, #e4e4e7);
+}
+.permission-card__button--allow { background: var(--color-text-primary, #e4e4e7); color: var(--color-bg-base, #16181c); border-color: transparent; }
+.permission-card__button:hover:not(:disabled) { filter: brightness(1.15); }
+.permission-card button:disabled, .permission-card input:disabled { opacity: 0.55; cursor: not-allowed; }
+.permission-card button:focus-visible, .permission-card summary:focus-visible, .permission-card input:focus-visible { outline: 2px solid var(--color-kind-cli-provider, #6db3f2); outline-offset: 3px; }
+.permission-card__error { color: var(--color-status-red, #e06c75); }

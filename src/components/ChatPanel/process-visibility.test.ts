@@ -21,6 +21,15 @@ describe('execution lifecycle defaults', () => {
     expect(formatDuration(41_000)).toBe('41s');
   });
 
+  it('formats elapsed time across minute and hour boundaries', () => {
+    expect(formatDuration(59_499)).toBe('59s');
+    expect(formatDuration(59_500)).toBe('1m00s');
+    expect(formatDuration(2_142_000)).toBe('35m42s');
+    expect(formatDuration(3_599_500)).toBe('1h00m00s');
+    expect(formatDuration(3_661_000)).toBe('1h01m01s');
+    expect(formatDuration(90_061_000)).toBe('25h01m01s');
+  });
+
   it('opens Todo only while work is active by default', () => {
     expect(defaultTodoExecutionOpen(true)).toBe(true);
     expect(defaultTodoExecutionOpen(false)).toBe(false);

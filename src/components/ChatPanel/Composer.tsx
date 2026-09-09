@@ -531,10 +531,11 @@ export function Composer({
   // server commands. Failure / empty → null, which collapses the Sparkles
   // button back to its legacy 即将上线 hint behaviour.
   const fetchBusSkills = async () => {
+    const requestedSid = activeSid;
     try {
       const rows: BusSkillRow[] = [];
       const seenTriggers = new Set<string>();
-      const skillResp = await fetch('/api/skills');
+      const skillResp = await fetch(`/api/skills${requestedSid ? `?sessionId=${encodeURIComponent(requestedSid)}` : ''}`);
       if (!skillResp.ok) throw new Error(`GET /api/skills → ${skillResp.status}`);
       const { skills } = (await skillResp.json()) as {
         skills?: Array<{
@@ -582,8 +583,8 @@ export function Composer({
           }
         }
       } catch { /* server commands unavailable — still show bus skills */ }
-      setBusSkills(rows);
-    } catch { setBusSkills(null); }
+      if (useShellStore.getState().activeSid === requestedSid) setBusSkills(rows);
+    } catch { if (useShellStore.getState().activeSid === requestedSid) setBusSkills(null); }
   };
   // P3.46 — pull /api/agents once, merge marketplace + bus by id.
   // Bus agents (`agents_from_bus[]`) currently overlap with marketplace
@@ -636,10 +637,14 @@ export function Composer({
   useEffect(() => {
     void fetchProviders();
     void fetchBusCliInfo();
-    void fetchBusSkills();
     void fetchAgentMentions();
     void listExtensions().then((result) => setExtensions(result.items)).catch(() => setExtensions([]));
   }, [i18n.language]);
+
+  useEffect(() => {
+    setBusSkills(null);
+    void fetchBusSkills();
+  }, [activeSid, i18n.language]);
 
   const activeTypeId = pages.instances.find((page) => page.encodedKey === pages.activeKey)?.typeId;
   const activeOwner = activeTypeId ? host.pageRegistry.ownerOf(activeTypeId) : undefined;

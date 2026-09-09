@@ -212,8 +212,8 @@ export function buildMainCallbacks(eff: MessageEffects): TurnAccCallbacks {
         eff.applyMain((m) => ({
           ...m,
           status: 'error',
-          turnAborted: true,
-          errorMessage: 'Turn interrupted',
+          turnAborted: turn.aborted ?? !turn.error,
+          errorMessage: turn.error ?? 'Turn interrupted',
         }));
       }
       // user_input fires as a one-shot onTurn (agent='user', single msg).
@@ -451,14 +451,16 @@ export function makeInMemEffects(
       if (
         last &&
         last.role === 'system' &&
+        (!msg.compactionId || last.id === msg.compactionId) &&
         last.text === text &&
         last.level === msg.level &&
         last.direction === msg.direction
       ) {
         return;
       }
-      messages.push({
-        id: newId(),
+      const existing = msg.compactionId ? messages.findIndex(m => m.id === msg.compactionId) : -1;
+      const systemMessage: ChatMessage = {
+        id: msg.compactionId ?? newId(),
         role: 'system',
         text,
         toolCalls: [],
@@ -469,7 +471,9 @@ export function makeInMemEffects(
         source: msg.source,
         from: msg.from,
         to: msg.to,
-      });
+      };
+      if (existing < 0) messages.push(systemMessage);
+      else messages[existing] = systemMessage;
     },
   };
 }

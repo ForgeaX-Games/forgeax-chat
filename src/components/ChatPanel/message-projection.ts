@@ -9,12 +9,13 @@ export interface ProjectedRemnantInput {
 }
 
 /**
- * Task-flow owns normal assistant work, but an error shell remains user-facing
- * even when its only segment was private reasoning: the card carries retry and
- * failure detail that must not disappear with the private segment.
+ * Filtering private reasoning must not remove the running response identity
+ * and elapsed status. Error shells likewise carry user-facing failure detail.
+ * Only a settled, empty remnant can disappear with its private segments.
  */
 export function isProjectedRemnant(input: ProjectedRemnantInput): boolean {
   return input.status !== 'error'
+    && input.status !== 'streaming'
     && input.projectedSegmentCount < input.segmentCount
     && !input.projectedText.trim()
     && input.projectedToolCount === 0

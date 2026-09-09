@@ -1,3 +1,4 @@
+import { ExecutionFailure } from './ExecutionFailure';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Brain, ChevronDown, ChevronUp, CheckCircle2, Loader2, Clock, AlertCircle } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
@@ -17,6 +18,7 @@ import { SubAgentCard } from './SubAgentCard';
 import { AgentStatusChip } from './AgentStatusChip';
 import { MAIN_AGENT_ACCENT } from './agent-identity';
 import { shortAgentId } from './useAgentNames';
+import { formatDuration } from './process-display';
 
 interface ForgeCardProps {
   status: 'done' | 'running' | 'waiting' | 'error';
@@ -188,7 +190,7 @@ export function ForgeCard({
           {status === 'running' && !text && (
             <div className="kc-loading">
               <span className="kc-loading-label">
-                {t('forgeCard.thinking', { displayName })}{elapsedS > 0 && <span className="kc-elapsed"> · {elapsedS}s</span>}
+                {t('forgeCard.thinking', { displayName })}{elapsedS > 0 && <span className="kc-elapsed"> · {formatDuration(elapsedS * 1000)}</span>}
               </span>
             </div>
           )}
@@ -346,11 +348,7 @@ export function ForgeCard({
             );
           })()}
 
-          {errorMessage && (
-            <div className="kc-error">
-              <AlertCircle size={14} /> {errorMessage}
-            </div>
-          )}
+          {errorMessage && <ExecutionFailure error={errorMessage} />}
 
           {(() => {
             // Prefer server-provided duration_ms (claude-code) over the local

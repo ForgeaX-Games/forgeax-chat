@@ -7,6 +7,7 @@ import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
 import { ForgeCard } from './ForgeCard';
 import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
+import { isAgentHandoff } from './handoff-messages';
 import { dropAskUserSession } from './message-parts/AskUserCard';
 import { ChatAgentCapsule } from './ChatAgentCapsule';
 import { RewindConfirmDialog, RewindBanner, DirtyNoticeBar, RewindInlineEditor, BubbleEditInline } from './RewindControls';
@@ -37,6 +38,8 @@ import { createDeliverActions } from './deliver-actions';
 import { SummonSelectionContext } from './summon-selection';
 import { isProjectedRemnant } from './message-projection';
 import { canSummonSpecialistFromActiveThread } from './agent-key';
+import { messageReadSnapshot, unreadMessageCount } from './unread-messages';
+import { createScrollFollow } from './scroll-follow';
 import './ChatPanel.css';
 import './TaskFlow.css';
 
@@ -62,21 +65,6 @@ const MEMLEAK_CASE02_RENDER_WINDOW = 120;
 // Distance (px) from the top of the thread at which scroll-up auto-loads the
 // previous page. Small so it only fires when the user actually reaches the top.
 const MEMLEAK_CASE02_TOP_LOAD_PX = 80;
-
-// "N 条新消息" 浮层的计数单位 —— 一条 = 一次有返回的模型调用,而不是一个聊天气泡。
-// 一个 assistant 气泡(一轮)内部可能有多次模型调用,被 tool 段隔开,每段 text 即
-// 一次模型返回,所以数它的 text 段(至少 1,兼容没有 segments 的旧消息);
-// user / system 气泡各算 1 条。
-function unitsOf(m: ChatMessage): number {
-  if (m.role !== 'assistant') return 1;
-  const texts = (m.segments ?? []).filter((s) => s.kind === 'text').length;
-  return Math.max(1, texts);
-}
-function countUnits(msgs: ChatMessage[]): number {
-  let n = 0;
-  for (const m of msgs) n += unitsOf(m);
-  return n;
-}
 
 function PillText({ text }: { text: string }) {
   const segs = parseDisplaySegments(text);
@@ -296,7 +284,7 @@ function patActionFor(seed: string, pool: readonly string[]): string {
   return pool[Math.abs(h) % pool.length]!;
 }
 
-function SystemLine({ m }: { m: ChatMessage }) {
+function SystemLine({ m, onExpand }: { m: ChatMessage; onExpand?: () => void }) {
   const { t } = useTranslation();
   const resolveName = useAgentNames();
   const isError = m.level === 'error';
@@ -306,7 +294,7 @@ function SystemLine({ m }: { m: ChatMessage }) {
   // Inter-agent traffic (有 from + to) gets the "拍一拍" treatment: the emitter's
   // avatar replaces the emoji, and a pat phrase frames the from→to relationship.
   // 紫色派活 (source 含 user_input) = handoff; 蓝色完工 = completion.
-  const isInterAgent = !isError && !isWarning && !!m.from && !!m.to;
+  const isInterAgent = isAgentHandoff(m);
   const isHandoff = isInterAgent && (m.source ?? '').includes('user_input');
   const fromName = isInterAgent ? resolveName(m.from) : '';
   const toName = isInterAgent ? resolveName(m.to) : '';
@@ -316,12 +304,6 @@ function SystemLine({ m }: { m: ChatMessage }) {
         isHandoff ? PAT_HANDOFF_ACTIONS : PAT_DONE_ACTIONS,
       )}`
     : '';
-  // 完工消息正文形如「✓ X 完成了…：brief\n\n--- X 的产出 ---\n<产出>」。
-  // 摘要(brief 之前+brief)常显在外,产出段折叠进「展开」。
-  const patProduceMatch = isInterAgent ? m.text.match(/\n\n--- .+? 的产出 ---\n/) : null;
-  const patSummary = patProduceMatch ? m.text.slice(0, patProduceMatch.index) : m.text;
-  const patOutput = patProduceMatch ? m.text.slice(patProduceMatch.index! + patProduceMatch[0].length) : '';
-  const hasPatOutput = isInterAgent && patOutput.trim().length > 0;
   const icon = isError ? '✖' : isWarning ? '⚠' : isIncoming ? '📨' : isOutgoing ? '📤' : '·';
   const cls = [
     'sys-line',
@@ -340,11 +322,10 @@ function SystemLine({ m }: { m: ChatMessage }) {
     : firstLine;
   const label = m.source ? `${m.source}:` : '';
 
-  // 拍一拍 inter-agent 卡片:头像嵌进胶囊(底色保留),摘要常显在外,
-  // 产出折叠进右下角「展开」。
+  // Both delegation briefs and results start folded, regardless of the sender.
   if (isInterAgent) {
     return (
-      <div className={cls} data-direction={m.direction} data-level={m.level} data-pat="1">
+      <div className={cls} data-direction={m.direction} data-level={m.level} data-pat="1" data-expanded={open}>
         <div className="sys-body sys-pat-body">
           <div className="sys-pat-cap">
             <AgentAvatarVideo
@@ -357,21 +338,20 @@ function SystemLine({ m }: { m: ChatMessage }) {
             />
             <span className="sys-pat-text">{patText}</span>
           </div>
-          {(patSummary.trim() || (hasPatOutput && open)) && (
+          {m.text.trim() && (
             <div className="sys-pat-content">
-              {patSummary.trim() && <span className="sys-text">{patSummary.trim()}</span>}
-              {hasPatOutput && open && <span className="sys-pat-output">{patOutput.trim()}</span>}
+              <span className="sys-text">{open ? m.text.trim() : m.text.trim().split('\n')[0]}</span>
             </div>
           )}
-          {hasPatOutput && (
+          {m.text.trim() && (
             <div className="sys-pat-foot">
               <button
                 type="button"
                 className="sys-pat-toggle"
-                onClick={() => setOpen((v) => !v)}
-                title="点击查看产出"
+                aria-expanded={open}
+                onClick={() => { if (!open) onExpand?.(); setOpen((v) => !v); }}
               >
-                {open ? '收起' : '展开'}
+                {open ? t('taskFlow.collapseHandoff') : t('taskFlow.expandHandoff')}
                 <ChevronDown size={11} className={open ? 'spt-chev open' : 'spt-chev'} />
               </button>
             </div>
@@ -412,6 +392,63 @@ function SystemLine({ m }: { m: ChatMessage }) {
   );
 }
 
+function HandoffFeed({ messages }: { messages: ChatMessage[] }) {
+  const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const followRef = useRef(true);
+  const [following, setFollowing] = useState(true);
+  const [historyStart, setHistoryStart] = useState(() => Math.max(0, messages.length - 50));
+  const start = following ? Math.max(0, messages.length - 50) : Math.min(historyStart, Math.max(0, messages.length - 1));
+  const olderAnchor = useRef<{ top: number; height: number } | null>(null);
+  const latest = messages.at(-1);
+  const pauseFollowing = () => {
+    if (followRef.current) setHistoryStart(Math.max(0, messages.length - 50));
+    followRef.current = false;
+    setFollowing(false);
+  };
+  const jumpLatest = () => {
+    followRef.current = true;
+    setFollowing(true);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+  useLayoutEffect(() => {
+    if (followRef.current) jumpLatest();
+    else if (olderAnchor.current && scrollRef.current) {
+      const el = scrollRef.current;
+      el.scrollTop = olderAnchor.current.top + el.scrollHeight - olderAnchor.current.height;
+    }
+    olderAnchor.current = null;
+  }, [latest?.id, latest?.text, start]);
+  if (!latest) return null;
+  return <section className="cp-handoffs" aria-label={t('taskFlow.handoffs')}>
+    <div className="cp-handoffs-header">
+      <span>{t('taskFlow.handoffs')}</span>
+      {!following && <button type="button" onClick={jumpLatest}>{t('taskFlow.latestHandoff')} <ArrowDown size={12} /></button>}
+    </div>
+    <div className="cp-handoffs-scroll" ref={scrollRef} tabIndex={0}
+      aria-label={t('taskFlow.handoffs')}
+      onScroll={() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+        if (atBottom) { followRef.current = true; setFollowing(true); }
+        else pauseFollowing();
+      }}>
+      {start > 0 && <button type="button" className="cp-load-earlier" onClick={() => {
+        const el = scrollRef.current;
+        if (el) olderAnchor.current = { top: el.scrollTop, height: el.scrollHeight };
+        followRef.current = false;
+        setFollowing(false);
+        setHistoryStart(Math.max(0, start - 50));
+      }}>{t('chat.loadEarlier.label', { count: start })}</button>}
+      {messages.slice(start).map(message => <div className="cp-handoff-entry" key={message.id} data-handoff-id={message.id}>
+        <SystemLine m={message} onExpand={pauseFollowing} />
+      </div>)}
+    </div>
+  </section>;
+}
+
 export function ChatPanel() {
   const { t } = useTranslation();
   const host = useHost();
@@ -420,6 +457,8 @@ export function ChatPanel() {
     [host],
   );
   const messages = useActiveMessages();
+  const mainMessages = useMemo(() => messages.filter(message => !isAgentHandoff(message)), [messages]);
+  const handoffMessages = useMemo(() => messages.filter(isAgentHandoff), [messages]);
   // The session's bound agent owns every turn it streams, so it is also the
   // default attribution for the round's tasks (`providerId` names the kernel,
   // not the persona).
@@ -494,21 +533,11 @@ export function ChatPanel() {
     return () => window.removeEventListener(APP_EVENTS.onboardingChanged, onChanged);
   }, []);
   const threadRef = useRef<HTMLDivElement>(null);
-  // Auto-scroll / "jump to latest" 状态机。
-  //   - pinnedRef：是否「贴底跟随」。pinned 时新输出自动滚到底;非 pinned 时不
-  //     自动滚,只累加 unread 弹浮层。关键:一旦用户**往上滚一点点**就立刻
-  //     unpin(不等 48px 阈值)—— 否则 streaming 期间每个 token 都 scrollTo 底部,
-  //     会把用户 <48px 的小幅上滚一次次拽回去,手感像「滚不动」(这是真正的 bug)。
-  //   - lastTopRef：上一次观察到的 scrollTop,用来区分「用户上滚」(top 变小) 和
-  //     「我们自己 scrollToBottom」(top 变大/落到底)。
-  //   - seenUnitsRef：unpin 那一刻「已读」的模型返回单元数(见 countUnits),
-  //     unread = 现在单元数 - seenUnits。正在 streaming 的尾条整体排除在外(用户
-  //     正是滚上去不看它),其后续每多一次模型返回(多一段 text)unread 就 +1。
-  //   - lastUserMsgIdRef：检测「用户刚发了新消息」,无论在哪都强制回底部。
-  // 程序化滚动一律 instant:瞬时落底只产生一个「在底部」的 scroll 事件。
-  const pinnedRef = useRef(true);
-  const lastTopRef = useRef(0);
-  const seenUnitsRef = useRef(0);
+  const scrollFollowRef = useRef<ReturnType<typeof createScrollFollow> | null>(null);
+  // Resize/input listeners read the latest messages without reattaching on tokens.
+  const scrollMessagesRef = useRef(messages);
+  scrollMessagesRef.current = messages;
+  const seenUnitsRef = useRef(new Map<string, number>());
   const lastUserMsgIdRef = useRef<string | null>(null);
   const [unread, setUnread] = useState(0);
   // How many of the most recent message blocks to MOUNT (memleak case-02).
@@ -517,57 +546,43 @@ export function ChatPanel() {
   // bounded whether they leave or chat forever. History is never lost (it lives
   // in the store + ledger); only what React mounts is paged.
   const [renderLimit, setRenderLimit] = useState(MEMLEAK_CASE02_RENDER_WINDOW);
+  const renderLimitRef = useRef(renderLimit);
+  renderLimitRef.current = renderLimit;
   // Set right before a scroll-up page-load; consumed by a useLayoutEffect to
   // restore the scroll position after the older page mounts (anti-jump anchor).
   const topAnchorRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
 
   const scrollToBottom = () => {
-    const el = threadRef.current;
-    if (!el) return;
-    pinnedRef.current = true;
-    setUnread(0);
-    el.scrollTo({ top: el.scrollHeight });
-    lastTopRef.current = el.scrollTop;
+    scrollFollowRef.current?.follow();
   };
 
-  const handleScroll = () => {
+  useLayoutEffect(() => {
     const el = threadRef.current;
     if (!el) return;
-    const top = el.scrollTop;
-    const atBottom = el.scrollHeight - top - el.clientHeight < 48;
-    const scrolledUp = top < lastTopRef.current - 1;
-    lastTopRef.current = top;
-
-    // memleak case-02 — 上拉分页:滚到接近顶部且还有更早未挂载的消息时,自动多
-    // 挂载一页。先存锚点(当前 scrollHeight/scrollTop),渲染后由 useLayoutEffect
-    // 还原滚动位置,避免新内容撑高把视口往下顶造成跳动。
-    if (top < MEMLEAK_CASE02_TOP_LOAD_PX && messages.length > renderLimit && !topAnchorRef.current) {
-      topAnchorRef.current = { prevHeight: el.scrollHeight, prevTop: top };
-      setRenderLimit((n) => Math.min(messages.length, n + MEMLEAK_CASE02_RENDER_WINDOW));
-    }
-
-    // 上滚优先:哪怕还在底部 48px 内,只要用户往上动就 unpin —— 否则贴底跟随
-    // 会把这小幅上滚一次次拽回去。re-pin 只在「不是上滚 + 已到底部」时发生。
-    if (scrolledUp) {
-      if (pinnedRef.current) {
-        pinnedRef.current = false;
-        const tail = messages[messages.length - 1];
-        const streaming = tail && tail.status === 'streaming';
-        // 正在 streaming 的尾条整体算未读;之后每多一次模型返回 unread 自增。
-        const seen = countUnits(messages) - (streaming ? unitsOf(tail) : 0);
-        seenUnitsRef.current = seen;
-        setUnread(Math.max(0, countUnits(messages) - seen));
-      }
-    } else if (atBottom) {
-      pinnedRef.current = true;
-      setUnread(0);
-      // memleak case-02 — 回到实时底部 → 折叠回一页窗口,卸载之前上拉展开的更早
-      // 消息(仍在 store,下次上滑可重新挂载)。这保证「长时间贴底连续对话、从不
-      // 离开」时 DOM 也恒定有界。在底部卸载顶部内容不移动底部视口,不会跳。
-      // 函数式更新:已是默认窗口时返回同值,React 会跳过这次 re-render(无抖动)。
-      setRenderLimit((n) => (n > MEMLEAK_CASE02_RENDER_WINDOW ? MEMLEAK_CASE02_RENDER_WINDOW : n));
-    }
-  };
+    const follower = createScrollFollow(el, {
+      onUnpin: () => {
+        seenUnitsRef.current = messageReadSnapshot(scrollMessagesRef.current);
+        setUnread(0);
+      },
+      onBottom: () => {
+        seenUnitsRef.current = messageReadSnapshot(scrollMessagesRef.current);
+        setUnread(0);
+        setRenderLimit(MEMLEAK_CASE02_RENDER_WINDOW);
+      },
+      onReadingScroll: () => {
+        if (el.scrollTop >= MEMLEAK_CASE02_TOP_LOAD_PX || topAnchorRef.current) return;
+        const count = scrollMessagesRef.current.length;
+        if (count <= renderLimitRef.current) return;
+        topAnchorRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
+        setRenderLimit(Math.min(count, renderLimitRef.current + MEMLEAK_CASE02_RENDER_WINDOW));
+      },
+    });
+    scrollFollowRef.current = follower;
+    return () => {
+      follower.dispose();
+      scrollFollowRef.current = null;
+    };
+  }, []);
 
   // memleak case-02 — anti-jump anchor for scroll-up paging. After an older page
   // mounts (renderLimit grew via handleScroll/click), the thread got taller above
@@ -578,7 +593,7 @@ export function ChatPanel() {
     const anchor = topAnchorRef.current;
     if (!el || !anchor) return;
     el.scrollTop = el.scrollHeight - anchor.prevHeight + anchor.prevTop;
-    lastTopRef.current = el.scrollTop;
+    scrollFollowRef.current?.recordPosition();
     topAnchorRef.current = null;
   }, [renderLimit]);
   // Auto-replay trigger — R3 (2026-05-20)：换成 `loadSession(sid, agentPath)`。
@@ -693,6 +708,16 @@ export function ChatPanel() {
     return -1;
   })();
 
+  // A newly selected thread starts at its own live bottom, including agent
+  // threads that have no user message to trigger the send-to-bottom path.
+  useLayoutEffect(() => {
+    topAnchorRef.current = null;
+    lastUserMsgIdRef.current = null;
+    setRenderLimit(MEMLEAK_CASE02_RENDER_WINDOW);
+    scrollToBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSid, activeAgentId]);
+
   // 三态滚动策略(messages 每个 token / 新气泡都会变):
   //   2) 用户刚发新消息 → 永远回到底部(不管之前在哪)。
   //   3) 本来贴在底部 → 跟随最新输出。
@@ -705,12 +730,12 @@ export function ChatPanel() {
     const userJustSent = lastUserId !== null && lastUserId !== lastUserMsgIdRef.current;
     lastUserMsgIdRef.current = lastUserId;
 
-    if (userJustSent || pinnedRef.current) {
+    if (userJustSent || scrollFollowRef.current?.isPinned()) {
       // 2) 用户刚发新消息 → 永远回底部;3) 贴底跟随 → 跟随最新输出。
       scrollToBottom();
     } else {
       // 1) 已 unpin → 不打扰,按模型返回单元数累加 unread,由浮层提示。
-      setUnread(Math.max(0, countUnits(messages) - seenUnitsRef.current));
+      setUnread(unreadMessageCount(messages, seenUnitsRef.current));
     }
     // scrollToBottom 每次渲染重建且只读 ref,不入依赖。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -744,7 +769,7 @@ export function ChatPanel() {
     return () => { clearTimeout(id); document.removeEventListener('visibilitychange', onVis); };
   }, []);
 
-  const visibleMessages = messages.length > renderLimit ? messages.slice(messages.length - renderLimit) : messages;
+  const visibleMessages = mainMessages.length > renderLimit ? mainMessages.slice(mainMessages.length - renderLimit) : mainMessages;
   const visibleIds = new Set(visibleMessages.map((message) => message.id));
   const messageById = new Map(messages.map((message) => [message.id, message]));
   const visibleTimeline = taskFlowProjection.timeline.filter((item: WorkTimelineItem) => {
@@ -779,7 +804,7 @@ export function ChatPanel() {
       <div className="cp-body">
         <ChatAgentCapsule />
 
-        <div className="cp-thread thin-scrollbar" ref={threadRef} onScroll={handleScroll}>
+        <div className="cp-thread thin-scrollbar" ref={threadRef} tabIndex={0}>
         {messages.length === 0 && (
           <div className="cp-empty">
             <div className="cp-empty-title">{t('chat.empty.title')}</div>
@@ -793,17 +818,18 @@ export function ChatPanel() {
           </div>
         )}
 
-        {messages.length > renderLimit && (
+        {mainMessages.length > renderLimit && (
           <button
             className="cp-load-earlier"
             onClick={() => {
+              scrollFollowRef.current?.pause();
               const el = threadRef.current;
               if (el) topAnchorRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
-              setRenderLimit((n) => Math.min(messages.length, n + MEMLEAK_CASE02_RENDER_WINDOW));
+              setRenderLimit((n) => Math.min(mainMessages.length, n + MEMLEAK_CASE02_RENDER_WINDOW));
             }}
             title={t('chat.loadEarlier.tooltip')}
           >
-            ↑ {t('chat.loadEarlier.label', { count: messages.length - renderLimit })}
+            ↑ {t('chat.loadEarlier.label', { count: mainMessages.length - renderLimit })}
           </button>
         )}
 
@@ -1041,6 +1067,7 @@ export function ChatPanel() {
         />
       )}
 
+      <HandoffFeed key={`${activeSid}:${activeAgentId}`} messages={handoffMessages} />
       <PermissionPrompt />
       {showFirstHint && (
         <div className="cp-first-hint" role="note">
@@ -1068,7 +1095,7 @@ export function ChatPanel() {
             </button>
           ) : parkedSubAgentId ? (
             <button type="button" className="cp-subagent-back" onClick={returnToSub}>
-              {t('taskFlow.backToSub', {
+              {t('taskFlow.goToSub', {
                 name: resolveParkedName(parkedSubAgentId) || parkedSubAgentId,
               })}
               <ArrowRight size={14} aria-hidden="true" />

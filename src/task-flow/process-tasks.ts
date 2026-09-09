@@ -139,5 +139,14 @@ export function tasksFromProcess(process: ProcessTrace): Task[] {
     }
   }
   flushDetail();
+  if (process.phase === 'error' || process.phase === 'aborted') {
+    for (const task of tasks) {
+      if (task.status === 'completed' || task.status === 'cancelled') continue;
+      task.terminalState = task.status === 'in_progress' ? 'interrupted' : 'incomplete';
+      for (const step of task.steps) {
+        if (step.status === 'running' || step.status === 'pending') step.status = 'frozen';
+      }
+    }
+  }
   return tasks;
 }

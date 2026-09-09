@@ -1,10 +1,13 @@
 import { create } from 'zustand';
+import { MAX_RUNNING_PROGRESS } from './task-progress';
 
 interface TaskFlowUiState {
   openProcesses: Record<string, boolean>;
   openTasks: Record<string, boolean>;
   openSteps: Record<string, boolean>;
   sticky: Record<string, boolean>;
+  taskProgress: Record<string, number>;
+  rememberTaskProgress: (id: string, progress: number) => void;
   toggleProcess: (id: string, currentOpen: boolean) => void;
   toggleTask: (id: string, currentOpen: boolean) => void;
   toggleStep: (id: string, currentOpen: boolean) => void;
@@ -17,6 +20,13 @@ export const useTaskFlowUiStore = create<TaskFlowUiState>((set) => ({
   openTasks: {},
   openSteps: {},
   sticky: {},
+  taskProgress: {},
+  rememberTaskProgress: (id, progress) => set((state) => {
+    if (!Number.isFinite(progress)) return state;
+    const next = Math.min(MAX_RUNNING_PROGRESS, Math.max(0, progress));
+    if (next <= (state.taskProgress[id] ?? 0)) return state;
+    return { taskProgress: { ...state.taskProgress, [id]: next } };
+  }),
   toggleProcess: (id, currentOpen) => set((state) => ({
     // Toggle the effective rendered state, not the raw override. A process may
     // be open by default while no override exists; toggling `undefined` used

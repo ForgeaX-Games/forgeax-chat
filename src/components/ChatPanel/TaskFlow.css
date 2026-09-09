@@ -149,7 +149,9 @@
 .tx-prog i { display:block; height:100%; background:linear-gradient(90deg, color-mix(in srgb, var(--primary) 40%, transparent), var(--primary)); transition:width .5s ease; }
 .tx-steps-wrap { max-height:0; overflow:hidden; opacity:0; transition:max-height .42s cubic-bezier(.4,0,.2,1), opacity .32s; transition-delay:var(--tx-collapse-delay, 620ms); }
 .tx-task.is-open .tx-steps-wrap { max-height:4000px; opacity:1; transition-delay:0ms; }
-.tx-steps { display:flex; flex-direction:column; padding:4px 6px 6px; }
+.tx-steps { --tx-step-row-height:32px; display:flex; flex-direction:column; box-sizing:border-box; max-height:calc(4 * var(--tx-step-row-height) + 10px); overflow-y:auto; overscroll-behavior-y:contain; padding:4px 6px 6px; }
+.tx-steps > * { flex-shrink:0; }
+.tx-steps .tx-step-row { box-sizing:border-box; height:var(--tx-step-row-height); }
 .tx-steps-empty { padding:6px 8px; color:var(--color-text-secondary); font-size:11px; }
 .tx-unplanned { display:flex; flex-direction:column; }
 /* Round narration folded into the process area — subdued note, not a headline. */
@@ -161,6 +163,13 @@
 .tx-step-row:hover { background:color-mix(in srgb, var(--color-text-primary) 3%, transparent); }
 .tx-step-box { display:grid; width:16px; height:16px; place-items:center; flex:none; border:1.5px solid var(--color-border-default); border-radius:50%; color:var(--color-text-secondary); }
 .tx-step-lb { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tx-tool-group { min-width:0; width:100%; }
+.tx-tool-group-head { display:flex; align-items:center; gap:7px; width:100%; min-height:32px; padding:5px 2px; border:0; background:transparent; color:var(--color-text-secondary); font:inherit; font-size:12px; text-align:left; cursor:pointer; }
+.tx-tool-group-head > svg, .tx-tool-group-head > .tx-spin { flex:none; }
+.tx-tool-group-head > span:last-child { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.tx-tool-group-head:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+.tx-tool-group.has-error > .tx-tool-group-head { color:var(--accent-error, #F26A6A); }
+.tx-tool-group-body { max-height:240px; overflow-y:auto; overscroll-behavior:contain; padding-left:12px; }
 .tx-step-badge { flex:none; margin-left:auto; color:var(--color-text-secondary); font-family:var(--font-mono, monospace); font-size:10.5px; }
 .tx-step-cv { flex:none; opacity:.55; transition:transform .2s; }
 .tx-step.is-open .tx-step-cv { transform:rotate(90deg); }

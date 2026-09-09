@@ -48,6 +48,8 @@ export interface Step {
 }
 
 export interface Task {
+  /** Presentation only: the turn ended without completing this todo. */
+  terminalState?: 'interrupted' | 'incomplete';
   id: string;
   content: string;
   activeForm?: string;

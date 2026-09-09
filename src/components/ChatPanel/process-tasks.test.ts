@@ -117,3 +117,29 @@ describe('terminal todo presentation', () => {
     });
   }
 });
+
+test('a terminal failed turn interrupts unfinished work without changing todo facts or later turns', () => {
+  const process: ProcessTrace = {
+    id: 'failed-turn', phase: 'error', startedAt: 1, agentIds: [],
+    todo: { updatedAt: 2, items: [
+      { id: 'done', content: 'Completed work', status: 'completed' },
+      { id: 'active', content: 'Verify', status: 'in_progress' },
+      { id: 'pending', content: 'Next work', status: 'pending' },
+      { id: 'cancelled', content: 'Dropped', status: 'cancelled' },
+    ] },
+    entries: [
+      { id: 'todo', kind: 'todo_snapshot', ts: 2, items: [{ id: 'active', content: 'Verify', status: 'in_progress' }] },
+      { id: 'tool', kind: 'tool', ts: 3, step: { id: 'tool', name: 'Verify', status: 'running' } },
+    ],
+  };
+  for (const phase of ['error', 'aborted'] as const) {
+    const tasks = tasksFromProcess({ ...process, phase });
+    expect(tasks.map((task) => task.status)).toEqual(['completed', 'in_progress', 'pending', 'cancelled']);
+    expect(tasks.map((task) => task.terminalState)).toEqual([undefined, 'interrupted', 'incomplete', undefined]);
+    expect(tasks[1]?.steps[0]?.status).toBe('frozen');
+  }
+  const resumed = tasksFromProcess({ ...process, id: 'later-turn', phase: 'running' });
+  expect(resumed.every((task) => !task.terminalState)).toBe(true);
+  expect(resumed[1]?.steps[0]?.status).toBe('running');
+  expect(process.entries[1]?.kind === 'tool' && process.entries[1].step.status).toBe('running');
+});

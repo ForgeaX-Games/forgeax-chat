@@ -561,6 +561,7 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
 
 .cp-thread {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   /* The agent capsule remains mounted for controller state but is visually
      retired above. Do not reserve space for its old absolute-positioned UI. */
@@ -924,6 +925,20 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.sys-line[data-pat][data-expanded="false"] .sys-text {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.sys-line[data-pat] .sys-pat-content { box-sizing: border-box; width: calc(100% - 12px); }
+.cp-handoffs { flex: none; min-width: 0; margin: 0 12px 8px; border-top: 1px solid var(--color-border, #393939); }
+.cp-handoffs-header { display: flex; align-items: center; justify-content: space-between; height: 24px; font-size: 11px; color: var(--color-text-secondary, #aaa); }
+.cp-handoffs-header button { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.cp-handoffs-scroll { height: 100px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; overflow-anchor: none; scrollbar-gutter: stable; }
+.cp-handoff-entry { min-height: 100px; box-sizing: border-box; padding: 4px 0; }
+.cp-handoff-entry .sys-line { width: 100%; box-sizing: border-box; }
+.cp-handoffs-scroll:focus-visible, .cp-handoffs button:focus-visible { outline: 2px solid var(--color-text-secondary, #aaa); outline-offset: -2px; }
 /* 产出 —— 折叠进「展开」的 agent 实际输出 */
 .sys-pat-output {
   font-size: 11px;

@@ -13,6 +13,9 @@ import { defaultStepOpen, defaultTodoExecutionOpen, formatDuration } from './pro
 import { AgentIdentityAvatar } from './AgentIdentityAvatar';
 import { useAgentIdentities } from './agent-identity';
 
+import { ToolGroup } from './ToolGroup';
+import { canGroupTool, groupConsecutive } from './tool-groups';
+
 export { formatDuration } from './process-display';
 
 /** The process is owned by the Forge response body. Todo is rendered as one of
@@ -68,21 +71,7 @@ export function ProcessAccordion({ process, hasArtifact }: { process: ProcessTra
         <div className="tx-proc-body">
           {process.todo
             ? <TodoProcess process={process} live={live} />
-            : (
-              <div className="tx-process-entries">
-                {process.entries.map((entry, index) => (
-                  <Entry
-                    key={entry.id}
-                    entry={entry}
-                    active={live && index === process.entries.length - 1}
-                    durationMs={Math.max(0, (process.entries[index + 1]?.ts ?? process.finishedAt ?? Date.now()) - entry.ts)}
-                    live={live}
-                    sid={process.sid}
-                    agentId={process.agentIds[0]}
-                  />
-                ))}
-              </div>
-            )}
+            : <ProcessEntries entries={process.entries} process={process} live={live} />}
         </div>
       )}
     </section>
@@ -105,7 +94,11 @@ function useProcessClock(live: boolean): number {
 function ProcessEntries({ entries, process, live }: { entries: ProcessEntry[]; process: ProcessTrace; live: boolean }) {
   return entries.length ? (
     <div className="tx-process-entries">
-      {entries.map((entry, index) => (
+      {groupConsecutive(entries, entry => entry.kind === 'tool' && canGroupTool(entry.step)).map(group => {
+        const entry = group[0];
+        const index = entries.indexOf(entry);
+        if (entry.kind === 'tool' && canGroupTool(entry.step)) return <ToolGroup key={entry.id} steps={group.flatMap(item => item.kind === 'tool' ? [item.step] : [])}>{group.map(item => item.kind === 'tool' ? <ToolEntry key={item.id} entry={item} sid={process.sid} agentId={process.agentIds[0]} /> : null)}</ToolGroup>;
+        return (
         <Entry
           key={entry.id}
           entry={entry}
@@ -115,7 +108,7 @@ function ProcessEntries({ entries, process, live }: { entries: ProcessEntry[]; p
           sid={process.sid}
           agentId={process.agentIds[0]}
         />
-      ))}
+      ); })}
     </div>
   ) : null;
 }

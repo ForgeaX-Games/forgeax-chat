@@ -6,6 +6,7 @@
  * owned by their existing consumers.
  */
 const CHAT_MESSAGE_EVENTS = new Set([
+  'compaction.status',
   'user_input',
   'message',
   'agent_command',

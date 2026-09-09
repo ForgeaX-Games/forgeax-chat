@@ -29,6 +29,7 @@ import {
   type TurnSnapshotFrame,
 } from '../session-bridge';
 import { ratioFromUsage } from '../event-engine/turn-accumulator';
+import { formatCompactionStatus } from '../event-engine/compaction-status';
 import { isChatMessageEvent } from '../event-engine/chat-visibility';
 import { mergeToolResult } from '../event-engine/tool-result';
 import { inferToolNameFromResult, normalizeHookToolCall } from '../event-engine/event-formatter';
@@ -479,16 +480,16 @@ function activeAgentForSid(sid: string): string | null {
 function pushSystemMessage(
   sid: string,
   agentId: string | null,
-  patch: { text: string; level?: SystemLevel; direction?: SystemDirection; source?: string; from?: string; to?: string; ts: number },
+  patch: { text: string; compactionId?: string; level?: SystemLevel; direction?: SystemDirection; source?: string; from?: string; to?: string; ts: number },
 ): void {
   if (!patch.text) return;
   const targetAgent = agentId ?? activeAgentForSid(sid);
   if (!targetAgent) return;
   const prev = useChatStore.getState().readMessages(sid, targetAgent);
   const last = prev[prev.length - 1];
-  if (last && last.role === 'system' && last.text === patch.text && last.level === patch.level && last.direction === patch.direction) return;
+  if (last && last.role === 'system' && (!patch.compactionId || last.id === patch.compactionId) && last.text === patch.text && last.level === patch.level && last.direction === patch.direction) return;
   const sysMsg: ChatMessage = {
-    id: `sys-${patch.ts}-${Math.random().toString(36).slice(2, 8)}`,
+    id: patch.compactionId ?? `sys-${patch.ts}-${Math.random().toString(36).slice(2, 8)}`,
     role: 'system',
     text: patch.text,
     toolCalls: [],
@@ -500,7 +501,11 @@ function pushSystemMessage(
     from: patch.from,
     to: patch.to,
   };
-  useChatStore.getState().patchMessages(sid, targetAgent, (msgs) => [...msgs, sysMsg]);
+  useChatStore.getState().patchMessages(sid, targetAgent, (msgs) => {
+    const index = patch.compactionId ? msgs.findIndex(m => m.id === patch.compactionId) : -1;
+    if (index < 0) return [...msgs, sysMsg];
+    return msgs.map((m, i) => i === index ? sysMsg : m);
+  });
 }
 
 function readableSummary(payload: Record<string, unknown>): string {
@@ -548,6 +553,12 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
   {
     const chunkType = type === 'stream:llm' ? (payload as StreamLlmPayload).chunk?.type : undefined;
     if (chunkType !== 'text' && chunkType !== 'thinking') flushPendingStreamText();
+  }
+
+  if (type === 'compaction.status') {
+    const message = visible ? formatCompactionStatus({ ...event, emitterId: emitter ?? undefined }) : null;
+    if (message) pushSystemMessage(sid, emitter, { ...message, ts: message.timestamp });
+    return;
   }
 
   if (visible && payload.error && type !== 'hook:toolResult' && type !== 'agent_crash' && type !== 'hook:turnEnd') {
@@ -612,6 +623,11 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
           data: typeof att.data === 'string' ? att.data : undefined,
         })).filter((att) => att.path || att.data)
       : undefined;
+    const messageId = typeof payload.msgId === 'string' && payload.msgId
+      ? payload.msgId
+      : typeof payload.clientMsgId === 'string' && payload.clientMsgId
+        ? payload.clientMsgId
+        : undefined;
     const userMsg: ChatMessage = {
       id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
@@ -619,10 +635,19 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
       toolCalls: [],
       status: 'done',
       ts: evtTs,
-      ...(typeof payload.msgId === 'string' ? { msgId: payload.msgId } : {}),
+      ...(messageId ? { msgId: messageId } : {}),
       ...(attachments?.length ? { attachments } : {}),
     };
-    useChatStore.getState().patchMessages(sid, targetAgent, (msgs) => [...msgs, userMsg]);
+    useChatStore.getState().patchMessages(sid, targetAgent, (msgs) => {
+      // Resume/WAL overlap can deliver a request already present in this slot.
+      // Identity is scoped to (sid, agent), never inferred from prompt text.
+      if (messageId && msgs.some(m => m.role === 'user' && m.msgId === messageId)) return msgs;
+      // A snapshot may have installed the running reply before its request
+      // arrives. Insert the request by event time without moving live replies.
+      const index = msgs.findIndex(m => m.ts > evtTs || (m.ts === evtTs && m.role === 'assistant'));
+      if (index < 0) return [...msgs, userMsg];
+      return [...msgs.slice(0, index), userMsg, ...msgs.slice(index)];
+    });
     return;
   }
 

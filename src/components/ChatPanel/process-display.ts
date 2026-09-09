@@ -6,9 +6,11 @@ export function formatDuration(durationMs: number): string {
     const precise = seconds.toFixed(1).replace(/\.0$/, '');
     return `${precise}s`;
   }
-  if (seconds < 60) return `${Math.round(seconds)}s`;
   const wholeSeconds = Math.round(seconds);
   if (wholeSeconds < 60) return `${wholeSeconds}s`;
+  if (wholeSeconds >= 3600) {
+    return `${Math.floor(wholeSeconds / 3600)}h${String(Math.floor(wholeSeconds % 3600 / 60)).padStart(2, '0')}m${String(wholeSeconds % 60).padStart(2, '0')}s`;
+  }
   return `${Math.floor(wholeSeconds / 60)}m${String(wholeSeconds % 60).padStart(2, '0')}s`;
 }
 

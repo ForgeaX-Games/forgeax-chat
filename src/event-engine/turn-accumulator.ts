@@ -215,7 +215,7 @@ export class TurnAccumulator {
       case 'hook:turnEnd':
         if (payload.waitingForInput === true) break;
         this.cb.onMeta?.({ thinking: false });
-        this.finalizeTurn(emitter, payload.aborted === true || typeof payload.error === 'string', event.ts ?? Date.now());
+        this.finalizeTurn(emitter, payload.aborted === true || typeof payload.error === 'string', event.ts ?? Date.now(), typeof payload.error === 'string' ? payload.error : undefined, payload.aborted === true);
         break;
 
       case 'hook:assistantMessage': {
@@ -383,7 +383,7 @@ export class TurnAccumulator {
    * pushMessage, streamText is empty and we just commit. The streamText branch
    * is a fallback for when turnEnd fires before/without a hook:assistantMessage.
    */
-  private finalizeTurn(agent: string, interrupted = false, timestamp = Date.now()): void {
+  private finalizeTurn(agent: string, interrupted = false, timestamp = Date.now(), error?: string, aborted?: boolean): void {
     if (this.streamText) {
       this.currentMessages.push({
         kind: 'assistant_complete',
@@ -394,13 +394,15 @@ export class TurnAccumulator {
       });
     }
 
-    if (this.currentMessages.length > 0) {
+    if (this.currentMessages.length > 0 || interrupted) {
       this.finalizeOrphanedToolCalls();
       this.cb.onTurn({
         agent: agent || this.currentAgent,
         messages: this.currentMessages,
         timestamp: this.turnTs || Date.now(),
         ...(interrupted ? { interrupted: true } : {}),
+        ...(error !== undefined ? { error } : {}),
+        ...(aborted !== undefined ? { aborted } : {}),
       });
     }
 

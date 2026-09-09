@@ -17,6 +17,7 @@ import { useTranslation } from '@forgeax/interface/i18n';
 import { useShellStore } from '@forgeax/interface/store';
 import {
   usePendingPermission,
+  usePendingPermissionCount,
   useResolvedPermission,
   recordResolvedPermission,
   clearPendingPermission,
@@ -55,6 +56,7 @@ interface Decision {
 function SessionPermissions({ activeSid }: { activeSid: string }): ReactElement {
   const { t } = useTranslation();
   const pending = usePendingPermission(activeSid);
+  const pendingCount = usePendingPermissionCount(activeSid);
   const resolvedAsk = useResolvedPermission(activeSid);
   const [decision, setDecision] = useState<Decision | null>(null);
   useEffect(() => {
@@ -62,6 +64,9 @@ function SessionPermissions({ activeSid }: { activeSid: string }): ReactElement 
   }, [pending?.reqId]);
   // Remount local selections and async ownership together when the request changes.
   return <>
+    {pendingCount > 1 && <div className="permission-card__muted" role="status">
+      {t('permission.pendingCount', { count: pendingCount })}
+    </div>}
     {decision && !pending && !resolvedAsk && <div className="permission-decision" role="status">
       {decision.allow ? <Check size={14} aria-hidden="true" /> : <X size={14} aria-hidden="true" />}
       <span>{t(decision.allow ? 'permission.allow' : 'permission.deny')} · {t(decision.titleKey)}</span>
@@ -300,9 +305,11 @@ function PermissionCard({ activeSid, pending, resolvedAsk, onDecision }: {
           {permissionError && <div role="alert" className="permission-card__error">{permissionError}</div>}
           <div className="permission-card__footer">
             {pending.canRemember && (
-              <label className="permission-card__remember">
+              <label className="permission-card__remember" title={t('permission.rememberScope')}>
                 <input type="checkbox" disabled={busy} checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-                <span>{t('permission.rememberSession')}</span>
+                <span>{pending.capability && ['read', 'write', 'exec', 'network', 'delete', 'credential', 'delegate', 'other'].includes(pending.capability)
+                  ? t('permission.rememberCapability', { capability: t(`permission.capabilities.${pending.capability}`) })
+                  : t('permission.rememberSession')}</span>
               </label>
             )}
             <div className="permission-card__actions">

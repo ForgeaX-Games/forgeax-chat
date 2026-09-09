@@ -540,6 +540,7 @@ export function ChatPanel() {
   const seenUnitsRef = useRef(new Map<string, number>());
   const lastUserMsgIdRef = useRef<string | null>(null);
   const [unread, setUnread] = useState(0);
+  const [following, setFollowing] = useState(true);
   // How many of the most recent message blocks to MOUNT (memleak case-02).
   // Grows by one window when the user scrolls to the top (上拉分页) and collapses
   // back to one window when they return to the live bottom — so DOM stays
@@ -561,10 +562,12 @@ export function ChatPanel() {
     if (!el) return;
     const follower = createScrollFollow(el, {
       onUnpin: () => {
+        setFollowing(false);
         seenUnitsRef.current = messageReadSnapshot(scrollMessagesRef.current);
         setUnread(0);
       },
       onBottom: () => {
+        setFollowing(true);
         seenUnitsRef.current = messageReadSnapshot(scrollMessagesRef.current);
         setUnread(0);
         setRenderLimit(MEMLEAK_CASE02_RENDER_WINDOW);

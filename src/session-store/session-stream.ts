@@ -1006,12 +1006,18 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
 /** 中途加入补齐:按锚 upsert 一条 streaming 消息,text/thinking/toolCalls 整体
  *  set + seal 基线。段序是近似(thinking→text→tools),收口 reconcile / 刷新后
  *  WAL 回放保证最终一致(方案 §10.4)。 */
-function applyTurnSnapshot(frame: TurnSnapshotFrame): void {
+export function applyTurnSnapshot(frame: TurnSnapshotFrame): void {
   const { sid, emitterId, payload: p } = frame;
   if (!emitterId) return;
   noteAppliedSeq(sid, p.sgen, p.seq);
 
   const anchor = liveAnchor(emitterId, p.startedAt);
+  // Reconnect snapshots may arrive after a terminal event or WAL recovery.
+  // A snapshot of that same turn must not reopen the completed conversation.
+  const messages = useChatStore.getState().readMessages(sid, emitterId);
+  if (messages.some((message) => message.role === 'assistant' &&
+      (message.msgId === anchor || message.ts === p.startedAt) &&
+      (message.status === 'done' || message.status === 'error'))) return;
   const toolCalls: ToolCall[] = (p.toolCalls ?? []).map((tc) => {
     const normalized = normalizeToolCall(tc.name, tc.args ?? {});
     return {

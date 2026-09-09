@@ -10,7 +10,7 @@ import {
   type QueuedMessage,
   type SendMessageOpts,
 } from './store';
-import { markMessageStreaming } from './session-stream';
+import { applyTurnSnapshot, dispatchSessionEvent, markMessageStreaming } from './session-stream';
 
 const initialChatState = useChatStore.getState();
 const initialShellState = useShellStore.getState();
@@ -60,6 +60,68 @@ afterEach(() => {
 });
 
 describe('chat store turn targeting regressions', () => {
+  it('clears a stale shared busy flag when opening a completed child for the first time', async () => {
+    const sid = 'cold-completed-child';
+    const agentId = 'audio-designer';
+    setShellTarget(tab(sid, agentId));
+    useShellStore.getState().setAgentBusy(sid, agentId, true);
+    const events = [
+      { type: 'hook:turnStart', ts: 10, payload: { turnId: 'child' } },
+      { type: 'hook:turnEnd', ts: 20, payload: { turnId: 'child', aborted: false } },
+    ];
+    globalThis.fetch = (async () => Response.json({ data: events.map(e => JSON.stringify(e)).join('\n') })) as typeof fetch;
+    await useChatStore.getState().loadSession(sid, agentId);
+    expect(useShellStore.getState().busyByAgentBySid[sid]?.[agentId]).toBeFalsy();
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent[agentId]).toBeFalsy();
+  });
+
+  it('recovers completed child busy flags and rejects its late snapshot without stopping the parent', async () => {
+    const sid = 'completed-child-recovery';
+    const agentId = 'audio-designer';
+    setShellTarget(tab(sid, agentId));
+    const dispatch = (type: string, ts: number, payload: Record<string, unknown>) =>
+      dispatchSessionEvent({ type: 'session-event', sid, emitterId: agentId,
+        event: { type, ts, source: `agent:${agentId}`, payload } });
+    dispatch('hook:turnStart', 110, { turnId: 'child-turn' });
+    useChatStore.getState().setStreaming(sid, 'forge', true);
+    const events = [
+      { type: 'hook:turnStart', ts: 110, payload: { turnId: 'child-turn' } },
+      { type: 'hook:assistantMessage', ts: 200, payload: { llmMessage: { role: 'assistant', content: 'Delivered' } } },
+      { type: 'hook:turnEnd', ts: 220, payload: { turnId: 'child-turn', aborted: false } },
+    ];
+    globalThis.fetch = (async () => Response.json({ data: events.map(e => JSON.stringify(e)).join('\n') })) as typeof fetch;
+    await useChatStore.getState().loadSession(sid, agentId);
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent[agentId]).toBe(false);
+    expect(useShellStore.getState().busyByAgentBySid[sid]?.[agentId]).toBeFalsy();
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent.forge).toBe(true);
+    expect(useChatStore.getState().readMessages(sid, agentId).filter(m => m.role === 'assistant')).toHaveLength(1);
+    applyTurnSnapshot({ type: 'turn-snapshot', sid, emitterId: agentId, payload: {
+      turn: 1, startedAt: 110, seq: 1, sgen: 'child-recovery', text: 'old partial', thinking: '',
+      sealedTextLen: 0, sealedThinkingLen: 0, toolCalls: [],
+    } });
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent[agentId]).toBe(false);
+    expect(useChatStore.getState().readMessages(sid, agentId).some(m => m.text === 'old partial')).toBe(false);
+    dispatch('hook:turnStart', 300, { turnId: 'next-child-turn' });
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent[agentId]).toBe(true);
+  });
+
+  it('does not clear a new child turn that arrives during history recovery', async () => {
+    const sid = 'child-recovery-race';
+    const agentId = 'audio-designer';
+    setShellTarget(tab(sid, agentId));
+    const events = [
+      { type: 'hook:turnStart', ts: 110, payload: { turnId: 'old' } },
+      { type: 'hook:turnEnd', ts: 220, payload: { turnId: 'old' } },
+    ];
+    globalThis.fetch = (async () => {
+      dispatchSessionEvent({ type: 'session-event', sid, emitterId: agentId,
+        event: { type: 'hook:turnStart', ts: 300, payload: { turnId: 'new' } } });
+      return Response.json({ data: events.map(e => JSON.stringify(e)).join('\n') });
+    }) as typeof fetch;
+    await useChatStore.getState().loadSession(sid, agentId);
+    expect(useChatStore.getState().bySid[sid]?.streamingByAgent[agentId]).toBe(true);
+    expect(useShellStore.getState().busyByAgentBySid[sid]?.[agentId]).toBe(true);
+  });
   it('does not notify subscribers for repeated streaming state writes', () => {
     const sid = 'sid-stream-idempotent';
     const agentId = 'forge';
@@ -415,7 +477,7 @@ describe('chat store turn targeting regressions', () => {
     expect(isAgentStreamSuppressed(sid, 'forge')).toBe(false);
   });
 
-  it('derives a live anchor only for the current unclosed WAL turn', async () => {
+  it('retains turn anchors for terminal snapshot rejection while only the open turn streams', async () => {
     const sid = 'sid-replay-live';
     const agentId = 'forge';
     setShellTarget(tab(sid, agentId));
@@ -458,7 +520,8 @@ describe('chat store turn targeting regressions', () => {
       .filter((message) => message.role === 'assistant');
     expect(assistants).toHaveLength(2);
     expect(assistants[0]?.text).toBe('first');
-    expect(assistants[0]?.msgId?.startsWith('live:')).not.toBe(true);
+    expect(assistants[0]?.msgId).toBe(`live:${agentId}:2`);
+    expect(assistants[0]?.status).toBe('done');
     expect(assistants[1]?.text).toBe('second');
     expect(assistants[1]?.msgId).toBe('live:forge:5');
   });

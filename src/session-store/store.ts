@@ -761,6 +761,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       let pendingUserAssistantId: string | null = null;
       let openTurnStartedAt: number | null = null;
       let openTurnAssistantId: string | null = null;
+      const settledAnchors = new Set<string>();
       const lastAssistant = (turnId?: string): ChatMessage | undefined => {
         if (turnId) {
           for (let i = messages.length - 1; i >= 0; i--) {
@@ -858,6 +859,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           // until the later final turn-end.
           if (pendingAskBeforeFeed) continue;
 
+          if (openTurnStartedAt !== null) {
+            settledAnchors.add(`live:${agentPath}:${openTurnStartedAt}`);
+          }
+
           const targetId = openTurnAssistantId ?? lastAssistant()?.id;
           const targetIndex = targetId
             ? messages.findIndex((message) => message.id === targetId)
@@ -871,6 +876,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
               : Math.max(0, endTs - startedAt);
             messages[targetIndex] = {
               ...target,
+              ...(openTurnStartedAt !== null ? { msgId: `live:${agentPath}:${openTurnStartedAt}` } : {}),
               status: turnPayload?.error || turnPayload?.aborted === true ? 'error' : 'done',
               ...(turnPayload?.aborted === true ? { turnAborted: true } : {}),
               ...(typeof turnPayload?.error === 'string' ? { errorMessage: turnPayload.error } : {}),
@@ -893,12 +899,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       // daemon-tick-* bubbles + 带锚的在途流式气泡 (multi-tab §5.3) already in the slot.
       // WAL replay 从未闭合 turnStart 派生同一个 live anchor，因此按身份去重，
       // 不按文本前缀猜测（自动续轮可能与上一条正文相似）。
+      let settledReplay = false;
       set((s) => {
         const conv = s.bySid[sid] ?? EMPTY_CONV;
         const prev = conv.messagesByAgent[agentPath] ?? [];
         const liveDaemonMsgs = prev.filter((mm) => mm.id.startsWith('daemon-tick-'));
+        // A completed WAL turn replaces its stale live bubble. Preserve newer
+        // live work that arrived while the history request was in flight.
+        const unchanged = prev === slotSnap || (!conv.messagesByAgent[agentPath] && slotSnap.length === 0);
         const liveStreaming = prev.filter((mm) =>
-          mm.status === 'streaming' && typeof mm.msgId === 'string' && mm.msgId.startsWith('live:'));
+          mm.status === 'streaming' && typeof mm.msgId === 'string' && mm.msgId.startsWith('live:') &&
+          !(unchanged && settledAnchors.has(mm.msgId)));
         const liveAnchors = new Set(liveStreaming.map((mm) => mm.msgId));
         const walMessages = liveAnchors.size === 0
           ? messages
@@ -907,6 +918,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         const merged = keep.length === 0
           ? walMessages
           : [...walMessages, ...keep].sort((a, b) => a.ts - b.ts);
+        settledReplay = unchanged && settledAnchors.size > 0 && openTurnStartedAt === null &&
+          !merged.some((message) => message.status === 'streaming');
         return {
           bySid: {
             ...s.bySid,
@@ -918,6 +931,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           },
         };
       });
+      // The composer and working dots also read the shared busy registry.
+      // Recover both flags when the durable terminal event was missed live.
+      if (settledReplay) get().setStreaming(sid, agentPath, false);
 
       // 多 tab 同步:回放后把 cursor 回填到「与当前连接同代的最大 seq」,让直播帧
       // 与回放重叠的部分被 seq 闸丢弃(方案 §3.5)。

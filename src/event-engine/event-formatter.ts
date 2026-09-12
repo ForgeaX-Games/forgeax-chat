@@ -1,3 +1,4 @@
+import { formatDelegationStatus } from './delegation-status';
 /**
  * Event formatter — converts StoredEvent records into RendererMessage objects.
  * Uses a registry pattern instead of a monolithic switch-case.
@@ -457,6 +458,9 @@ export function formatEvent(event: StoredEvent, viewerId?: string): RendererMess
   // Apply before error/warning shortcuts too: diagnostics may carry both.
   if (!isChatMessageEvent(event.type, p)) return null;
   if (event.type === 'compaction.status') return formatCompactionStatus(event);
+  if (event.type === 'delegation:state') return formatDelegationStatus(event);
+  const delegation = formatDelegationStatus(event);
+  if (delegation) return delegation;
 
   if (p.error && event.type !== 'hook:toolResult') {
     return systemMsg(event, p.visual_display ? String(p.visual_display) : String(p.error), 'error');

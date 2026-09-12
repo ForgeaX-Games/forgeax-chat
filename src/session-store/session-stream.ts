@@ -1,3 +1,4 @@
+import { formatDelegationStatus } from '../event-engine/delegation-status';
 /** SessionEvent → ChatMessage 桥（forgeax 原生 WS 实时流）— chat-owned (R4).
  *
  *  Subscribes to `forgeax-bridge.onSessionEvent` and translates server EventBus
@@ -480,7 +481,7 @@ function activeAgentForSid(sid: string): string | null {
 function pushSystemMessage(
   sid: string,
   agentId: string | null,
-  patch: { text: string; compactionId?: string; level?: SystemLevel; direction?: SystemDirection; source?: string; from?: string; to?: string; ts: number },
+  patch: { delegation?: import('../event-engine/delegation-status').DelegationSnapshot; text: string; compactionId?: string; level?: SystemLevel; direction?: SystemDirection; source?: string; from?: string; to?: string; ts: number },
 ): void {
   if (!patch.text) return;
   const targetAgent = agentId ?? activeAgentForSid(sid);
@@ -489,6 +490,7 @@ function pushSystemMessage(
   const last = prev[prev.length - 1];
   if (last && last.role === 'system' && (!patch.compactionId || last.id === patch.compactionId) && last.text === patch.text && last.level === patch.level && last.direction === patch.direction) return;
   const sysMsg: ChatMessage = {
+    ...(patch.delegation ? { delegation: patch.delegation } : {}),
     id: patch.compactionId ?? `sys-${patch.ts}-${Math.random().toString(36).slice(2, 8)}`,
     role: 'system',
     text: patch.text,
@@ -541,7 +543,7 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
 
   // 幂等闸(方案 §3.5):重复/回放重叠帧按 (sgen, seq) 丢弃 —— G3 的 race
   // 从时序问题退化为按 seq 过滤。无 seq 的旧事件按现状路径处理。
-  if (!gateSessionEvent(sid, event.sgen, event.seq)) return;
+  if (!gateSessionEvent(sid, event.sgen, event.seq, emitterId || (typeof event.to === 'string' ? event.to : null))) return;
 
   const payload = (event.payload ?? {}) as Record<string, unknown>;
   const visible = isChatMessageEvent(type, payload);
@@ -553,6 +555,12 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
   {
     const chunkType = type === 'stream:llm' ? (payload as StreamLlmPayload).chunk?.type : undefined;
     if (chunkType !== 'text' && chunkType !== 'thinking') flushPendingStreamText();
+  }
+
+  if (visible && (type === 'delegation:state' || (type === 'message' && payload.resumeRequired === true))) {
+    const message = formatDelegationStatus({ ...event, emitterId: emitter ?? undefined });
+    if (message) pushSystemMessage(sid, typeof event.to === 'string' ? event.to : emitter, { ...message, ts: message.timestamp });
+    return;
   }
 
   if (type === 'compaction.status') {
@@ -1009,7 +1017,7 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
 export function applyTurnSnapshot(frame: TurnSnapshotFrame): void {
   const { sid, emitterId, payload: p } = frame;
   if (!emitterId) return;
-  noteAppliedSeq(sid, p.sgen, p.seq);
+  noteAppliedSeq(sid, p.sgen, p.seq, emitterId);
 
   const anchor = liveAnchor(emitterId, p.startedAt);
   // Reconnect snapshots may arrive after a terminal event or WAL recovery.

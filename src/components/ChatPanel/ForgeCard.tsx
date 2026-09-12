@@ -1,3 +1,4 @@
+import type { FailureContinuation } from './execution-failure';
 import { ExecutionFailure } from './ExecutionFailure';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Brain, ChevronDown, ChevronUp, CheckCircle2, Loader2, Clock, AlertCircle } from 'lucide-react';
@@ -19,6 +20,7 @@ import { AgentStatusChip } from './AgentStatusChip';
 import { MAIN_AGENT_ACCENT } from './agent-identity';
 import { shortAgentId } from './useAgentNames';
 import { formatDuration } from './process-display';
+import { deriveExecutionStage, executionStageLabelKey } from './execution-stage';
 
 interface ForgeCardProps {
   status: 'done' | 'running' | 'waiting' | 'error';
@@ -37,6 +39,7 @@ interface ForgeCardProps {
    *  sub-agent without a chip in toolCalls falls back to bottom of bubble. */
   subAgents?: Record<string, SubAgentRun>;
   errorMessage?: string;
+  failureContinuation?: FailureContinuation;
   /** Which CliProvider produced this stream — rendered as a small badge. */
   providerId?: string;
   /** Final USD cost of the turn (from done.cost). Renders in footer. */
@@ -109,6 +112,7 @@ export function ForgeCard({
   segments,
   subAgents,
   errorMessage,
+  failureContinuation,
   providerId,
   cost,
   durationMs,
@@ -122,6 +126,14 @@ export function ForgeCard({
   const { t } = useTranslation();
   const isMainAgent = !agentName || shortAgentId(agentName) === 'forge';
   const displayName = (isMainAgent ? 'ForgeaX' : agentName?.trim() || 'ForgeaX').toUpperCase();
+  const executionStage = deriveExecutionStage({
+    status,
+    text,
+    thought,
+    segments,
+    toolCalls,
+    subAgents,
+  });
   const onProviderBusDeepLink = useProviderBusDeepLink();
   const [thoughtOpen, setThoughtOpen] = useState(!thoughtCollapsed);
   const logoSrc = useDownsampledImage(agentIcon, 20);
@@ -166,9 +178,9 @@ export function ForgeCard({
         />
         <span className="kc-name" style={isMainAgent ? { color: MAIN_AGENT_ACCENT } : undefined}>{displayName}</span>
         {timestamp && <time className="kc-time">{timestamp}</time>}
-        {/* 右上角实时工作状态趣味文案 —— 跟头像同源, 只在 turn 进行中显示. */}
+        {/* 右上角实时执行阶段；没有事件证据时由 helper 明确显示 unknown. */}
         {(status === 'running' || status === 'waiting') && (
-          <AgentStatusChip agentId={agentId ?? null} />
+          <AgentStatusChip agentId={agentId ?? null} stage={executionStage} />
         )}
         {providerId && (
           <ProviderBadgePill
@@ -190,12 +202,12 @@ export function ForgeCard({
           {status === 'running' && !text && (
             <div className="kc-loading">
               <span className="kc-loading-label">
-                {t('forgeCard.thinking', { displayName })}{elapsedS > 0 && <span className="kc-elapsed"> · {formatDuration(elapsedS * 1000)}</span>}
+                {t(executionStageLabelKey(executionStage), { displayName })}{elapsedS > 0 && <span className="kc-elapsed"> · {formatDuration(elapsedS * 1000)}</span>}
               </span>
             </div>
           )}
           {status === 'waiting' && (
-            <div className="kc-status-text">{t('taskFlow.waiting')}</div>
+            <div className="kc-status-text">{t(executionStageLabelKey(executionStage), { displayName })}</div>
           )}
           {/* Legacy / replayed messages carry only the flattened `thinking`
               field (no time-ordered segments[] — e.g. reconstructed from the
@@ -233,7 +245,7 @@ export function ForgeCard({
               const run = subAgents?.[subagentId];
               if (!run) return null;
               renderedSubAgentIds.add(subagentId);
-              return <SubAgentCard key={`sub-${subagentId}`} run={run} parentAgentId={agentId ?? null} />;
+              return <SubAgentCard key={`sub-${subagentId}`} run={run} sid={sid} parentAgentId={agentId ?? null} />;
             };
             // Render a tool chip; if it has a subagentId that resolves, the
             // SubAgentCard renders inline right after it.
@@ -286,23 +298,16 @@ export function ForgeCard({
                 {processContent && (processInsertAt ?? 0) >= segments!.length && (
                   <Fragment key="process-slot-end">{processContent}</Fragment>
                 )}
-                {/* When upstream cli returns a clean 'done' with no segments
-                 *  at all, render an empty-state hint so the bubble isn't
-                 *  visually blank — mirrors the legacy fallback below. */}
-                {segments!.length === 0 && status === 'done' && !errorMessage && (
-                  <div className="kc-empty">
-                    {t('forgeCard.emptyResponse')}
-                  </div>
-                )}
               </div>
             ) : !canInterleave ? (
               <>
                 {processContent}
                 {text && <ForgeText text={text} animated={status === 'running'} />}
-                {/* When upstream cli returns a clean 'done' with no token + no
-                 * tool calls + no todos, render a low-contrast placeholder so
-                 * the bubble isn't visually empty (looks like a render bug). */}
-                {!text && toolCalls.length === 0 && status === 'done' && !errorMessage && (
+                {/* Tools and intermediate output may have been moved into
+                 * the hosted process. An empty final projection is not an
+                 * empty response when that process or a child is visible. */}
+                {!text && !processContent && !thought && !Object.keys(subAgents ?? {}).length
+                  && toolCalls.length === 0 && status === 'done' && !errorMessage && (
                   <div className="kc-empty">
                     {t('forgeCard.emptyResponse')}
                   </div>
@@ -340,7 +345,7 @@ export function ForgeCard({
                 {orphanSubAgents.length > 0 && (
                   <div className="kc-orphan-subs">
                     {orphanSubAgents.map((sa) => (
-                      <SubAgentCard key={`orphan-${sa.emitterId}`} run={sa} parentAgentId={agentId ?? null} />
+                      <SubAgentCard key={`orphan-${sa.emitterId}`} run={sa} sid={sid} parentAgentId={agentId ?? null} />
                     ))}
                   </div>
                 )}
@@ -348,7 +353,7 @@ export function ForgeCard({
             );
           })()}
 
-          {errorMessage && <ExecutionFailure error={errorMessage} />}
+          {errorMessage && <ExecutionFailure error={errorMessage} continuation={failureContinuation} />}
 
           {(() => {
             // Prefer server-provided duration_ms (claude-code) over the local

@@ -935,8 +935,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       // Recover both flags when the durable terminal event was missed live.
       if (settledReplay) get().setStreaming(sid, agentPath, false);
 
-      // 多 tab 同步:回放后把 cursor 回填到「与当前连接同代的最大 seq」,让直播帧
-      // 与回放重叠的部分被 seq 闸丢弃(方案 §3.5)。
+      // Deduplicate the replayed agent only. A newer parent history page must
+      // not acknowledge older child events that this browser has never seen.
       try {
         const { currentWsSgen, noteAppliedSeq } = await import('../session-bridge');
         const wsSgen = currentWsSgen(sid);
@@ -947,7 +947,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             const evSeq = (ev as { seq?: unknown }).seq;
             if (evSgen === wsSgen && typeof evSeq === 'number' && evSeq > maxSeq) maxSeq = evSeq;
           }
-          if (maxSeq > 0) noteAppliedSeq(sid, wsSgen, maxSeq);
+          if (maxSeq > 0) noteAppliedSeq(sid, wsSgen, maxSeq, agentPath);
         }
       } catch { /* bridge unavailable (tests) — cursor backfill is best-effort */ }
     } catch (e) {

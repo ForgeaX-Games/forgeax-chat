@@ -1,6 +1,8 @@
+import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
+import { processWaitsForPermission } from './execution-status';
 import { Brain, ChevronDown, ChevronRight, CircleAlert, FileCog, MessageSquareText } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { useTranslation } from '@forgeax/interface/i18n';
+import { getLocale, useTranslation } from '@forgeax/interface/i18n';
 import { useTaskFlowUiStore } from '../../task-flow/ui-store';
 import type { ProcessEntry, ProcessTrace } from '../../task-flow/model';
 import { StepRow } from './StepRow';
@@ -22,6 +24,12 @@ export { formatDuration } from './process-display';
  * its entries, never as a sibling owned by an artifact or by a user message. */
 export function ProcessAccordion({ process, hasArtifact }: { process: ProcessTrace; hasArtifact: boolean }) {
   const { t } = useTranslation();
+  const pendingPermission = usePendingPermission(process.sid ?? null);
+  const waitingPermission = processWaitsForPermission(process, pendingPermission);
+  if (waitingPermission) process = { ...process, phase: 'waiting_for_input' };
+  const waitingLabel = waitingPermission
+    ? (getLocale() === 'zh' ? '等待授权' : 'Waiting for approval')
+    : t('taskFlow.processWaiting');
   const live = process.phase === 'running' || process.phase === 'waiting_for_input';
   const failed = process.phase === 'error' || process.phase === 'aborted';
   const openOverride = useTaskFlowUiStore((state) => state.openProcesses[process.id]);
@@ -40,7 +48,7 @@ export function ProcessAccordion({ process, hasArtifact }: { process: ProcessTra
   const duration = formatDuration(process.durationMs ?? Math.max(0, now - process.startedAt));
   const phaseLabel = process.phase === 'error' ? t('taskFlow.processError')
     : process.phase === 'aborted' ? t('taskFlow.processAborted')
-      : process.phase === 'waiting_for_input' ? t('taskFlow.processWaiting') : '';
+      : process.phase === 'waiting_for_input' ? waitingLabel : '';
 
   return (
     <section
@@ -64,7 +72,7 @@ export function ProcessAccordion({ process, hasArtifact }: { process: ProcessTra
           {t('taskFlow.workedFor', { duration })}
           {!live && phaseLabel ? ` · ${phaseLabel}` : ''}
         </span>
-        {live && <span className="tx-proc-mt">{process.phase === 'waiting_for_input' ? t('taskFlow.processWaiting') : t('taskFlow.processRunning')}</span>}
+        {live && <span className="tx-proc-mt">{process.phase === 'waiting_for_input' ? waitingLabel : t('taskFlow.processRunning')}</span>}
       </button>
 
       {open && (
@@ -198,7 +206,7 @@ function Entry({
     case 'tool':
       return <ToolEntry entry={entry} sid={sid} agentId={agentId} />;
     case 'subagent':
-      return <div className="tx-process-entry tx-process-subagent"><CircleAlert size={13} />{entry.agentId}</div>;
+      return <DelegatedEntry entry={entry} sid={sid} />;
     case 'todo_snapshot':
       return null;
   }
@@ -239,4 +247,17 @@ function ToolEntry({ entry, sid, agentId }: { entry: Extract<ProcessEntry, { kin
       <StepRow step={entry.step} open={open} onToggle={() => setOpen((value) => !value)} sid={sid} agentId={agentId} />
     </div>
   );
+}
+
+/** Parallel work has its own runtime status; the parent plan never determines it. */
+function DelegatedEntry({ entry, sid }: { entry: Extract<ProcessEntry, { kind: 'subagent' }>; sid?: string }) {
+  const pending = usePendingPermission(sid ?? null);
+  const zh = getLocale() === 'zh';
+  const status = entry.status === 'streaming'
+    ? pending?.agent === entry.agentId ? (zh ? '等待授权' : 'Waiting for approval') : (zh ? '执行中' : 'Running')
+    : entry.status === 'error' ? (zh ? '已中断' : 'Interrupted')
+      : entry.status === 'done' ? (zh ? '已结束' : 'Ended') : (zh ? '已委托' : 'Delegated');
+  return <div className="tx-process-entry tx-process-subagent"><CircleAlert size={13} />
+    <span>{zh ? '并行委托' : 'Parallel delegation'} · {entry.agentId} · {status}</span>
+  </div>;
 }

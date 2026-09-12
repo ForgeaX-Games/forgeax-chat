@@ -758,6 +758,7 @@ export function projectWorkTimeline(
         kind: 'subagent',
         id: `subagent:${agentId}`,
         agentId,
+        status: run?.status,
         ts: run?.startedAt ?? message.ts,
       });
     }

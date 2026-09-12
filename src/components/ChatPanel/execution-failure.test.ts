@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { executionFailureKind, executionFailureMessages } from './execution-failure';
+import { executionFailureKind, executionFailureMessages, failureContinuation } from './execution-failure';
 
 test('summarizes public validation errors even when a protocol envelope is truncated', () => {
   const text = 'protocol: tool "example_tool" failed 2 consecutive times: {"toolUseId":"call_x","isError":true,"content":"Invalid arguments for example_tool at $.params.operationId: value does not match pattern';
@@ -16,4 +16,13 @@ test('unknown or truncated diagnostics always get a short generic message', () =
   }
   expect(executionFailureKind('protocol: tool "example" failed 2 consecutive times: {')).toBe('protocol');
   expect(executionFailureKind('Turn interrupted')).toBe('interrupted');
+});
+
+
+test('continuation distinguishes later activity from an ongoing teammate', () => {
+  expect(failureContinuation([], false)).toBeUndefined();
+  expect(failureContinuation([], true)).toBe('teammates');
+  expect(failureContinuation(['streaming'], true)).toBe('working');
+  expect(failureContinuation(['done'], false)).toBe('resumed');
+  expect(failureContinuation(['error'], false)).toBe('resumed');
 });

@@ -102,6 +102,7 @@ export interface ToolResultMessage extends RendererMessageBase {
 }
 
 export interface SystemMessage extends RendererMessageBase {
+  delegation?: import('./delegation-status').DelegationSnapshot;
   kind: 'system';
   /** Stable public lifecycle row identity. */
   compactionId?: string;

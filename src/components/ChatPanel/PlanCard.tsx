@@ -1,4 +1,4 @@
-import { useTranslation } from '@forgeax/interface/i18n';
+import { getLocale, useTranslation } from '@forgeax/interface/i18n';
 import { CheckCircle2, CircleAlert, CirclePause, Loader2 } from 'lucide-react';
 import type { ProcessPhase, Task } from '../../task-flow/model';
 import { useAgentIdentities } from './agent-identity';
@@ -32,7 +32,7 @@ export function PlanCard({ tasks, phase, fallbackAgentId }: { tasks: Task[]; pha
         <span className="tx-plan-owner-name" style={owner ? { color: owner.accent } : undefined}>
           {owner?.name ?? 'FORGEAX'}
         </span>
-        <span className="tx-plan-owner-role">{t('taskFlow.planLabel')}</span>
+        <span className="tx-plan-owner-role">{getLocale() === 'zh' ? '当前执行计划' : 'Current execution plan'}</span>
         <span className={`tx-plan-owner-state is-${state}`}>
           {failed ? <CircleAlert size={14} />
             : settled ? <CheckCircle2 size={14} />

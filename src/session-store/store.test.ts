@@ -742,7 +742,8 @@ describe('chat store turn targeting regressions', () => {
     const requests: Array<{ provider: string; message: string }> = [];
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
-      if (url === '/api/skills') {
+      if (url.startsWith('/api/skills?sessionId=')) {
+        expect(new URL(url, 'http://localhost').searchParams.get('sessionId')).toBe(useShellStore.getState().activeSid);
         return new Response(JSON.stringify({
           skills: [{
             id: 'shared-kernel-smoke',

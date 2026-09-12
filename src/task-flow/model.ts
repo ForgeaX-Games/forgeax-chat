@@ -146,7 +146,7 @@ export type ProcessEntry =
   | { kind: 'thinking_summary'; id: string; text: string; ts: number; visibility: 'public_summary' }
   | { kind: 'assistant_intermediate'; id: string; text: string; ts: number }
   | { kind: 'tool'; id: string; step: Step; ts: number }
-  | { kind: 'subagent'; id: string; agentId: string; ts: number }
+  | { kind: 'subagent'; id: string; agentId: string; ts: number; status?: 'streaming' | 'done' | 'error' }
   | { kind: 'todo_snapshot'; id: string; items: TodoItem[]; ts: number };
 
 export interface ProcessTrace {

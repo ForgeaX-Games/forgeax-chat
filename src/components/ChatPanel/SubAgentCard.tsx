@@ -1,6 +1,7 @@
+import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
 import { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import { useTranslation } from '@forgeax/interface/i18n';
+import { getLocale, useTranslation } from '@forgeax/interface/i18n';
 import { useShellStore } from '@forgeax/interface/store';
 import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
 import type { SubAgentRun } from '../../session-store';
@@ -55,7 +56,7 @@ function profileFor(emitterId: string): { displayName: string; roleKey: string; 
   return { displayName: emitterId, roleKey: 'subAgent.role.fallback', color: 'var(--prim-color-neutral-450)', emoji: '🤖' };
 }
 
-export function SubAgentCard({ run, parentAgentId }: { run: SubAgentRun; parentAgentId?: string | null }) {
+export function SubAgentCard({ run, parentAgentId, sid }: { run: SubAgentRun; parentAgentId?: string | null; sid?: string }) {
   // Default collapsed for completed runs (replay history + finished live)
   // so long chat scrollbacks aren't dominated by sub-agent walls of text.
   // Streaming sub-agents stay expanded so the user can watch progress.
@@ -85,6 +86,8 @@ export function SubAgentCard({ run, parentAgentId }: { run: SubAgentRun; parentA
     ? `${fromName}拍了拍${toName}，并${patActionFor(`${run.emitterId}:${run.startedAt}`)}`
     : '';
   const isStreaming = run.status === 'streaming';
+  const pendingPermission = usePendingPermission(sid ?? null);
+  const waitingApproval = isStreaming && pendingPermission?.agent === run.emitterId;
   const emitterIdentity = identify(run.emitterId);
   const text = run.text ?? '';
   const { ordered, orphans } = partitionToolCalls(run.toolCalls);
@@ -127,7 +130,7 @@ export function SubAgentCard({ run, parentAgentId }: { run: SubAgentRun; parentA
           />
         )}
         <span className={`sac-status ${run.status}`}>
-          {isStreaming ? t('subAgent.status.running') : run.status === 'error' ? t('subAgent.status.error') : t('subAgent.status.done')}
+          {waitingApproval ? (getLocale() === 'zh' ? '等待授权' : 'Waiting for approval') : isStreaming ? t('subAgent.status.running') : run.status === 'error' ? t('subAgent.status.error') : t('subAgent.status.done')}
         </span>
         <span className="sac-tools">{run.toolCalls.length} tool calls</span>
       </button>

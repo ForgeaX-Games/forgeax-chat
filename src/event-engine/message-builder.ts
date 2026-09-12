@@ -460,6 +460,7 @@ export function makeInMemEffects(
       }
       const existing = msg.compactionId ? messages.findIndex(m => m.id === msg.compactionId) : -1;
       const systemMessage: ChatMessage = {
+        ...(msg.delegation ? { delegation: msg.delegation } : {}),
         id: msg.compactionId ?? newId(),
         role: 'system',
         text,

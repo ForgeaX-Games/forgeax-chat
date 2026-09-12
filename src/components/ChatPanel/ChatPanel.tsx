@@ -1,3 +1,6 @@
+import { DelegationCard } from './DelegationCard';
+import type { DelegationMessage } from '../../event-engine/delegation-status';
+import { failureContinuation } from './execution-failure';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ExternalLink, ArrowDown, ArrowLeft, ArrowRight, Undo2, ChevronDown, X } from 'lucide-react';
@@ -20,6 +23,7 @@ import {
   useChatStore,
   useActiveMessages,
   useActiveStreaming,
+  useActiveStreamingByAgent,
   useActivePendingRewind,
   useActiveRewindDirtyNotice,
   useActiveCheckpointMsgIds,
@@ -468,6 +472,7 @@ export function ChatPanel() {
     [host],
   );
   const messages = useActiveMessages();
+  const streamingByAgent = useActiveStreamingByAgent();
   const mainMessages = useMemo(() => messages.filter(message => !isAgentHandoff(message)), [messages]);
   const handoffMessages = useMemo(() => messages.filter(isAgentHandoff), [messages]);
   // The session's bound agent owns every turn it streams, so it is also the
@@ -988,7 +993,9 @@ export function ChatPanel() {
               ) : m.role === 'system' ? (
                 <div className={`msg-block sys-block${isRewound ? ' is-rewound' : ''}`}>
                   <div className="ts">{formatTs(m.ts)}</div>
-                  <SystemLine m={m} />
+                  {(m as DelegationMessage).delegation
+                    ? <DelegationCard snapshot={(m as DelegationMessage).delegation!} text={m.text} />
+                    : <SystemLine m={m} />}
                 </div>
               ) : (
                 <div className={`msg-block${isRewound ? ' is-rewound' : ''}`}>
@@ -1004,6 +1011,10 @@ export function ChatPanel() {
                     segments={projectedSegments}
                     subAgents={m.subAgents}
                     errorMessage={m.errorMessage}
+                    failureContinuation={m.errorMessage ? failureContinuation(
+                      mainMessages.slice(mainMessages.indexOf(m) + 1).filter(message => message.role === 'assistant').map(message => message.status),
+                      Boolean(activeAgentId ?? rootAgentId) && Object.entries(streamingByAgent).some(([agentId, running]) => running && agentId !== (activeAgentId ?? rootAgentId)),
+                    ) : undefined}
                     providerId={m.providerId}
                     cost={m.cost}
                     durationMs={m.durationMs}

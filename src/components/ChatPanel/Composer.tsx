@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useSyncExternalStore } from 'react';
 
 
-import { AtSign, SquareChartGantt, Upload, ChevronDown, ArrowUp, Unplug, Square, Zap, Pencil, Trash2 } from 'lucide-react';
+import { AtSign, SquareChartGantt, Upload, ChevronDown, ArrowUp, Unplug, Square, Pencil, Trash2 } from 'lucide-react';
 import { useTranslation, getLocale } from '@forgeax/interface/i18n';
 import { agentCatalogUrl } from '@forgeax/agents/lib/agent-api-url';
 import { useShellStore } from '@forgeax/interface/store';
@@ -1338,7 +1338,7 @@ export function Composer({
   const queueKey = activeSid && activeAgent ? `${activeSid}::${activeAgent}` : null;
   const queued = queueKey ? (queuedMessages[queueKey] ?? []) : [];
   // Interrupt-send is a forgeax-native primitive (EventQueue steer); the CLI
-  // bridge has no equivalent, so only offer it on the native path.
+  // bridge has no equivalent; queued-message send-now uses it only on the native path.
   const canInterrupt = isStreaming && (providerOverride === null || providerOverride === 'forgeax');
 
   const drainPendingFileReads = async (owner: ComposerOwner): Promise<boolean> => {
@@ -1443,15 +1443,6 @@ export function Composer({
     window.addEventListener(APP_EVENTS.resumeSend, onResume);
     return () => window.removeEventListener(APP_EVENTS.resumeSend, onResume);
   }, []);
-
-  // Interrupt the running turn and send `text` immediately (handoff: steer).
-  const onInterrupt = () => {
-    const t = text.trim();
-    if (!t) return;
-    clearComposerDraft(activeSid, activeAgent);
-    setText('');
-    void sendMessage(t, { handoff: 'steer', summonAgentId: resolvedSummonAgentIdRef.current });
-  };
 
   // Per-chip "send now" (↑): pull this queued message out of the queue and send
   // it immediately, jumping ahead of the rest. Mid-turn → steer-interrupt the
@@ -1606,7 +1597,7 @@ export function Composer({
         className="composer-input"
         placeholder={
           isStreaming
-            ? t('composer.placeholderStreaming') + (canInterrupt ? t('composer.placeholderStreamingInterrupt') : '')
+            ? t('composer.placeholderStreaming')
             : providerOverride
               ? `Type your game idea... [Enter] to send · [Ctrl/Shift+Enter] newline  →  via ${currentLabel}${overrideDown ? t('composer.placeholderOverrideDownSuffix') : ''}`
               : 'Type your game idea... [Enter] to send · [Ctrl/Shift+Enter] for a new line.'
@@ -1931,16 +1922,6 @@ export function Composer({
           )}
           {isStreaming ? (
             <>
-              {text.trim() && canInterrupt && (
-                <button
-                  className="cb-send cb-interrupt"
-                  title={t('composer.interruptTitle')}
-                  type="button"
-                  onClick={onInterrupt}
-                >
-                  <Zap size={14} />
-                </button>
-              )}
               {text.trim() && (
                 <button
                   className="cb-send cb-queue"

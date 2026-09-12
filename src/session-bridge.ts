@@ -242,28 +242,41 @@ let _desiredSid: string | null = null;
 // ─── 多 tab 同步:per-sid cursor (sgen, lastAppliedSeq) + resume-gap 缓冲 ────
 //
 // cursor 是「本 tab 已应用到哪」的水位:dispatch 每应用一条带 seq 的事件就推进;
-// WAL 回放 / turn-snapshot 应用后由调用方 noteAppliedSeq 回填。重连 URL 带
+// Only received live events advance the shared cursor. Reconnect URLs carry
 // since=<seq>&sgen=,server 从 ring buffer 补发;换代(sgen 变)= 全量恢复。
 
 interface SessionCursor { sgen: string; seq: number; }
 const _cursors = new Map<string, SessionCursor>();
+// A single agent's history is not a session-wide replay. Keep its watermark
+// separate so loading a parent cannot swallow a child's live terminal event.
+const _agentReplayCursors = new Map<string, Map<string, SessionCursor>>();
 /** 最近一次 hello 帧报的 server 会话代(per sid)。 */
 const _helloSgen = new Map<string, string>();
 /** resume-gap 期间缓冲的帧:全量恢复(WAL 重放)完成前不应用,避免被回放覆盖。 */
 const _gapBuffers = new Map<string, Array<SessionEvent | TurnSnapshotFrame>>();
 
 /** dispatch 入口幂等闸(§3.5):true = 应用,false = 重复帧丢弃。顺手推进 cursor。 */
-export function gateSessionEvent(sid: string, sgen?: string, seq?: number): boolean {
+export function gateSessionEvent(sid: string, sgen?: string, seq?: number, agentId?: string | null): boolean {
   if (typeof seq !== "number" || typeof sgen !== "string") return true; // 无 seq 旧事件,现状路径
   const cur = _cursors.get(sid);
-  if (!cur || cur.sgen !== sgen) { _cursors.set(sid, { sgen, seq }); return true; } // 换代即换 cursor
-  if (seq <= cur.seq) return false;
-  cur.seq = seq;
-  return true;
+  if (!cur || cur.sgen !== sgen) _cursors.set(sid, { sgen, seq });
+  else {
+    if (seq <= cur.seq) return false;
+    cur.seq = seq;
+  }
+  const replay = agentId ? _agentReplayCursors.get(sid)?.get(agentId) : undefined;
+  return !(replay?.sgen === sgen && seq <= replay.seq);
 }
 
-/** WAL 回放 / 快照应用后回填水位(只升不降;sgen 不同则换代)。 */
-export function noteAppliedSeq(sid: string, sgen: string, seq: number): void {
+/** Agent replay watermarks do not acknowledge the session-wide live stream. */
+export function noteAppliedSeq(sid: string, sgen: string, seq: number, agentId?: string): void {
+  if (agentId) {
+    const agents = _agentReplayCursors.get(sid) ?? new Map<string, SessionCursor>();
+    const previous = agents.get(agentId);
+    if (!previous || previous.sgen !== sgen || seq > previous.seq) agents.set(agentId, { sgen, seq });
+    _agentReplayCursors.set(sid, agents);
+    return;
+  }
   const cur = _cursors.get(sid);
   if (!cur || cur.sgen !== sgen) { _cursors.set(sid, { sgen, seq }); return; }
   if (seq > cur.seq) cur.seq = seq;

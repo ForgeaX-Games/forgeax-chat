@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { ProcessPhase, ProcessTrace } from '../../task-flow/model';
 import { tasksFromProcess } from '../../task-flow/process-tasks';
 
-mock.module('@forgeax/interface/i18n', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+mock.module('@forgeax/interface/i18n', () => ({ getLocale: () => 'en', useTranslation: () => ({ t: (key: string) => key }) }));
 mock.module('./agent-identity', () => ({ useAgentIdentities: () => () => undefined }));
 mock.module('./use-agent-thread', () => ({ useOpenAgentThread: () => () => {} }));
 mock.module('./AgentIdentityAvatar', () => ({ AgentIdentityAvatar: () => null }));

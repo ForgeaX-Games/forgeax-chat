@@ -13,7 +13,7 @@ export type FailureKind = 'validation' | 'interrupted' | 'protocol' | 'unknown';
  * Producer diagnostics may contain truncated JSON, so retain the text intact. */
 export function executionFailureKind(error: string): FailureKind {
   if (/"errorCategory"\s*:\s*"validation"|invalid (?:arguments|parameters)|validation (?:failed|error)|InputValidationError|value does not match pattern/i.test(error)) return 'validation';
-  if (/^(?:turn interrupted|turn aborted|request (?:cancelled|canceled)|execution interrupted)$/i.test(error.trim())) return 'interrupted';
+  if (/^(?:aborted by API|turn interrupted|turn aborted|request (?:cancelled|canceled)|execution interrupted)$/i.test(error.trim())) return 'interrupted';
   if (/^protocol:|"errorCategory"\s*:\s*"protocol"/i.test(error.trim())) return 'protocol';
   return 'unknown';
 }
@@ -21,7 +21,8 @@ export function executionFailureKind(error: string): FailureKind {
 const messages = {
   en: {
     validation: 'A tool request did not pass validation. This turn has stopped.',
-    interrupted: 'This execution was interrupted.',
+    interrupted: 'This turn was stopped.',
+    interruptedHelp: 'Completed work is preserved. You can continue in a later turn.',
     protocol: 'A tool could not complete its request. This turn has stopped.',
     unknown: 'This turn could not be completed.',
     validationHelp: 'Review the parameter details and correct the request or update the affected tool before continuing.',
@@ -34,7 +35,8 @@ const messages = {
   },
   zh: {
     validation: '工具请求未通过参数校验，本回合已停止。',
-    interrupted: '本回合已中断。',
+    interrupted: '本回合已停止。',
+    interruptedHelp: '已完成的工作已保留，可以在后续对话中继续。',
     protocol: '工具未能完成请求，本回合已停止。',
     unknown: '本回合未能完成。',
     validationHelp: '请查看详情中的参数信息，修正请求或更新相关工具后再继续。',

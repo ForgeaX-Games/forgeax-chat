@@ -22,7 +22,7 @@ export function PlanCard({ tasks, phase, fallbackAgentId }: { tasks: Task[]; pha
   const live = phase === 'running' || phase === 'waiting_for_input';
   const failed = phase === 'error' || phase === 'aborted';
   const state = failed ? 'stopped' : settled ? 'done' : live ? 'running' : 'stopped';
-  const title = t('taskFlow.planTitle', { count: tasks.length });
+  const title = getLocale() === 'zh' ? `${tasks.length} 项任务` : `${tasks.length} tasks`;
   const marker = String(tasks.length);
   const at = title.indexOf(marker);
   return (
@@ -34,7 +34,7 @@ export function PlanCard({ tasks, phase, fallbackAgentId }: { tasks: Task[]; pha
         </span>
         <span className="tx-plan-owner-role">{getLocale() === 'zh' ? '当前执行计划' : 'Current execution plan'}</span>
         <span className={`tx-plan-owner-state is-${state}`}>
-          {failed ? <CircleAlert size={14} />
+          {phase === 'aborted' ? <CirclePause size={14} /> : failed ? <CircleAlert size={14} />
             : settled ? <CheckCircle2 size={14} />
               : live ? <Loader2 size={14} className="spin" /> : <CirclePause size={14} />}
         </span>

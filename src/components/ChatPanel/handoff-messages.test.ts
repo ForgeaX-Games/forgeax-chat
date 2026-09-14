@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ChatMessage } from '../../session-store';
-import { isAgentHandoff, handoffNavigationTarget } from './handoff-messages';
+import { isAgentHandoff, handoffNavigationTarget, hasRunningHandoff } from './handoff-messages';
 import { messageReadSnapshot, unreadMessageCount } from './unread-messages';
 
 const handoff = (from: string, to: string) => ({
@@ -36,4 +36,16 @@ test('self messages and messages outside the visible thread offer no navigation'
   expect(handoffNavigationTarget(handoff('forge', 'suzu'), null)).toBeNull();
   expect(handoffNavigationTarget(handoff('forge', 'suzu'), 'audio-designer')).toBeNull();
   expect(handoffNavigationTarget({...handoff('forge', 'suzu'), level:'error'}, 'forge')).toBeNull();
+});
+
+test('Stop remains available for a live outgoing handoff, not unrelated or completed work', () => {
+  const sent = handoff('forge', 'suzu');
+  const returned = handoff('suzu', 'forge');
+  expect(hasRunningHandoff([sent], 'forge', { suzu: true })).toBe(true);
+  expect(hasRunningHandoff([sent], 'forge', { suzu: false })).toBe(false);
+  expect(hasRunningHandoff([sent], 'forge', { rin: true })).toBe(false);
+  expect(hasRunningHandoff([sent], 'suzu', { forge: true })).toBe(false);
+  expect(hasRunningHandoff([sent, returned], 'forge', { suzu: true })).toBe(false);
+  expect(hasRunningHandoff([sent, returned, sent], 'forge', { suzu: true })).toBe(true);
+  expect(hasRunningHandoff([sent], null, { suzu: true })).toBe(false);
 });

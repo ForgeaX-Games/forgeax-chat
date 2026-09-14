@@ -111,3 +111,17 @@ describe('live session stream visibility', () => {
     expect(text).toContain('服务暂时不可用');
   });
 });
+
+
+it('keeps runtime occupancy separate per agent and session, including after stop', () => {
+  useChatStore.getState().patchMessages(sid, 'forge', () => []);
+  for (const [owner, inputTokens] of [['forge', 156884], ['child', 63920]] as const) {
+    dispatchSessionEvent({ type: 'session-event', sid, emitterId: owner, event: {
+      type: 'context.usage', ts: 10, payload: { inputTokens, outputTokens: 292, contextWindow: 258400 },
+    } });
+  }
+  dispatch('hook:turnEnd', { aborted: true });
+  expect(useChatStore.getState().bySid[sid]?.contextByAgent.forge?.pct).toBe(61);
+  expect(useChatStore.getState().bySid[sid]?.contextByAgent.child?.pct).toBe(25);
+  expect(useChatStore.getState().readMessages(sid, 'forge')).toEqual([]);
+});

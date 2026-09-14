@@ -1,3 +1,4 @@
+import { AskUserBatch } from './message-parts/AskUserCard';
 import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
 import { processWaitsForPermission } from './execution-status';
 import { Brain, ChevronDown, ChevronRight, CircleAlert, FileCog, MessageSquareText } from 'lucide-react';
@@ -9,14 +10,11 @@ import { StepRow } from './StepRow';
 import { MarkdownView } from './MarkdownView';
 import { defaultProcessOpen } from './process-visibility';
 import { PlanCard } from './PlanCard';
-import { TaskCard } from './TaskCard';
-import { splitTodoProcessWindow, tasksFromProcess } from '../../task-flow/process-tasks';
-import { defaultStepOpen, defaultTodoExecutionOpen, formatDuration } from './process-display';
-import { AgentIdentityAvatar } from './AgentIdentityAvatar';
-import { useAgentIdentities } from './agent-identity';
+import { tasksFromProcess } from '../../task-flow/process-tasks';
+import { defaultStepOpen, formatDuration } from './process-display';
 
 import { ToolGroup } from './ToolGroup';
-import { canGroupTool, groupConsecutive } from './tool-groups';
+import { canGroupTool, canBatchAsk, groupProcessItems } from './tool-groups';
 
 export { formatDuration } from './process-display';
 
@@ -47,7 +45,7 @@ export function ProcessAccordion({ process, hasArtifact }: { process: ProcessTra
   const now = useProcessClock(live);
   const duration = formatDuration(process.durationMs ?? Math.max(0, now - process.startedAt));
   const phaseLabel = process.phase === 'error' ? t('taskFlow.processError')
-    : process.phase === 'aborted' ? t('taskFlow.processAborted')
+    : process.phase === 'aborted' ? (getLocale() === 'zh' ? '已停止' : 'stopped')
       : process.phase === 'waiting_for_input' ? waitingLabel : '';
 
   return (
@@ -77,9 +75,8 @@ export function ProcessAccordion({ process, hasArtifact }: { process: ProcessTra
 
       {open && (
         <div className="tx-proc-body">
-          {process.todo
-            ? <TodoProcess process={process} live={live} />
-            : <ProcessEntries entries={process.entries} process={process} live={live} />}
+          {process.todo && <PlanCard tasks={tasksFromProcess(process)} phase={process.phase} fallbackAgentId={process.agentIds[0]} />}
+          <ProcessEntries entries={process.entries.filter(entry => entry.kind !== 'todo_snapshot')} process={process} live={live} />
         </div>
       )}
     </section>
@@ -102,9 +99,12 @@ function useProcessClock(live: boolean): number {
 function ProcessEntries({ entries, process, live }: { entries: ProcessEntry[]; process: ProcessTrace; live: boolean }) {
   return entries.length ? (
     <div className="tx-process-entries">
-      {groupConsecutive(entries, entry => entry.kind === 'tool' && canGroupTool(entry.step)).map(group => {
+      {groupProcessItems(entries, entry => entry.kind === 'tool' ? entry.step : undefined).map(group => {
         const entry = group[0];
         const index = entries.indexOf(entry);
+        if (group.length > 1 && entry.kind === 'tool' && canBatchAsk(entry.step) && process.sid) return <AskUserBatch
+          key={entry.id} calls={group.flatMap(item => item.kind === 'tool' && item.step.tool ? [item.step.tool] : [])}
+          sid={process.sid} agentId={process.agentIds[0] ?? ''} />;
         if (entry.kind === 'tool' && canGroupTool(entry.step)) return <ToolGroup key={entry.id} steps={group.flatMap(item => item.kind === 'tool' ? [item.step] : [])}>{group.map(item => item.kind === 'tool' ? <ToolEntry key={item.id} entry={item} sid={process.sid} agentId={process.agentIds[0]} /> : null)}</ToolGroup>;
         return (
         <Entry
@@ -119,68 +119,6 @@ function ProcessEntries({ entries, process, live }: { entries: ProcessEntry[]; p
       ); })}
     </div>
   ) : null;
-}
-
-function TodoProcess({ process, live }: { process: ProcessTrace; live: boolean }) {
-  const window = splitTodoProcessWindow(process);
-  return (
-    <>
-      <ProcessEntries entries={window.before} process={process} live={live} />
-      <TodoExecution process={process} />
-      <ProcessEntries entries={window.after} process={process} live={live} />
-    </>
-  );
-}
-
-function TodoExecution({ process }: { process: ProcessTrace }) {
-  const { t } = useTranslation();
-  const tasks = tasksFromProcess(process);
-  const fallbackAgentId = process.agentIds[0];
-  const visibleTasks = tasks.filter((task) => task.steps.length > 0 || task.status === 'in_progress');
-  const live = process.phase === 'running' || process.phase === 'waiting_for_input';
-  const [open, setOpen] = useState(defaultTodoExecutionOpen(live));
-  const identify = useAgentIdentities();
-  useEffect(() => { setOpen(defaultTodoExecutionOpen(live)); }, [live]);
-  const stepCount = tasks.reduce((count, task) => count + task.steps.length, 0);
-  const duration = formatDuration(process.durationMs ?? Math.max(0, Date.now() - process.startedAt));
-  return (
-    <div className={`tx-todo-execution ${open ? 'is-open' : 'is-folded'}`} data-testid="todo-execution-flow">
-      <button
-        type="button"
-        className="tx-todo-toggle"
-        onClick={() => { if (!live) setOpen((value) => !value); }}
-        aria-expanded={open}
-        aria-disabled={live}
-      >
-        {!live && (open
-          ? <ChevronDown size={13} className="tx-todo-toggle-cv" aria-hidden="true" />
-          : <ChevronRight size={13} className="tx-todo-toggle-cv" aria-hidden="true" />)}
-        <span className="tx-todo-toggle-avatars" aria-hidden="true">
-          {(process.agentIds.length ? process.agentIds : ['forge']).slice(0, 3).map((agentId) => (
-            <span className="tx-todo-toggle-avatar-shell" key={agentId}>
-              <AgentIdentityAvatar identity={identify(agentId)} agentId={agentId} size={20} />
-            </span>
-          ))}
-        </span>
-        <span className="tx-todo-toggle-title">{t('taskFlow.process')}</span>
-        <span className="tx-todo-toggle-meta">{t('taskFlow.processMeta', { steps: stepCount, duration })}</span>
-      </button>
-      {open && (
-        <div className="tx-live-task-flow">
-          <PlanCard tasks={tasks} phase={process.phase} fallbackAgentId={fallbackAgentId} />
-          {visibleTasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              roundId={process.id}
-              fallbackAgentId={fallbackAgentId}
-              sid={process.sid}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function Entry({
@@ -199,6 +137,8 @@ function Entry({
   agentId?: string;
 }) {
   switch (entry.kind) {
+    case 'lifecycle_status':
+      return <div className="tx-process-entry" data-testid="process-lifecycle-status"><span>{entry.text}</span></div>;
     case 'thinking_summary':
       return <ThinkingEntry text={entry.text} active={active} durationMs={durationMs} />;
     case 'assistant_intermediate':
@@ -208,7 +148,7 @@ function Entry({
     case 'subagent':
       return <DelegatedEntry entry={entry} sid={sid} />;
     case 'todo_snapshot':
-      return null;
+      return <div className="tx-process-entry tx-process-detail">{entry.items.map((item, index) => <div key={item.id ?? index}>{item.status === 'completed' ? '✓ ' : '· '}{item.content}</div>)}</div>;
   }
 }
 

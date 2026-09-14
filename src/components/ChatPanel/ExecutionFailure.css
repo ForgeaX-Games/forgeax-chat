@@ -1,6 +1,11 @@
-.kc-execution-failure { display: block; min-width: 0; margin-top: 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, #f87171 30%, transparent); border-radius: 10px; background: color-mix(in srgb, #f87171 5%, transparent); }
-.kc-failure-summary { display: flex; align-items: flex-start; gap: 8px; }
-.kc-failure-summary svg { flex: none; margin-top: 3px; }
-.kc-execution-failure p { margin: 8px 0; color: var(--text-secondary, #aaa); font-size: 12px; }
-.kc-execution-failure summary { cursor: pointer; font-size: 12px; }
-.kc-execution-failure pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 10px 0 0; font-size: 11px; user-select: text; }
+.kc-execution-failure { display: block; min-width: 0; margin-top: 8px; padding: 8px 10px; border: 1px solid color-mix(in srgb, currentColor 12%, transparent); border-radius: 8px; background: color-mix(in srgb, currentColor 3%, transparent); color: var(--text-secondary, #aaa); }
+.kc-failure-summary { display: flex; align-items: center; gap: 7px; cursor: pointer; font-size: 12px; line-height: 1.5; list-style: none; }
+.kc-failure-summary::-webkit-details-marker { display: none; }
+.kc-failure-summary svg { flex: none; color: #bfa073; }
+.kc-failure-summary > span:first-of-type { flex: 1; min-width: 0; }
+.kc-failure-details-label { flex: none; font-size: 11px; opacity: .75; }
+.kc-execution-failure p { margin: 8px 0; font-size: 12px; }
+.kc-execution-failure pre { max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; font-size: 11px; user-select: text; }
+.kc-execution-failure summary:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+
+.kc-execution-failure[data-failure-kind="interrupted"] .kc-failure-summary svg { color: inherit; }

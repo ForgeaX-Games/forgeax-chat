@@ -483,7 +483,7 @@ export function projectTimeline(
 
 function processPhase(message: TaskFlowMessage): ProcessTrace['phase'] {
   if (message.turnAborted) return 'aborted';
-  if (hasPendingAskUser(message)) return 'waiting_for_input';
+  if (message.status === 'streaming' && hasPendingAskUser(message)) return 'waiting_for_input';
   if (message.status === 'streaming') return 'running';
   if (message.status === 'error') return 'error';
   return 'done';
@@ -693,12 +693,6 @@ export function projectWorkTimeline(
             }
             if (later.kind !== 'tool') continue;
             const laterTool = asToolCall(later.tool);
-            // Ask User is a hard conversation boundary. Prose introducing
-            // questions belongs with the Ask card, even when the same logical
-            // turn resumes later with Todo/file tools. Looking through Ask
-            // used to pull that intro into Process and hoist Worked-for above
-            // the answered decisions after refresh.
-            if (laterTool.name === 'ask_user') return false;
             if (laterTool.name !== 'deliver_summary') return true;
           }
           return false;
@@ -721,13 +715,10 @@ export function projectWorkTimeline(
         continue;
       }
       seenToolIds.add(tool.callId);
-      if (tool.name === 'ask_user') {
-        // Native Ask User is a conversation decision, not an execution step.
-        // Keep it in the ordinary response flow even when this turn also owns a
-        // Todo. That guarantees a pending card can never disappear inside either
-        // the Process accordion or Todo accordion. CLI permission prompts remain
-        // exclusively owned by PermissionPrompt.
-        if (tool.permissionPrompt === true) keep.delete(index);
+      // Native questions occupy their real tool position in the process.
+      // Permission prompts retain their separate, provider-owned lifecycle.
+      if (tool.name === 'ask_user' && tool.permissionPrompt === true) {
+        keep.delete(index);
         continue;
       }
       if (tool.name === 'todo_write') {

@@ -86,9 +86,9 @@ export function replayEvents(events: StoredEvent[], viewerId?: string): ReplayRe
     },
     onMeta: (m) => {
       if (m.session) sessionId = m.session;
-      // Match the live stream and store replay paths: zero/invalid usage must
-      // not erase the last positive context percentage.
-      if (m.contextPct !== undefined && m.contextPct > 0) contextPct = m.contextPct;
+      // Native zero is authoritative after compaction; an empty legacy usage
+      // report does not erase the last known occupancy.
+      if (m.contextPct !== undefined && (m.contextPct > 0 || m.contextUsage?.source === 'runtime')) contextPct = m.contextPct;
     },
   }, viewerId);
 

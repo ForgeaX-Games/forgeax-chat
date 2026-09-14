@@ -18,7 +18,7 @@ import { useTranslation } from '@forgeax/interface/i18n';
 import { useAgentAvatarRules } from '@forgeax/agents/components/AgentAvatarVideo/useAgentAvatarRules';
 import { useAgentAvatarState } from '@forgeax/agents/components/AgentAvatarVideo/useAgentAvatarState';
 import { statusLabelKeysFor } from './agentStatusLabels';
-import { executionStageLabelKey, type ExecutionStage } from './execution-stage';
+import { executionStageLabelKey, workingLabel, type ExecutionStage } from './execution-stage';
 
 const ROTATE_MS = 3600;
 
@@ -29,7 +29,7 @@ export function AgentStatusChip({
   agentId?: string | null;
   stage?: ExecutionStage;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const rules = useAgentAvatarRules(agentId ?? null);
   const stateName = useAgentAvatarState(agentId ?? null, rules);
   const labelKeys = statusLabelKeysFor(stateName);
@@ -52,7 +52,7 @@ export function AgentStatusChip({
   }, [labelKeys, stageKey]);
 
   if (stageKey) {
-    const text = t(stageKey);
+    const text = stage === 'unknown' ? workingLabel(i18n?.language) : t(stageKey);
     return (
       <span
         className="kc-statusword"

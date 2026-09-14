@@ -26,3 +26,8 @@ test('continuation distinguishes later activity from an ongoing teammate', () =>
   expect(failureContinuation(['done'], false)).toBe('resumed');
   expect(failureContinuation(['error'], false)).toBe('resumed');
 });
+
+test('explicit API cancellation is an interruption, not an unknown failure', () => {
+  expect(executionFailureKind('aborted by API')).toBe('interrupted');
+  expect(executionFailureKind('aborted by API: unexpected failure')).toBe('unknown');
+});

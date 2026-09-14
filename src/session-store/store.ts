@@ -27,6 +27,7 @@
  *  override) are read on demand from `useShellStore.getState()`. This store never
  *  writes the registry; the registry never writes messages.
  */
+import { latestContextUsage, type ContextUsage } from '../event-engine/context-usage';
 import { create } from 'zustand';
 import { t } from '@/i18n';
 import {
@@ -62,7 +63,7 @@ import {
   type MessageEffects,
 } from '../event-engine/message-builder';
 import { normalizeToolCall } from '../event-engine/tool-name';
-import { hasPendingAskUser } from '../task-flow/ask-user-protocol';
+import { closePendingAsk } from '../task-flow/ask-user-protocol';
 import type { StoredEvent, ToolCallMessage } from '../event-engine/types';
 import type { ArtifactSummary } from '@forgeax/types/artifact-summary';
 
@@ -233,8 +234,8 @@ export interface ConvSlice {
   messagesByAgent: Record<string, ChatMessage[]>;
   /** Per-agent streaming flags. */
   streamingByAgent: Record<string, boolean>;
-  /** Context-window fill ratio (0..1) for the session. */
-  contextPct: number;
+  /** Context occupancy (0..100), scoped to the emitting agent. */
+  contextByAgent: Record<string, ContextUsage>;
   /** Currently in-flight server-side `Run.id` (cli-provider path). */
   runId: string | null;
   pendingRewind: PendingRewind | null;
@@ -246,7 +247,7 @@ export interface ConvSlice {
 const EMPTY_CONV: ConvSlice = {
   messagesByAgent: {},
   streamingByAgent: {},
-  contextPct: 0,
+  contextByAgent: {},
   runId: null,
   pendingRewind: null,
   rewindDirtyNotice: null,
@@ -717,7 +718,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       const messages: ChatMessage[] = [];
       let replayTimestamp = 0;
       const replayEffects = makeInMemEffects(messages, newId, () => replayTimestamp);
-      let replayContextPct = 0;
+      let replayContextUsage: ContextUsage | undefined;
       const mainCbs = buildMainCallbacks(replayEffects);
       let curPid: string | undefined;
       const acc = new TurnAccumulator({
@@ -745,10 +746,10 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             replayEffects.applyMain((m) => ({ ...m, segments: upsertToolSegment(m.segments ?? [], merged.timestamp ?? replayTimestamp, tc) }));
           }
         },
-        // Match the live stream path: a zero/invalid usage report must not
-        // erase the last valid context percentage from the replay.
+        // Native zero is valid after compaction; invalid estimates are ignored
+        // by the accumulator, just as they are in the live path.
         onMeta: (m) => {
-          if (m.contextPct !== undefined && m.contextPct > 0) replayContextPct = m.contextPct;
+          if (m.contextUsage) replayContextUsage = latestContextUsage(replayContextUsage, m.contextUsage);
         },
         onTurn: (turn) => {
           mainCbs.onTurn?.(turn);
@@ -796,21 +797,20 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         const turnPayload = ev.type === 'hook:turnEnd'
           ? ev.payload as Record<string, unknown> | undefined
           : undefined;
-        const currentAssistant = lastAssistant();
+        // Only an explicit host wait keeps a turn open. An unresolved card
+        // cannot override a terminal event: its pending handle may be gone.
         const pendingAskBeforeFeed = ev.type === 'hook:turnEnd'
-          && ownAgentEvent
-          && !turnPayload?.error
-          && turnPayload?.aborted !== true
-          && (turnPayload?.waitingForInput === true || (currentAssistant
-            ? hasPendingAskUser([
-              ...currentAssistant.toolCalls,
-              ...(currentAssistant.segments?.flatMap((segment) => segment.kind === 'tool' ? [segment.tool] : []) ?? []),
-            ])
-            : false));
-        // TurnAccumulator treats a normal turn-end as a seal boundary. A
-        // provider may omit waitingForInput, so do not feed that boundary
-        // while the Ask User call is still unresolved.
+          && ownAgentEvent && !turnPayload?.error
+          && turnPayload?.aborted !== true && turnPayload?.waitingForInput === true;
         if (!pendingAskBeforeFeed) acc.feed(ev);
+        if (ev.type === 'hook:turnEnd' && ownAgentEvent && !pendingAskBeforeFeed) {
+          const ended = lastAssistant();
+          if (ended) {
+            ended.toolCalls = ended.toolCalls.map(closePendingAsk);
+            ended.segments = ended.segments?.map(segment => segment.kind === 'tool'
+              ? { ...segment, tool: closePendingAsk(segment.tool) } : segment);
+          }
+        }
 
         const tail = lastAssistant();
         if (ev.type === 'hook:turnStart' && ownAgentEvent) {
@@ -926,7 +926,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             [sid]: {
               ...conv,
               messagesByAgent: { ...conv.messagesByAgent, [agentPath]: merged },
-              contextPct: replayContextPct > 0 ? replayContextPct : conv.contextPct,
+              contextByAgent: replayContextUsage ? { ...conv.contextByAgent, [agentPath]: latestContextUsage(conv.contextByAgent[agentPath], replayContextUsage) } : conv.contextByAgent,
             },
           },
         };
@@ -1632,12 +1632,18 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
     const isMain = (eid: unknown): boolean => !eid || eid === agentId || (agentId === 'forgeax' && eid === 'admin');
     const liveEffects: MessageEffects = { applyMain: patchAsst, applySub: patchSub };
-    const mainAcc = new TurnAccumulator(buildMainCallbacks(liveEffects), agentId);
+    const contextMetaFor = (owner: string) => (meta: { contextUsage?: ContextUsage }) => {
+      const conv = get().bySid[startSid];
+      if (conv && meta.contextUsage) get().patchConv(startSid, {
+        contextByAgent: { ...conv.contextByAgent, [owner]: latestContextUsage(conv.contextByAgent[owner], meta.contextUsage) },
+      });
+    };
+    const mainAcc = new TurnAccumulator({ ...buildMainCallbacks(liveEffects), onMeta: contextMetaFor(agentId) }, agentId);
     const subAccs = new Map<string, TurnAccumulator>();
     const getSubAcc = (eid: string): TurnAccumulator => {
       const existing = subAccs.get(eid);
       if (existing) return existing;
-      const acc = new TurnAccumulator(buildSubCallbacks(eid, liveEffects), eid);
+      const acc = new TurnAccumulator({ ...buildSubCallbacks(eid, liveEffects), onMeta: contextMetaFor(eid) }, eid);
       subAccs.set(eid, acc);
       return acc;
     };
@@ -2004,14 +2010,21 @@ export function useActiveStreaming(): boolean {
   const sid = useActiveSid();
   const agentId = useActiveAgentId();
   const chatBusy = useChatStore((s) =>
-    sid && agentId ? Boolean(s.bySid[sid]?.streamingByAgent[agentId]) : false);
+    sid && agentId ? Boolean(s.bySid[sid]?.streamingByAgent[agentId]
+      || s.bySid[sid]?.messagesByAgent[agentId]?.slice().reverse().find(message => message.role === 'assistant')?.status === 'streaming') : false);
   const shellBusy = useShellStore((s) =>
     sid && agentId ? Boolean(s.busyByAgentBySid[sid]?.[agentId]) : false);
   return Boolean(chatBusy || shellBusy);
 }
+export function useActiveContextUsage(): ContextUsage | undefined {
+  const sid = useActiveSid();
+  const agentId = useActiveAgentId();
+  return useChatStore((s) => sid && agentId ? s.bySid[sid]?.contextByAgent[agentId] : undefined);
+}
 export function useActiveContextPct(): number {
   const sid = useActiveSid();
-  return useChatStore((s) => (sid ? s.bySid[sid]?.contextPct ?? 0 : 0));
+  const agentId = useActiveAgentId();
+  return useChatStore((s) => (sid && agentId ? s.bySid[sid]?.contextByAgent[agentId]?.pct ?? 0 : 0));
 }
 export function useActivePendingRewind(): PendingRewind | null {
   const sid = useActiveSid();

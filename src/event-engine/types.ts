@@ -106,6 +106,7 @@ export interface SystemMessage extends RendererMessageBase {
   kind: 'system';
   /** Stable public lifecycle row identity. */
   compactionId?: string;
+  turnId?: string;
   source: string;
   text: string;
   visualDisplay?: string;

@@ -1,3 +1,4 @@
+import { askRequestId } from './message-parts/ask-user-batch';
 import type { Step } from '../../task-flow/model';
 
 export function canGroupTool(step: Step): boolean {
@@ -35,4 +36,22 @@ export function toolGroupLabel(steps: Step[], t: Translate): string {
   if (counts.size > 2 || counts.has('unknown')) return base;
   // Count calls, not files: repeated reads and missing paths stay truthful.
   return [...counts].map(([kind, count]) => t(`taskFlow.${kind}`, { count })).join(t('taskFlow.groupSeparator'));
+}
+
+export function canBatchAsk(step: Step): boolean {
+  return step.tool?.name === 'ask_user' && !!askRequestId(step.tool);
+}
+
+/** Keep tool summaries and input requests in separate consecutive groups. */
+export function groupProcessItems<T>(items: T[], stepOf: (item: T) => Step | undefined): T[][] {
+  const groups: T[][] = [];
+  let previous = '';
+  for (const item of items) {
+    const step = stepOf(item);
+    const kind = step && canBatchAsk(step) ? 'ask' : step && canGroupTool(step) ? 'tool' : '';
+    if (kind && kind === previous) groups[groups.length - 1].push(item);
+    else groups.push([item]);
+    previous = kind;
+  }
+  return groups;
 }

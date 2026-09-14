@@ -6,7 +6,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
-import { useTranslation } from '@forgeax/interface/i18n';
+import { getLocale, useTranslation } from '@forgeax/interface/i18n';
 import { STRONG_REFLECTION_RE, SOFT_REFLECTION_RE, STRONG_CORR_RE } from './reflection-i18n';
 
 // Copy-on-hover button for fenced code blocks. Tries the async clipboard
@@ -29,6 +29,23 @@ function copyToClipboard(text: string): Promise<boolean> {
       return ok;
     } catch { return false; }
   }
+}
+
+/** Local references must not navigate the browser to /Users/you or C:/... . */
+function MessageLink({ href, label }: { href: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const zh = getLocale() === 'zh';
+  if (/^(?:https?:|mailto:|#)/i.test(href)) return <a href={href} target="_blank" rel="noreferrer">{label}</a>;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^(?:file:|[a-z]:[\\/])/i.test(href)) return <span>{label}</span>;
+  return <span className="md-file-reference">
+    <button type="button" className="md-file-link" title={`${zh ? '复制文件路径' : 'Copy file path'}: ${href}`}
+      onClick={async () => { const ok = await copyToClipboard(href); setCopied(ok); setFailed(!ok); }}>
+      {label}<span aria-hidden="true"> ⧉</span>
+    </button>
+    {copied && <span role="status">{zh ? '已复制路径' : 'Path copied'}</span>}
+    {failed && <code>{href}</code>}
+  </span>;
 }
 
 function CodeBlock({ lang, body }: { lang: string; body: string }) {
@@ -313,7 +330,7 @@ function renderInline(text: string, keyPrefix = ''): (string | ReactElement)[] {
     } else if (m[8] !== undefined) {
       out.push(<code key={`c${k}`} className="md-inline-code">{m[8]}</code>);
     } else if (m[9] !== undefined) {
-      out.push(<a key={`a${k}`} href={m[10]} target="_blank" rel="noreferrer">{m[9]}</a>);
+      out.push(<MessageLink key={`a${k}`} href={m[10]} label={m[9]} />);
     }
     last = re.lastIndex;
   }

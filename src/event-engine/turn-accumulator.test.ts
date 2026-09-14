@@ -43,3 +43,47 @@ describe('chat context usage ratio', () => {
     expect(replayEvents([event(1, 735_000), event(2, 0)]).contextPct).toBe(70);
   });
 });
+
+
+describe('runtime context occupancy replay', () => {
+  const native = (ts: number, inputTokens: number, emitterId = 'forge'): StoredEvent => ({
+    type: 'context.usage', emitterId, ts,
+    payload: { inputTokens, outputTokens: 292, contextWindow: 258400 },
+  });
+  it('preserves actual native occupancy through cancellation and ignores cumulative-model estimates', () => {
+    expect(replayEvents([
+      native(10, 156884),
+      { type: 'hook:assistantMessage', emitterId: 'forge', ts: 11, payload: {
+        model: 'gpt-5.6-luna', usage: { inputTokens: 4_600_000, outputTokens: 10000 },
+        llmMessage: { role: 'assistant', content: 'done' },
+      } },
+      { type: 'hook:turnEnd', emitterId: 'forge', ts: 12, payload: { aborted: true } },
+    ], 'forge').contextPct).toBe(61);
+  });
+  it('isolates child occupancy and accepts a reduced value after compaction', () => {
+    expect(replayEvents([native(10, 156884), native(11, 63920, 'child')], 'forge').contextPct).toBe(61);
+    expect(replayEvents([native(10, 156884), native(12, 0)], 'forge').contextPct).toBe(0);
+  });
+  it('rejects malformed windows and stale occupancy', () => {
+    expect(replayEvents([
+      native(10, 156884), native(9, 0),
+      { ...native(11, 10), payload: { inputTokens: 10, outputTokens: 1, contextWindow: 0 } },
+    ], 'forge').contextPct).toBe(61);
+  });
+});
+
+describe('context occupancy across kernel switches', () => {
+  const codex = (ts: number): StoredEvent => ({ type: 'context.usage', emitterId: 'forge', ts,
+    payload: { kernelId: 'codex', inputTokens: 156884, outputTokens: 292, contextWindow: 258400 } });
+  const estimate = (ts: number, kernelId: string): StoredEvent => ({ type: 'hook:assistantMessage', emitterId: 'forge', ts,
+    payload: { kernelId, model: 'deepseek-v4-flash', usage: { inputTokens: 26641, outputTokens: 116 },
+      llmMessage: { role: 'assistant', content: 'continued' } } });
+  it('replaces Codex occupancy with the new core estimate and accepts Codex again', () => {
+    expect(replayEvents([codex(1), estimate(2, 'forgeax-core')], 'forge').contextPct).toBe(3);
+    expect(replayEvents([codex(1), estimate(2, 'forgeax-core'), codex(3)], 'forge').contextPct).toBe(61);
+  });
+  it('keeps authoritative occupancy within one kernel and rejects stale other-kernel events', () => {
+    expect(replayEvents([codex(2), estimate(3, 'codex')], 'forge').contextPct).toBe(61);
+    expect(replayEvents([codex(2), estimate(1, 'forgeax-core')], 'forge').contextPct).toBe(61);
+  });
+});

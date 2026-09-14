@@ -563,7 +563,7 @@ describe('projectWorkTimeline', () => {
     assert.deepEqual(result.processesById['turn-1']?.entries.map((entry) => entry.kind), ['tool']);
   });
 
-  it('keeps Ask User ordinary while preceding work remains in Worked-for without todo', () => {
+  it('keeps pending Ask User at its execution position after preceding work', () => {
     const pendingAsk = {
       ...tool('ask_user', 'ask-1', {
         question: 'Choose a direction',
@@ -579,14 +579,14 @@ describe('projectWorkTimeline', () => {
     assistant.durationMs = 4_000;
 
     const result = projectWorkTimeline([assistant]);
-    assert.deepEqual(result.processesById['turn-ask']?.entries.map((entry) => entry.kind), ['tool']);
+    assert.deepEqual(result.processesById['turn-ask']?.entries.map((entry) => entry.kind), ['tool', 'tool']);
     assert.deepEqual(result.timeline, [
       { kind: 'process', processId: 'turn-ask' },
-      { kind: 'message', messageId: 'a1', segmentIndexes: [1] },
+      { kind: 'message', messageId: 'a1', segmentIndexes: [] },
     ]);
   });
 
-  it('keeps an answered Ask User in the ordinary message flow without todo_write', () => {
+  it('keeps answered Ask User at the same execution position', () => {
     const answeredAsk = {
       ...tool('ask_user', 'ask-1', {
         question: 'Choose a direction',
@@ -602,14 +602,14 @@ describe('projectWorkTimeline', () => {
     assistant.durationMs = 4_000;
 
     const result = projectWorkTimeline([assistant]);
-    assert.deepEqual(result.processesById['turn-ask-done']?.entries.map((entry) => entry.kind), ['tool']);
+    assert.deepEqual(result.processesById['turn-ask-done']?.entries.map((entry) => entry.kind), ['tool', 'tool']);
     assert.deepEqual(result.timeline, [
       { kind: 'process', processId: 'turn-ask-done' },
-      { kind: 'message', messageId: 'a1', segmentIndexes: [1] },
+      { kind: 'message', messageId: 'a1', segmentIndexes: [] },
     ]);
   });
 
-  it('keeps Ask User visible outside Execution process when the same turn uses todo_write', () => {
+  it('keeps Ask User inside the process when the same turn uses todo_write', () => {
     const pendingAsk = {
       ...tool('ask_user', 'ask-in-todo', {
         question: 'Choose implementation',
@@ -626,14 +626,14 @@ describe('projectWorkTimeline', () => {
     const result = projectWorkTimeline([assistant]);
     const process = result.processesById['turn-todo-ask'];
     assert.equal(process?.phase, 'waiting_for_input');
-    assert.deepEqual(process?.entries.map((entry) => entry.kind), ['todo_snapshot']);
+    assert.deepEqual(process?.entries.map((entry) => entry.kind), ['todo_snapshot', 'tool']);
     assert.deepEqual(result.timeline, [
       { kind: 'process', processId: 'turn-todo-ask' },
-      { kind: 'message', messageId: 'a1', segmentIndexes: [1] },
+      { kind: 'message', messageId: 'a1', segmentIndexes: [] },
     ]);
   });
 
-  it('keeps pre-Ask model prose with Ask and starts Process after the answered decision', () => {
+  it('keeps question introduction and resumed work in chronological order', () => {
     const answeredAsk = {
       ...tool('ask_user', 'ask-before-work', {
         question: 'Choose a direction',
@@ -653,11 +653,13 @@ describe('projectWorkTimeline', () => {
     const result = projectWorkTimeline([assistant]);
     assert.deepEqual(result.processesById['turn-ask-then-work']?.entries.map((entry) => entry.kind), [
       'assistant_intermediate',
+      'tool',
+      'assistant_intermediate',
       'todo_snapshot',
     ]);
     assert.deepEqual(result.timeline, [
       { kind: 'process', processId: 'turn-ask-then-work' },
-      { kind: 'message', messageId: 'a1', segmentIndexes: [0, 1, 4] },
+      { kind: 'message', messageId: 'a1', segmentIndexes: [4] },
     ]);
   });
 

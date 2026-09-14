@@ -2,12 +2,8 @@
  * TurnAccumulator — pure-logic state machine for building CompletedTurn[]
  * from a stream of StoredEvent records.
  *
- * Ported from @forgeax/orchestrator's `src/channels/ink-renderer/lib/turn-accumulator.ts`
- * with one web adaptation: the original ContextRing dependency (an ink-only
- * ANSI status bar widget) is replaced by a small inline `ratioFromAssistantMessage`
- * helper backed by a hardcoded model→contextWindow map. The UI calls
- * `onMeta({ contextPct })` exactly the same way as before; only the source of
- * the contextWindow lookup changed.
+ * Runtime context.usage events provide authoritative occupancy. Historical
+ * assistant usage falls back to the model table only until native facts arrive.
  *
  * Both replay (batch) and live (incremental) paths use the same instance,
  * differing only in which callbacks they provide:
@@ -19,6 +15,7 @@
  * accumulator only handles message/turn assembly and streaming.
  */
 
+import { contextKernelId, runtimeContextUsage, latestContextUsage, type ContextUsage } from './context-usage';
 import type {
   StoredEvent,
   CompletedTurn,
@@ -31,20 +28,9 @@ import { SubagentCallIndex, handleSubagentEvent } from './subagent-events';
 
 // ── Inline context-window lookup ──
 //
-// Replaces ink-renderer's ContextRing.ratioFromAssistantMessage which called
-// the framework's getModelSpec(). For the web UI we maintain a small static
-// map; unknown models fall back to 200k (claude-tier default). Model ids often
-// carry provider/tier suffixes (for example `gpt-5.6-sol`), so resolution below
-// is exact-first and then prefix-aware rather than exact-only. Future
-// improvement: ship the contextWindow on the hook:assistantMessage payload
-// itself so the UI doesn't need to maintain this table.
-// 2026-06-02 — values mirror the SSOT catalog (~/.forgeax/key/models.json ::
-// <model>.contextWindow). The previous table hard-coded the whole opus line at
-// 200000 AND omitted opus-4-8 / 4-7 entirely (→ they fell through to the 200k
-// default). The current opus/sonnet families are 1M-token windows, so the ring
-// read 200k/200k = 100% while the model was really at 200k/1M = 20%: it pinned
-// at 100% yet kept chatting fine, and auto-compaction (85% of the *real* window)
-// never fired. Keep new models in sync with models.json.
+// Legacy fallback for providers and historical ledgers without context.usage.
+// Native runtime events always override this estimate; never infer a native
+// kernel's active context window from its public model name.
 const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'claude-opus-4-8': 1000000,
   'claude-opus-4-7': 1000000,
@@ -98,24 +84,27 @@ function safeTokenCount(value: number | undefined): number {
  * over-limit provider report is rendered as full rather than leaking values
  * such as 366% into the composer and SVG dash math. */
 function contextRatioFromUsage(
-  usage: { inputTokens?: number; outputTokens?: number },
+  usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number },
   model: unknown,
 ): number {
-  const total = safeTokenCount(usage.inputTokens) + safeTokenCount(usage.outputTokens);
+  // Normalized gateway usage reports uncached input separately from cache reads/writes.
+  // Driver occupancy, when present, remains authoritative over this estimate.
+  const total = safeTokenCount(usage.inputTokens) + safeTokenCount(usage.outputTokens) +
+    safeTokenCount(usage.cacheReadTokens) + safeTokenCount(usage.cacheWriteTokens);
   const cw = contextWindowForModel(model);
   if (!(cw > 0)) return 0;
   return Math.min(1, total / cw);
 }
 
 export function ratioFromUsage(
-  usage: { inputTokens?: number; outputTokens?: number },
+  usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number },
   model: unknown,
 ): number {
   return Math.round(contextRatioFromUsage(usage, model) * 100);
 }
 
 function ratioFromAssistantMessage(payload: Record<string, unknown>): number | null {
-  const usage = payload.usage as { inputTokens?: number; outputTokens?: number } | undefined;
+  const usage = payload.usage as { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number } | undefined;
   const model = payload.model;
   if (!usage || !model) return null;
   return contextRatioFromUsage(usage, model);
@@ -131,7 +120,7 @@ export interface TurnAccCallbacks {
   /** A tool_call was updated in-place with its result (live mode). */
   onUpdateMessage?(callId: string, merged: RendererMessage): void;
   /** Metadata changed (session label, context usage, thinking state). */
-  onMeta?(meta: { session?: string; contextPct?: number; thinking?: boolean }): void;
+  onMeta?(meta: { session?: string; contextPct?: number; contextUsage?: ContextUsage; thinking?: boolean }): void;
   /** Streaming text chunk. */
   onStreamText?(text: string): void;
   /** Streaming thinking chunk. */
@@ -157,6 +146,7 @@ export class TurnAccumulator {
   private turnTs = 0;
   private streamText = '';
   private thinkingText = '';
+  private contextUsage?: ContextUsage;
 
   /** subagentId → callId mapping for background subagent result merging. */
   private subagentCallIndex = new SubagentCallIndex();
@@ -197,6 +187,16 @@ export class TurnAccumulator {
     const emitter = event.emitterId ?? event.source ?? '';
     const payload = (event.payload ?? {}) as Record<string, unknown>;
 
+    if (event.type === 'context.usage') {
+      if (this.viewerId && event.emitterId && event.emitterId !== this.viewerId) return;
+      const usage = runtimeContextUsage(payload, event.ts ?? 0);
+      if (usage) {
+        this.contextUsage = latestContextUsage(this.contextUsage, usage);
+        this.cb.onMeta?.({ contextPct: this.contextUsage.pct, contextUsage: this.contextUsage });
+      }
+      return;
+    }
+
     switch (event.type) {
       case 'hook:turnStart':
         this.commitPending();
@@ -227,8 +227,9 @@ export class TurnAccumulator {
           this.cb.onResetStreaming?.();
         }
         const ratio = ratioFromAssistantMessage(payload);
-        if (ratio !== null) {
-          this.cb.onMeta?.({ contextPct: Math.round(ratio * 100) });
+        if (ratio !== null && ratio > 0 && (!this.viewerId || !event.emitterId || event.emitterId === this.viewerId)) {
+          this.contextUsage = latestContextUsage(this.contextUsage, { pct: Math.round(ratio * 100), source: 'estimate', ts: event.ts ?? 0, kernelId: contextKernelId(payload) });
+          this.cb.onMeta?.({ contextPct: this.contextUsage.pct, contextUsage: this.contextUsage });
         }
         break;
       }

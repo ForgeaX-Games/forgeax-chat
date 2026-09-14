@@ -12,6 +12,7 @@ import { formatDelegationStatus } from '../event-engine/delegation-status';
  *  Moved out of `@forgeax/interface/src/lib` when message ownership moved to Chat:
  *  the event→message translator had to follow because Interface may not import Chat.
  */
+import { contextKernelId, runtimeContextUsage, latestContextUsage } from '../event-engine/context-usage';
 import {
   useShellStore,
   type ChatMessage,
@@ -30,12 +31,12 @@ import {
   type TurnSnapshotFrame,
 } from '../session-bridge';
 import { ratioFromUsage } from '../event-engine/turn-accumulator';
-import { formatCompactionStatus } from '../event-engine/compaction-status';
+import { formatCompactionStatus, formatContextReload } from '../event-engine/compaction-status';
 import { isChatMessageEvent } from '../event-engine/chat-visibility';
 import { mergeToolResult } from '../event-engine/tool-result';
 import { inferToolNameFromResult, normalizeHookToolCall } from '../event-engine/event-formatter';
 import { normalizeToolCall } from '../event-engine/tool-name';
-import { hasPendingAskUser } from '../task-flow/ask-user-protocol';
+import { closePendingAsk } from '../task-flow/ask-user-protocol';
 import { chatFirstToken, chatToolResult, chatTurnEnd } from '@forgeax/interface/lib/trace';
 import { reportPassiveFeedbackSignal } from '@forgeax/interface/lib/passive-feedback';
 import { t } from '@/i18n';
@@ -481,7 +482,7 @@ function activeAgentForSid(sid: string): string | null {
 function pushSystemMessage(
   sid: string,
   agentId: string | null,
-  patch: { delegation?: import('../event-engine/delegation-status').DelegationSnapshot; text: string; compactionId?: string; level?: SystemLevel; direction?: SystemDirection; source?: string; from?: string; to?: string; ts: number },
+  patch: { delegation?: import('../event-engine/delegation-status').DelegationSnapshot; text: string; compactionId?: string; turnId?: string; level?: SystemLevel; direction?: SystemDirection; source?: string; from?: string; to?: string; ts: number },
 ): void {
   if (!patch.text) return;
   const targetAgent = agentId ?? activeAgentForSid(sid);
@@ -491,6 +492,7 @@ function pushSystemMessage(
   if (last && last.role === 'system' && (!patch.compactionId || last.id === patch.compactionId) && last.text === patch.text && last.level === patch.level && last.direction === patch.direction) return;
   const sysMsg: ChatMessage = {
     ...(patch.delegation ? { delegation: patch.delegation } : {}),
+    turnId: patch.turnId,
     id: patch.compactionId ?? `sys-${patch.ts}-${Math.random().toString(36).slice(2, 8)}`,
     role: 'system',
     text: patch.text,
@@ -560,6 +562,21 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
   if (visible && (type === 'delegation:state' || (type === 'message' && payload.resumeRequired === true))) {
     const message = formatDelegationStatus({ ...event, emitterId: emitter ?? undefined });
     if (message) pushSystemMessage(sid, typeof event.to === 'string' ? event.to : emitter, { ...message, ts: message.timestamp });
+    return;
+  }
+
+  if (type === 'context.usage') {
+    const usage = runtimeContextUsage(payload, ts);
+    const conv = useChatStore.getState().bySid[sid];
+    if (emitter && usage && conv) useChatStore.getState().patchConv(sid, {
+      contextByAgent: { ...conv.contextByAgent, [emitter]: latestContextUsage(conv.contextByAgent[emitter], usage) },
+    });
+    return;
+  }
+
+  if (type === 'kernel_history_applied') {
+    const message = visible ? formatContextReload({ ...event, emitterId: emitter ?? undefined }) : null;
+    if (message) pushSystemMessage(sid, emitter, { ...message, ts: message.timestamp });
     return;
   }
 
@@ -873,20 +890,14 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
   if (type === 'hook:turnEnd') {
     const p = payload as HookTurnEndPayload;
     if (!emitter) return;
-    // A provider may emit a turn-end while ask_user is still waiting. This is
-    // a lifecycle checkpoint, not final settle: keep the assistant streaming
-    // and leave the Ask card mounted/expanded until its result arrives.
     const ctxMsg = findStreamingAsst(sid, emitter)?.msg;
-    const pendingAsk = ctxMsg
-      ? hasPendingAskUser([
-        ...ctxMsg.toolCalls,
-        ...(ctxMsg.segments?.flatMap((segment) => segment.kind === 'tool' ? [segment.tool] : []) ?? []),
-      ])
-      : false;
-    if (p.waitingForInput || (pendingAsk && !p.error && !p.aborted)) return;
+    if (p.waitingForInput && !p.error && !p.aborted) return;
     if (ctxMsg) {
       const endTs = event.ts ?? Date.now();
       patchMsg(sid, emitter, ctxMsg.id, (m) => {
+        m = { ...m, toolCalls: m.toolCalls.map(closePendingAsk),
+          segments: m.segments?.map(segment => segment.kind === 'tool'
+            ? { ...segment, tool: closePendingAsk(segment.tool) } : segment) };
         const durationMs = typeof p.durationMs === 'number'
           ? Math.max(0, p.durationMs)
           : Math.max(0, endTs - m.ts);
@@ -935,11 +946,14 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
         }
       }
     }
-    const usage = payload.usage as { inputTokens?: number; outputTokens?: number } | undefined;
+    const usage = payload.usage as { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number } | undefined;
     const model = payload.model;
     if (usage && model) {
       const pct = ratioFromUsage(usage, model);
-      if (pct > 0) useChatStore.getState().patchConv(sid, { contextPct: pct });
+      const conv = useChatStore.getState().bySid[sid];
+      if (((usage.inputTokens ?? 0) > 0 || (usage.outputTokens ?? 0) > 0 || (usage.cacheReadTokens ?? 0) > 0 || (usage.cacheWriteTokens ?? 0) > 0) && emitter && conv) useChatStore.getState().patchConv(sid, {
+        contextByAgent: { ...conv.contextByAgent, [emitter]: latestContextUsage(conv.contextByAgent[emitter], { pct, source: 'estimate', ts, kernelId: contextKernelId(payload) }) },
+      });
     }
     return;
   }

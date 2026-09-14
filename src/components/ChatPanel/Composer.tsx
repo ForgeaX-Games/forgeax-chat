@@ -1,3 +1,5 @@
+import { onSessionEvent } from '../../session-bridge';
+import { Popover, PopoverTrigger, PopoverContent } from '@forgeax/interface/components/ui/popover';
 import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useSyncExternalStore } from 'react';
 
 
@@ -10,7 +12,7 @@ import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
 import {
   checkModelReady,
   initialSessionCatalogModel,
-  preferredCatalogModel,
+  passiveSessionCatalogModel,
   resetActiveAgentModelToProviderDefault,
 } from '@forgeax/interface/lib/model-route';
 import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
@@ -266,10 +268,13 @@ function MentionAvatar({
 export function Composer({
   highlight = false,
   specialistSummonEnabled = true,
+  delegatedWorkRunning = false,
 }: {
   highlight?: boolean;
   /** A direct sub-agent thread cannot delegate again through the root composer. */
   specialistSummonEnabled?: boolean;
+  /** A live outgoing handoff keeps Stop available after the owner replies. */
+  delegatedWorkRunning?: boolean;
 } = {}) {
   const { t, i18n } = useTranslation();
   const host = useHost();
@@ -373,6 +378,10 @@ export function Composer({
   // cb-soon mode until we know there's at least one trigger to offer.
   const [busSkills, setBusSkills] = useState<BusSkillRow[] | null>(null);
   const [slashOpen, setSlashOpen] = useState(false);
+  const [showCommands, setShowCommands] = useState(false);
+  const slashMenuRef = useRef<HTMLDivElement>(null);
+  const slashRestoreComposer = useRef(false);
+
   // P3.46 — agent rows merged from /api/agents `.agents` (marketplace,
   // 7) and `.agents_from_bus` (bus, 1). Null = unfetched / failed → the @ button
   // stays in legacy cb-soon mode. The endpoint already returns both arrays so
@@ -481,37 +490,36 @@ export function Composer({
     try {
       const m = await getAgentModel(sid, agentPath);
       let nextModel = m;
-      try {
-        // Provider switches can leave agent.json pointing at a model id that the
-        // new driver catalog cannot run. Snap to the catalog default immediately.
-        const catalog = await listModels(providerId);
-        const selectedInCatalog = !!m.selected && catalog.some((entry) => entry.id === m.selected);
-        const initialModel = needsInitialSeed
-          ? initialSessionCatalogModel(catalog, providerId, getLastModel(providerId))
-          : undefined;
-        const fallback = initialModel
-          ?? (!selectedInCatalog ? preferredCatalogModel(catalog, null) : undefined);
-        const current = stillCurrent();
-        if (fallback && fallback !== m.selected && current) {
-          const res = await setAgentModels(sid, agentPath, [fallback]);
-          const selected = res.selected ?? fallback;
-          nextModel = { sid, agentPath, selected, chain: [selected], raw: [selected] };
-          // The write may finish after a session/provider switch. Preserve the
-          // marker in that case so the new route gets its own remembered seed.
-          initialSeedResolved = needsInitialSeed && stillCurrent();
-        } else if (
-          needsInitialSeed
-          && current
-          && catalog.length > 0
-          && (!initialModel || initialModel === m.selected)
-        ) {
-          // The catalog was read successfully and the initial-session policy
-          // either requires no override or is already satisfied.
-          initialSeedResolved = true;
-        }
-      } catch (catalogErr) {
-        console.warn('[composer] reconcile agent model catalog failed', { sid, agentPath, providerId, err: catalogErr });
+      // A scaffold may carry another provider's default without a local seed
+      // marker (for example after game creation or page reload). Validate it
+      // against the current catalog; stillCurrent guards cross-page races.
+      const catalog = await listModels(providerId);
+      if (catalog.length === 0) throw new Error('Active provider model catalog is empty');
+      const initialModel = needsInitialSeed
+        ? initialSessionCatalogModel(catalog, providerId, getLastModel(providerId))
+        : undefined;
+      const fallback = initialModel
+        ?? passiveSessionCatalogModel(catalog, m.selected, getLastModel(providerId));
+      const current = stillCurrent();
+      if (fallback && fallback !== m.selected && current) {
+        const res = await setAgentModels(sid, agentPath, [fallback]);
+        const selected = res.selected ?? fallback;
+        nextModel = { sid, agentPath, selected, chain: [selected], raw: [selected] };
+        // The write may finish after a session/provider switch. Preserve the
+        // marker in that case so the new route gets its own remembered seed.
+        initialSeedResolved = needsInitialSeed && stillCurrent();
+      } else if (
+        needsInitialSeed
+        && current
+        && catalog.length > 0
+        && (!initialModel || initialModel === m.selected)
+      ) {
+        // The catalog was read successfully and the initial-session policy
+        // either requires no override or is already satisfied.
+        initialSeedResolved = true;
       }
+      if (!stillCurrent()) return;
+      if (!nextModel.selected) throw new Error('No model available for the active provider');
       agentModelCache.set(agentModelKey(sid, agentPath, providerId), nextModel);
       if (stillCurrent()) {
         setAgentModel(nextModel);
@@ -722,7 +730,10 @@ export function Composer({
     void (async () => {
       try {
         const done = await resetActiveAgentModelToProviderDefault(catalogProviderFor(nextProvider));
-        if (done) {
+        const current = useShellStore.getState();
+        if (done && current.activeSid === done.sid
+          && current.tabs.find((tab) => tab.sid === done.sid)?.agentId === done.agentPath
+          && catalogOf(current.providerOverride) === catalogProviderFor(nextProvider)) {
           const reset: AgentModelState = { sid: done.sid, agentPath: done.agentPath, selected: done.selected, chain: [done.selected], raw: [done.selected] };
           setAgentModel(reset);
           setAgentModelLoading(false);
@@ -754,6 +765,18 @@ export function Composer({
       setAgentModelLoading(true);
     }
     void fetchAgentModel(forgeaxSid, activeAgent, modelCatalogProviderId);
+  }, [canSwitchModel, activeAgent, forgeaxSid, modelCatalogProviderId]);
+
+  // Server revisions invalidate only the selected session/agent. A tab that
+  // missed events while suspended revalidates on focus without changing config.
+  useEffect(() => {
+    if (!canSwitchModel || !activeAgent || !forgeaxSid) return;
+    const refresh = () => { void fetchAgentModel(forgeaxSid, activeAgent, modelCatalogProviderId); };
+    const unsubscribe = onSessionEvent('composer-model', (event) => {
+      if (event.sid === forgeaxSid && event.emitterId === activeAgent && event.event.type === 'runtime:config-revision') refresh();
+    });
+    window.addEventListener('focus', refresh);
+    return () => { unsubscribe(); window.removeEventListener('focus', refresh); };
   }, [canSwitchModel, activeAgent, forgeaxSid, modelCatalogProviderId]);
 
   // Start a provider-owned persistent transport once the active Studio
@@ -1104,10 +1127,6 @@ export function Composer({
       return;
     }
     setSlashFocused(0);
-    const onClick = (e: MouseEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (!t?.closest('.cb-slash')) setSlashOpen(false);
-    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -1124,16 +1143,15 @@ export function Composer({
         e.preventDefault();
         setSlashFocused((i) => (i <= 0 ? total - 1 : i - 1));
       } else if (e.key === 'Enter') {
+        if ((e.target as HTMLElement)?.closest('.cb-slash-menu button, .cb-slash-menu [role=button]')) return;
         const idx = slashFocusedRef.current;
         if (idx < 0 || idx >= total) return;
         e.preventDefault();
         insertSkillTrigger(list[idx]);
       }
     };
-    window.addEventListener('click', onClick);
     window.addEventListener('keydown', onKey);
     return () => {
-      window.removeEventListener('click', onClick);
       window.removeEventListener('keydown', onKey);
     };
   }, [slashOpen]);
@@ -1141,6 +1159,7 @@ export function Composer({
   // P3.45 — insert a skill/command pill at the cursor (or replace a typed
   // prefix like "/c"). Trailing space lets the user type arguments immediately.
   const insertSkillTrigger = (row: BusSkillRow) => {
+    slashRestoreComposer.current = true;
     const pill = buildSlashPill({
       trigger: row.trigger,
       source: row.source,
@@ -1183,17 +1202,21 @@ export function Composer({
   // prefix, or narrowed when the user is typing a prefix like "/c".
   const filteredSkills = useMemo(() => {
     if (!busSkills) return [];
-    if (slashPrefix === null || slashPrefix === '') return busSkills;
+    if (slashPrefix === null || slashPrefix === '') return busSkills.filter(row => showCommands || row.source === 'skill');
     return busSkills.filter((s) =>
       s.trigger.toLowerCase().startsWith(`/${slashPrefix.toLowerCase()}`),
     );
-  }, [busSkills, slashPrefix]);
+  }, [busSkills, slashPrefix, showCommands]);
   const filteredSkillsRef = useRef<BusSkillRow[]>([]);
   useEffect(() => {
     filteredSkillsRef.current = filteredSkills;
     if (filteredSkills.length > 0) setSlashFocused(0);
     else setSlashFocused(-1);
   }, [filteredSkills]);
+
+  useEffect(() => {
+    slashMenuRef.current?.querySelector<HTMLElement>(`[data-skill-index="${slashFocused}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [slashFocused]);
 
   // P3.46 — outside-click / Esc dismissal for the @ popover. Same shape as the
   // slash popover (P3.45) and cli dropdown — players learn one popover language.
@@ -1354,7 +1377,7 @@ export function Composer({
   const onSubmit = async (expectedOwner?: ComposerOwner) => {
     // Submission preparation is single-flight: repeated Enter/clicks cannot split
     // or duplicate one composer transaction while its files are still resolving.
-    if (submitPreparingRef.current) return;
+    if (submitPreparingRef.current || agentModelLoading || (canSwitchModel && !agentModel?.selected)) return;
     const owner = currentOwner();
     if (!owner || (expectedOwner && !ownsComposer(expectedOwner))) return;
     submitPreparingRef.current = true;
@@ -1693,28 +1716,29 @@ export function Composer({
               >×</button>
             )}
           </div>
-          <div className="cb-slash">
+          <Popover open={slashOpen && slashHasSkills} onOpenChange={setSlashOpen}><PopoverTrigger asChild>
             <button
               className={`cb-btn ${slashHasSkills ? 'cb-slash-btn' : 'cb-soon'}${slashOpen ? ' is-open' : ''}`}
               title={
                 slashHasSkills
-                  ? t('composer.busSkillsTitle', { count: busSkills!.length })
+                  ? (getLocale() === 'zh' ? '选择当前会话技能或搜索命令' : 'Choose session skills or search commands')
                   : t('composer.slashSoon')
               }
               aria-disabled={slashHasSkills ? undefined : true}
               aria-expanded={slashHasSkills ? slashOpen : undefined}
               aria-haspopup={slashHasSkills ? 'menu' : undefined}
               type="button"
-              onClick={() => {
-                if (slashHasSkills) setSlashOpen((v) => !v);
-                else setHintFor(CB_HINT.SLASH);
+              onClick={(event) => {
+                if (!slashHasSkills) { event.preventDefault(); setHintFor(CB_HINT.SLASH); }
               }}
             >
               <SquareChartGantt size={16} />
               {!slashHasSkills && hintFor === CB_HINT.SLASH && <span className="cb-hint" role="status">{t('composer.comingSoon')}</span>}
             </button>
-            {slashOpen && slashHasSkills && filteredSkills.length > 0 && (
-              <div className="cb-slash-menu" role="menu" aria-label="Skills and commands">
+            </PopoverTrigger>
+            {slashOpen && slashHasSkills && (
+              <PopoverContent ref={slashMenuRef} side="top" align="end" collisionPadding={12} className="cb-slash-menu" role="menu" aria-label="Skills and commands" onOpenAutoFocus={event => event.preventDefault()} onCloseAutoFocus={event => { if (slashRestoreComposer.current) { event.preventDefault(); slashRestoreComposer.current = false; ref.current?.focus(); } }}>
+                {filteredSkills.length === 0 && <div className="cb-slash-foot" role="status">{getLocale() === 'zh' ? (slashPrefix ? '没有匹配的技能或命令' : '当前会话没有技能，可查看高级命令') : (slashPrefix ? 'No matching skills or commands' : 'No session skills. Advanced commands are available below.')}</div>}
                 {(['skill', 'command'] as const).map((source) => {
                   const group = filteredSkills
                     .map((s, i) => ({ s, i }))
@@ -1723,10 +1747,10 @@ export function Composer({
                   return (
                     <div key={source} className="cb-slash-group">
                       <div className="cb-slash-menu-head">
-                        <span className="cb-slash-menu-head-tag">{source === 'skill' ? 'SKILLS' : 'COMMANDS'}</span>
+                        <span className="cb-slash-menu-head-tag">{getLocale() === 'zh' ? (source === 'skill' ? '当前会话技能' : '高级命令') : (source === 'skill' ? 'Session skills' : 'Advanced commands')}</span>
                         <span className="cb-slash-menu-head-n">{group.length}</span>
                         <span className="cb-slash-menu-head-sub">
-                          {slashPrefix ? `matching /${slashPrefix}` : 'all'}
+                          {slashPrefix ? `/${slashPrefix}` : ''}
                         </span>
                       </div>
                       {group.map(({ s, i }) => (
@@ -1734,17 +1758,18 @@ export function Composer({
                           key={`${s.extensionId}:${s.skillId}`}
                           type="button"
                           role="menuitem"
+                          data-skill-index={i}
                           className={`cb-slash-item${slashFocused === i ? ' is-active' : ''}`}
                           onMouseEnter={() => setSlashFocused(i)}
                           title={
                             s.descZh
-                              ? t('composer.slashItemDescTitle', { name: s.displayName, plugin: s.extensionId, desc: s.descZh, trigger: s.trigger })
-                              : t('composer.slashItemTitle', { name: s.displayName, plugin: s.extensionId, trigger: s.trigger })
+                              ? t('composer.slashItemDescTitle', { name: s.displayName, extension: s.extensionId, desc: s.descZh, trigger: s.trigger })
+                              : t('composer.slashItemTitle', { name: s.displayName, extension: s.extensionId, trigger: s.trigger })
                           }
                           onClick={() => insertSkillTrigger(s)}
                         >
                           <span className="cb-slash-trigger">{s.trigger}</span>
-                          <span className="cb-slash-name">{s.displayName}</span>
+                          {s.displayName !== s.trigger.slice(1) && <span className="cb-slash-name">{s.displayName}</span>}
                           {s.descZh && (
                             <span className="cb-slash-desc">
                               {s.descZh.length > 60 ? `${s.descZh.slice(0, 60)}…` : s.descZh}
@@ -1755,8 +1780,8 @@ export function Composer({
                               className="cb-slash-arrow"
                               role="button"
                               tabIndex={0}
-                              aria-label={t('composer.viewInBusAria', { plugin: s.extensionId })}
-                              title={t('composer.viewInBusTitle', { plugin: s.extensionId })}
+                              aria-label={t('composer.viewInBusAria', { extension: s.extensionId })}
+                              title={t('composer.viewInBusTitle', { extension: s.extensionId })}
                               onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(s.extensionId); }}
                               onKeyDown={(e) => onArrowKey(e, s.extensionId)}
                             >→</span>
@@ -1766,10 +1791,13 @@ export function Composer({
                     </div>
                   );
                 })}
+                {!slashPrefix && <button type="button" className="cb-slash-advanced" onClick={() => setShowCommands(value => !value)}>
+                  {getLocale() === 'zh' ? (showCommands ? '隐藏高级命令' : '显示高级命令') : (showCommands ? 'Hide advanced commands' : 'Show advanced commands')}
+                </button>}
                 <div className="cb-slash-foot">{t('composer.slashFoot')}</div>
-              </div>
+              </PopoverContent>
             )}
-          </div>
+          </Popover>
           {/* Model picker follows the selected runtime. Gateway/native runtimes use
               list_models; rented CLIs use their driver-scoped catalogs. */}
           {canSwitchModel && (
@@ -1778,7 +1806,7 @@ export function Composer({
             mode="single"
             variant="button"
             providerId={modelCatalogProviderId}
-            displayLabel={agentModelLoading ? '…' : compactModelLabel(agentModel?.selected ?? modelLabel)}
+            displayLabel={agentModelLoading ? '…' : agentModel?.selected ? compactModelLabel(agentModel.selected) : (getLocale() === 'zh' ? '选择模型' : 'Select model')}
             value={agentModel?.selected ?? null}
             onChange={(next) => {
               if (typeof next !== 'string') return;
@@ -1920,12 +1948,12 @@ export function Composer({
             )}
           </div>
           )}
-          {isStreaming ? (
+          {isStreaming || delegatedWorkRunning ? (
             <>
-              {text.trim() && (
+              {(text.trim() || attached.length > 0) && (
                 <button
                   className="cb-send cb-queue"
-                  title={t('composer.queueSendTitle')}
+                  title={t(isStreaming ? 'composer.queueSendTitle' : 'composer.send')}
                   type="button"
                   onClick={() => void onSubmit()}
                 >
@@ -1952,7 +1980,7 @@ export function Composer({
                   : t('composer.send')
               }
               type="button"
-              disabled={(!text.trim() && attached.length === 0 && pendingFileReadCount === 0) || !activeAgent || !activeSid}
+              disabled={agentModelLoading || (canSwitchModel && !agentModel?.selected) || (!text.trim() && attached.length === 0 && pendingFileReadCount === 0) || !activeAgent || !activeSid}
               onClick={() => void onSubmit()}
             >
               <ArrowUp size={16} />
@@ -1992,8 +2020,8 @@ export function Composer({
                   {a.inBus && <span className="cb-at-bus-pill" aria-label="bus host">bus</span>}
                   {a.inBus && a.busExtensionId && (
                     <span className="cb-at-arrow" role="button" tabIndex={0}
-                      aria-label={t('composer.viewInBusAria', { plugin: a.busExtensionId })}
-                      title={t('composer.viewInBusTitle', { plugin: a.busExtensionId })}
+                      aria-label={t('composer.viewInBusAria', { extension: a.busExtensionId })}
+                      title={t('composer.viewInBusTitle', { extension: a.busExtensionId })}
                       onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(a.busExtensionId!); }}
                       onKeyDown={(e) => onArrowKey(e, a.busExtensionId!)}
                     >→</span>

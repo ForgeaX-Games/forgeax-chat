@@ -1,5 +1,6 @@
+import { getLocale } from '@forgeax/interface/i18n';
 import { useShellStore } from '@forgeax/interface/store';
-import { useActiveContextPct } from '../../session-store';
+import { useActiveContextUsage } from '../../session-store';
 
 function ringColor(pct: number): string {
   if (pct >= 85) return '#ef4444';
@@ -15,7 +16,13 @@ const CIRCUMFERENCE = 2 * Math.PI * R;
 
 export default function ContextRing() {
   const activeSid = useShellStore((s) => s.activeSid);
-  const contextPct = useActiveContextPct();
+  const usage = useActiveContextUsage();
+  const contextPct = usage?.pct ?? 0;
+  const zh = getLocale() === 'zh';
+  const detail = usage?.source === 'runtime'
+    ? `${((usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)).toLocaleString()} / ${usage.contextWindow?.toLocaleString()} tokens`
+    : (zh ? '估算用量' : 'Estimated usage');
+  const title = `${zh ? '当前上下文' : 'Current context'}: ${contextPct}% · ${detail}. ${zh ? '用量会随请求和历史重新载入而变化；压缩会单独显示。' : 'Usage can change between requests or when history reloads. Compaction is shown separately.'}`;
 
   if (!activeSid || contextPct <= 0) return null;
 
@@ -23,7 +30,7 @@ export default function ContextRing() {
   const color = ringColor(contextPct);
 
   return (
-    <div className="cb-context-ring" title={`Context: ${contextPct}%`}>
+    <div className="cb-context-ring" title={title} aria-label={title}>
       <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`}>
         <circle
           cx={SIZE / 2}

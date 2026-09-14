@@ -1,7 +1,8 @@
+import { executionFailureKind } from './execution-failure';
 import type { FailureContinuation } from './execution-failure';
 import { ExecutionFailure } from './ExecutionFailure';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Brain, ChevronDown, ChevronUp, CheckCircle2, Loader2, Clock, AlertCircle } from 'lucide-react';
+import { Brain, ChevronDown, ChevronUp, CheckCircle2, Loader2, Clock, CirclePause, AlertCircle } from 'lucide-react';
 import { useTranslation } from '@forgeax/interface/i18n';
 import agentIcon from '@forgeax/interface/assets/icons/agent-icon.png';
 import { useShellStore } from '@forgeax/interface/store';
@@ -20,7 +21,7 @@ import { AgentStatusChip } from './AgentStatusChip';
 import { MAIN_AGENT_ACCENT } from './agent-identity';
 import { shortAgentId } from './useAgentNames';
 import { formatDuration } from './process-display';
-import { deriveExecutionStage, executionStageLabelKey } from './execution-stage';
+import { deriveExecutionStage, executionStageLabelKey, workingLabel } from './execution-stage';
 
 interface ForgeCardProps {
   status: 'done' | 'running' | 'waiting' | 'error';
@@ -58,6 +59,8 @@ interface ForgeCardProps {
    *  Forge response container, rather than being a sibling in the chat
    *  timeline between the user message and the response. */
   processContent?: ReactNode;
+  /** Full activity facts, before tools move into the process accordion. */
+  activityTools?: ToolCall[];
   /** Index in the remaining message segments before which processContent was
    *  emitted. Preserves Ask User/text segments that chronologically preceded
    *  the first Todo/process event. */
@@ -121,9 +124,10 @@ export function ForgeCard({
   sid,
   agentId,
   processContent,
+  activityTools,
   processInsertAt,
 }: ForgeCardProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const isMainAgent = !agentName || shortAgentId(agentName) === 'forge';
   const displayName = (isMainAgent ? 'ForgeaX' : agentName?.trim() || 'ForgeaX').toUpperCase();
   const executionStage = deriveExecutionStage({
@@ -131,7 +135,7 @@ export function ForgeCard({
     text,
     thought,
     segments,
-    toolCalls,
+    toolCalls: activityTools ?? toolCalls,
     subAgents,
   });
   const onProviderBusDeepLink = useProviderBusDeepLink();
@@ -191,9 +195,11 @@ export function ForgeCard({
         )}
         <span className="kc-status">
           {status === 'done' && <CheckCircle2 size={14} className="status-done" />}
-          {status === 'running' && <Loader2 size={14} className="status-running spin" />}
-          {status === 'waiting' && <Clock size={14} className="status-waiting" />}
-          {status === 'error' && <AlertCircle size={14} className="status-error" />}
+          {status === 'running' && executionStage !== 'waiting_for_input' && <Loader2 size={14} className="status-running spin" />}
+          {(status === 'waiting' || (status === 'running' && executionStage === 'waiting_for_input')) && <Clock size={14} className="status-waiting" />}
+          {status === 'error' && (executionFailureKind(errorMessage ?? '') === 'interrupted'
+            ? <CirclePause size={14} className="status-stopped" />
+            : <AlertCircle size={14} className="status-error" />)}
         </span>
         {status === 'done' && text.length > 0 && <KcCopyBtn text={text} />}
       </div>
@@ -202,12 +208,12 @@ export function ForgeCard({
           {status === 'running' && !text && (
             <div className="kc-loading">
               <span className="kc-loading-label">
-                {t(executionStageLabelKey(executionStage), { displayName })}{elapsedS > 0 && <span className="kc-elapsed"> · {formatDuration(elapsedS * 1000)}</span>}
+                {executionStage === 'unknown' ? workingLabel(i18n?.language) : t(executionStageLabelKey(executionStage), { displayName })}{elapsedS > 0 && <span className="kc-elapsed"> · {formatDuration(elapsedS * 1000)}</span>}
               </span>
             </div>
           )}
           {status === 'waiting' && (
-            <div className="kc-status-text">{t(executionStageLabelKey(executionStage), { displayName })}</div>
+            <div className="kc-status-text">{executionStage === 'unknown' ? workingLabel(i18n?.language) : t(executionStageLabelKey(executionStage), { displayName })}</div>
           )}
           {/* Legacy / replayed messages carry only the flattened `thinking`
               field (no time-ordered segments[] — e.g. reconstructed from the

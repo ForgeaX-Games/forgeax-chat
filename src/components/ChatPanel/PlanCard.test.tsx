@@ -28,7 +28,7 @@ describe('plan lifecycle rendering', () => {
       expect(html).not.toContain('class="spin"');
       expect(html).not.toContain('tx-status-in_progress');
       expect(html).not.toContain('tx-status-completed');
-      expect(html).toContain(phase === 'done' ? 'lucide-circle-pause' : 'lucide-circle-alert');
+      expect(html).toContain(phase !== 'error' ? 'lucide-circle-pause' : 'lucide-circle-alert');
     });
   }
   for (const phase of ['running', 'waiting_for_input'] as const) {

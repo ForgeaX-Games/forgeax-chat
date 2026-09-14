@@ -143,6 +143,7 @@ export type TaskFlowSegment = ChatSegment & { tool?: TaskFlowToolCall };
 export type ProcessPhase = 'running' | 'waiting_for_input' | 'done' | 'error' | 'aborted';
 
 export type ProcessEntry =
+  | { kind: 'lifecycle_status'; id: string; text: string; ts: number }
   | { kind: 'thinking_summary'; id: string; text: string; ts: number; visibility: 'public_summary' }
   | { kind: 'assistant_intermediate'; id: string; text: string; ts: number }
   | { kind: 'tool'; id: string; step: Step; ts: number }

@@ -556,7 +556,7 @@ describe('chat store turn targeting regressions', () => {
 
     await useChatStore.getState().loadSession(sid, agentId);
 
-    expect(useChatStore.getState().bySid[sid]?.contextPct).toBe(70);
+    expect(useChatStore.getState().bySid[sid]?.contextByAgent[agentId]?.pct).toBe(70);
   });
 
   it('replays final turn duration without sealing an Ask waiting checkpoint', async () => {
@@ -594,7 +594,7 @@ describe('chat store turn targeting regressions', () => {
     expect(assistant?.turnId).toBe('turn-1');
   });
 
-  it('keeps an Ask User assistant streaming when the provider omits waitingForInput', async () => {
+  it('does not resurrect an unanswered Ask after an authoritative turn end', async () => {
     const sid = 'sid-replay-ask-no-flag';
     const agentId = 'forge';
     setShellTarget(tab(sid, agentId));
@@ -605,8 +605,8 @@ describe('chat store turn targeting regressions', () => {
         type: 'hook:toolCall', source: 'agent:forge', emitterId: agentId, ts: 120,
         payload: { name: 'AskUserQuestion', callId: 'ask-no-flag', args: { question: 'Pick one', options: ['A'] } },
       },
-      // The provider lifecycle event is not authoritative while the browser
-      // reply is still absent; this event intentionally omits the flag.
+      // A terminal event without an explicit wait must close the question,
+      // including when replaying the event ledger after reload.
       { type: 'hook:turnEnd', source: 'agent:forge', emitterId: agentId, ts: 130, payload: { turnId: 'turn-ask' } },
     ];
     globalThis.fetch = (async () => new Response(JSON.stringify({
@@ -617,11 +617,11 @@ describe('chat store turn targeting regressions', () => {
 
     const assistant = useChatStore.getState().readMessages(sid, agentId)
       .find((message) => message.role === 'assistant');
-    expect(assistant?.status).toBe('streaming');
+    expect(assistant?.status).toBe('done');
     expect(assistant?.toolCalls).toMatchObject([{
       callId: 'ask-no-flag',
       name: 'ask_user',
-      status: 'running',
+      status: 'done',
     }]);
   });
 

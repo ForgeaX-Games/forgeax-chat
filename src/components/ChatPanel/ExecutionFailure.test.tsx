@@ -24,3 +24,10 @@ test('keeps the original failure visible while teammates work and after continua
   const resumed = renderToStaticMarkup(<ExecutionFailure error="capture failed" continuation="working" />);
   expect(resumed).toContain('已在后续回合继续工作');
 });
+
+test('user cancellation has a pause marker rather than an error alert', () => {
+  const html = renderToStaticMarkup(<ExecutionFailure error="aborted by API" />);
+  expect(html).toContain('lucide-circle-pause');
+  expect(html).not.toContain('lucide-alert-circle');
+  expect(html).toContain('data-failure-kind="interrupted"');
+});

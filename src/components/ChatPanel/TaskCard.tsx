@@ -1,3 +1,5 @@
+import { AskUserBatch } from './message-parts/AskUserCard';
+import { hasPendingAskUser } from '../../task-flow/ask-user-protocol';
 import { executionFailureMessages } from './execution-failure';
 import { CheckCircle2, ChevronDown, ChevronRight } from 'lucide-react';
 import { useLayoutEffect, useRef } from 'react';
@@ -10,7 +12,7 @@ import { useAgentIdentities } from './agent-identity';
 import { useOpenAgentThread } from './use-agent-thread';
 import { defaultStepOpen, defaultTaskOpen } from './process-display';
 import { ToolGroup } from './ToolGroup';
-import { canGroupTool, groupConsecutive } from './tool-groups';
+import { canGroupTool, canBatchAsk, groupProcessItems } from './tool-groups';
 import { AgentIdentityAvatar } from './AgentIdentityAvatar';
 
 export function TaskCard({
@@ -32,7 +34,8 @@ export function TaskCard({
   const failureCopy = executionFailureMessages(i18n?.language);
   const key = `${roundId}:${task.id}`;
   const running = task.status === 'in_progress' && !task.demotedFromActive && !task.terminalState;
-  const open = useTaskFlowUiStore((state) => running
+  const waitingForAnswer = hasPendingAskUser(task.steps.flatMap(step => step.tool ? [step.tool] : []));
+  const open = useTaskFlowUiStore((state) => running || waitingForAnswer
     ? true
     : state.openTasks[key] ?? defaultTaskOpen({ defaultOpen, archive, running }));
   const toggleTask = useTaskFlowUiStore((state) => state.toggleTask);
@@ -66,14 +69,14 @@ export function TaskCard({
   }, [task.id, task.steps.length, open]);
   return (
     <section
-      className={`tx-task tx-task-${task.status} ${open ? 'is-open' : 'is-folded'} ${archive ? 'is-archive' : ''}`}
+      className={`tx-task tx-task-${task.status} ${open ? 'is-open' : 'is-folded'} ${archive ? 'is-archive' : ''} ${waitingForAnswer ? 'has-pending-question' : ''}`}
     >
       <button
         type="button"
         className="tx-th"
-        onClick={() => { if (!running) toggleTask(key, open); }}
+        onClick={() => { if (!running && !waitingForAnswer) toggleTask(key, open); }}
         aria-expanded={open}
-        aria-disabled={running}
+        aria-disabled={running || waitingForAnswer}
       >
         {identity && (
           <>
@@ -119,7 +122,10 @@ export function TaskCard({
             const list = event.currentTarget;
             followStepsRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 2;
           }}>
-          {groupConsecutive(task.steps, canGroupTool).map(group => {
+          {groupProcessItems(task.steps, step => step).map(group => {
+            if (group.length > 1 && canBatchAsk(group[0]) && sid) return <AskUserBatch
+              key={group[0].id} calls={group.flatMap(step => step.tool ? [step.tool] : [])}
+              sid={sid} agentId={fallbackAgentId ?? task.agentId ?? ''} />;
             const rows = group.map(step => {
               const index = task.steps.indexOf(step);
               return (
@@ -146,7 +152,7 @@ export function TaskCard({
                 toggleStep(stepKey, currentOpen);
               }}
               sid={sid}
-              agentId={task.agentId ?? fallbackAgentId}
+              agentId={step.tool?.name === 'ask_user' ? fallbackAgentId : task.agentId ?? fallbackAgentId}
             />
               );
             });

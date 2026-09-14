@@ -86,3 +86,49 @@ test('an older Studio locale catalog still renders chat-owned Chinese labels', (
 
   }
 });
+
+test('cancelled compaction replaces its working row in live and replay without a warning', () => {
+  const events = [status('started', 1, 1), status('cancelled', 1, 2)];
+  for (const event of events) dispatchSessionEvent({ type: 'session-event', sid, emitterId: 'forge', event });
+  const live = useChatStore.getState().readMessages(sid, 'forge');
+  expect(live).toHaveLength(1);
+  expect(live[0]!.text).toBe(replay(events)[0]!.text);
+  expect(live[0]!.text).toMatch(/stopped|已停止/);
+  expect(live[0]!.level).toBe('info');
+});
+
+test('live and replay retain the owning turn for inline process placement', () => {
+  const event = status('completed', 2, 100);
+  event.payload = { ...event.payload, turnId: 'owner-turn' };
+  dispatchSessionEvent({ type: 'session-event', sid, emitterId: 'forge', event });
+  expect(useChatStore.getState().readMessages(sid, 'forge')[0]?.turnId).toBe('owner-turn');
+  expect(replay([event])[0]?.turnId).toBe('owner-turn');
+});
+
+test('snapshot reload is distinct from compaction in both replay and live views', () => {
+  const event: StoredEvent = { type: 'kernel_history_applied', emitterId: 'forge', ts: 22,
+    payload: { mode: 'snapshot', patchId: 'history-1', summary: 'SECRET' } };
+  const message = formatEvent(event);
+  expect(message?.kind).toBe('system');
+  expect(JSON.stringify(message)).not.toContain('SECRET');
+  expect(JSON.stringify(message)).toContain('context-reload:forge:history-1');
+  expect(formatEvent({ ...event, payload: { mode: 'delta', patchId: 'history-2' } })).toBeNull();
+  expect(replay([event]).some(m => m.id === 'context-reload:forge:history-1')).toBe(true);
+  dispatchSessionEvent({ type: 'session-event', sid, emitterId: 'forge', event: { ...event, source: 'runtime' } });
+  expect(useChatStore.getState().bySid[sid]?.messagesByAgent.forge?.some(m => m.id === 'context-reload:forge:history-1')).toBe(true);
+});
+
+test('live kernel switching replaces old occupancy even when the new estimate rounds to zero', () => {
+  const send = (type: string, ts: number, payload: Record<string, unknown>) => dispatchSessionEvent({
+    type: 'session-event', sid, emitterId: 'forge', event: { type, emitterId: 'forge', ts, payload },
+  });
+  send('context.usage', 1, { kernelId: 'codex', inputTokens: 35000, outputTokens: 100, contextWindow: 258400 });
+  send('hook:assistantMessage', 2, { kernelId: 'forgeax-core', model: 'deepseek-v4-flash',
+    usage: { inputTokens: 405, outputTokens: 245 }, llmMessage: { role: 'assistant', content: 'continued' } });
+  expect(useChatStore.getState().bySid[sid]?.contextByAgent.forge).toMatchObject({ kernelId: 'forgeax-core', source: 'estimate', pct: 0 });
+  send('hook:assistantMessage', 3, { kernelId: 'forgeax-core', model: 'deepseek-v4-flash',
+    usage: { inputTokens: 405, outputTokens: 245, cacheReadTokens: 29952 }, llmMessage: { role: 'assistant', content: 'cached' } });
+  expect(useChatStore.getState().bySid[sid]?.contextByAgent.forge).toMatchObject({ source: 'estimate', pct: 3 });
+  send('context.usage', 4, { kernelId: 'codex', inputTokens: 36000, outputTokens: 100, contextWindow: 258400 });
+  expect(useChatStore.getState().bySid[sid]?.contextByAgent.forge).toMatchObject({ kernelId: 'codex', source: 'runtime', pct: 14 });
+});

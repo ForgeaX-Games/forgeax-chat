@@ -61,3 +61,9 @@ describe('deriveExecutionStage', () => {
     expect(executionStageLabelKey('unknown')).toBe('executionStage.unknown');
   });
 });
+
+test('terminal messages never advertise a stale pending tool as live work', () => {
+  for (const status of ['done', 'error'] as const) {
+    expect(deriveExecutionStage({ status, toolCalls: [{ callId: 'ask', name: 'ask_user', args: {}, status: 'running' }] })).toBe('unknown');
+  }
+});

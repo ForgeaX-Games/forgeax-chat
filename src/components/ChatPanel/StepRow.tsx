@@ -3,6 +3,7 @@ import { useState } from 'react';
 import type { Step } from '../../task-flow/model';
 import { stepBadge } from '../../task-flow/steps';
 import { StepDetail } from './StepDetail';
+import { MarkdownView } from './MarkdownView';
 import { AskUserCard } from './message-parts/AskUserCard';
 import { effectiveStepOpen } from './process-display';
 
@@ -21,7 +22,10 @@ export function StepRow({
 }) {
   const [replay, setReplay] = useState(0);
   if (step.tool?.name === 'ask_user' && sid) {
-    return <AskUserCard tc={step.tool} sid={sid} agentId={agentId ?? ''} />;
+    return <div className="tx-inline-question">
+      {step.narration?.map((text, index) => <MarkdownView key={index} text={text} />)}
+      <AskUserCard tc={step.tool} sid={sid} agentId={agentId ?? ''} />
+    </div>;
   }
   const badge = stepBadge(step);
   const isOpen = effectiveStepOpen(open, step.status);

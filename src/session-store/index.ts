@@ -41,6 +41,7 @@ export {
   useActiveMessages,
   useActiveStreaming,
   useActiveContextPct,
+  useActiveContextUsage,
   useActivePendingRewind,
   useActiveRewindDirtyNotice,
   useActiveCheckpointMsgIds,

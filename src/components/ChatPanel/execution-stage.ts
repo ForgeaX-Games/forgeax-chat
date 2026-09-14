@@ -56,6 +56,7 @@ function hasGenerationEvidence(input: ExecutionStageInput): boolean {
  * is more informative than a generic "preparing" state.
  */
 export function deriveExecutionStage(input: ExecutionStageInput): ExecutionStage {
+  if (input.status === 'done' || input.status === 'error') return 'unknown';
   const runningTools = (input.toolCalls ?? []).filter((tool) => tool.status === 'running');
   const childRunning = Object.values(input.subAgents ?? {}).some((run) => run.status === 'streaming');
   if (childRunning) return 'child_execution';
@@ -73,4 +74,9 @@ export function deriveExecutionStage(input: ExecutionStageInput): ExecutionStage
   // enough to classify as preparation, input, authorization, or child wait.
   // Keep this explicit so a silent provider is not presented with a guess.
   return 'unknown';
+}
+
+/** An active turn without finer evidence is still working, not a UI failure. */
+export function workingLabel(language?: string): string {
+  return language?.startsWith("zh") ? "工作中" : "Working";
 }

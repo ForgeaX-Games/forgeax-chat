@@ -1,0 +1,123 @@
+/* One request, one visible question. Resolved history keeps its compact rows. */
+.ask-user-wizard {
+  padding: 14px;
+  border: 1px solid var(--color-border-default, #3d3d3d);
+  border-radius: 12px;
+  background: var(--color-background-base, #242424);
+  gap: 14px;
+}
+.ask-user-wizard .ask-user-question {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+}
+.ask-user-wizard .ask-user-question-head:focus {
+  outline: none;
+}
+.ask-user-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ask-user-steps button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary, #aaa);
+  cursor: pointer;
+  min-width: 0;
+  font: inherit;
+  font-size: 11px;
+}
+.ask-user-steps button > span:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+.ask-user-steps button > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ask-user-steps button[aria-current="step"] {
+  color: var(--primary, #d4ff48);
+}
+.ask-user-steps button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ask-user-progress {
+  margin-left: auto;
+  white-space: nowrap;
+  color: var(--color-text-secondary, #aaa);
+  font-size: 11px;
+}
+.ask-user-wizard .ask-user-opt {
+  padding: 8px 10px;
+  min-height: 38px;
+}
+.ask-user-wizard .ask-user-opt-desc {
+  font-size: 12px;
+  line-height: 1.45;
+}
+.ask-user-wizard .ask-user-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.ask-user-wizard .ask-user-submit,
+.ask-user-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 30px;
+  font-size: 12px;
+}
+.ask-user-back {
+  margin-right: auto;
+  background: transparent;
+  color: var(--color-text-secondary, #aaa);
+  border: 0;
+  cursor: pointer;
+}
+.ask-user-review {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-top: 1px solid var(--color-border-default, #3d3d3d);
+  padding-top: 10px;
+}
+.ask-user-review button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
+  border: 0;
+  border-radius: 5px;
+  padding: 4px 6px;
+  background: #ffffff08;
+  color: var(--color-text-secondary, #aaa);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ask-user-wizard button:focus-visible {
+  outline: 2px solid var(--primary, #d4ff48);
+  outline-offset: 2px;
+}
+
+.ask-user-expired { color: var(--text-secondary, #999); font-size: 12px; padding: 6px 0; }

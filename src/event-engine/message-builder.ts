@@ -462,6 +462,7 @@ export function makeInMemEffects(
       const systemMessage: ChatMessage = {
         ...(msg.delegation ? { delegation: msg.delegation } : {}),
         id: msg.compactionId ?? newId(),
+        turnId: msg.turnId,
         role: 'system',
         text,
         toolCalls: [],

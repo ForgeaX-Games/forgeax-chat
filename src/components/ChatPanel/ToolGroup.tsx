@@ -8,8 +8,7 @@ export function ToolGroup({ steps, children }: { steps: Step[]; children: ReactN
   const [open, setOpen] = useState(false);
   const { t } = useTranslation();
   const running = steps.some(step => step.status === 'running' || step.status === 'pending');
-  const failed = steps.some(step => step.status === 'error');
-  return <section className={`tx-tool-group${failed ? ' has-error' : ''}`}>
+  return <section className="tx-tool-group">
     <button type="button" className="tx-tool-group-head" aria-expanded={open}
       onClick={() => setOpen(value => !value)}>
       <ChevronRight size={13} style={{ transform: open ? 'rotate(90deg)' : undefined }} aria-hidden="true" />

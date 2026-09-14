@@ -10,8 +10,7 @@ import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
 import { ForgeCard } from './ForgeCard';
 import { Composer } from './Composer';
 import { PermissionPrompt } from './PermissionPrompt';
-import { isAgentHandoff, handoffNavigationTarget } from './handoff-messages';
-import { HandoffPane } from './HandoffPane';
+import { isAgentHandoff, handoffNavigationTarget, hasRunningHandoff } from './handoff-messages';
 import { dropAskUserSession } from './message-parts/AskUserCard';
 import { ChatAgentCapsule } from './ChatAgentCapsule';
 import { RewindConfirmDialog, RewindBanner, DirtyNoticeBar, RewindInlineEditor, BubbleEditInline } from './RewindControls';
@@ -32,7 +31,7 @@ import type { ChatMessage } from '../../session-store';
 import { parseDisplaySegments } from '@forgeax/interface/lib/composer-bridge';
 import { PillChip } from '../Composer/PillChip';
 import type { ChatAttachment } from '@forgeax/interface/store';
-import { useTranslation, t } from '@forgeax/interface/i18n';
+import { getLocale, useTranslation, t } from '@forgeax/interface/i18n';
 import { projectWorkTimeline } from '../../task-flow/project';
 import { hasPendingAskUser } from '../../task-flow/ask-user-protocol';
 import { openAgentWorkspace } from '../../lib/open-agent-workspace';
@@ -201,26 +200,12 @@ function sameDay(a: number, b: number): boolean {
   const da = new Date(a), db = new Date(b);
   return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth() && da.getDate() === db.getDate();
 }
-// iter-93: i18n via Intl.RelativeTimeFormat. With {numeric:'auto'} the API
-// emits the localized word for 0/-1 days ('today'/'yesterday' in en, '今天'/'昨天'
-// in zh, '今日'/'昨日' in ja, 'hoy'/'ayer' in es, 'hier' in fr, etc.) instead of
-// numeric strings. Locale resolves from navigator.language; memoized at module
-// load (locale doesn't change at runtime). capFirst preserves header-style
-// capitalization for latin scripts (cjk/no-case scripts pass through unchanged).
-// Fallback to zh '今天/昨天' if Intl.RelativeTimeFormat absent (very old UA).
-const RTF = (() => {
-  try {
-    return new Intl.RelativeTimeFormat(
-      typeof navigator !== 'undefined' ? navigator.language : 'en',
-      { numeric: 'auto' }
-    );
-  } catch { return null; }
-})();
 const capFirst = (s: string): string => (s.length ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 // Day-divider label: '今天' / '昨天' for the two most recent days (greatly
 // reduces eye-load in long sessions), then degrade to MM-DD same-year, then
 // full YYYY-MM-DD for old archives. Mirrors formatTs's progressive disclosure.
 function dayLabel(ms: number, now: number = Date.now()): string {
+  const RTF = new Intl.RelativeTimeFormat(getLocale(), { numeric: 'auto' });
   if (sameDay(ms, now)) return RTF ? capFirst(RTF.format(0, 'day')) : t('common.today');
   if (sameDay(ms, now - 86400000)) return RTF ? capFirst(RTF.format(-1, 'day')) : t('common.yesterday');
   const d = new Date(ms);
@@ -256,40 +241,6 @@ function formatTs(ms: number, now: number = Date.now()): string {
  *  "[展开]" toggle — mirrors ink-renderer's SystemLine.Collapsible behavior. */
 const SYS_COLLAPSE_THRESHOLD = 180;
 
-// Inter-agent "拍一拍" phrases. Read as "{from}拍了拍{to}，并{action}".
-// HANDOFF — the delegating agent passes the task to another agent (紫色派活).
-const PAT_HANDOFF_ACTIONS = [
-  '把活儿交给了 ta',
-  '请 ta 来搭把手',
-  '甩了个大活过去',
-  '喊 ta 出场救场',
-  '把接力棒递了过去',
-  '派 ta 去开工',
-  '托付了一件大事',
-  '让 ta 接手了',
-  '点名 ta 上场',
-  '请 ta 接力一棒',
-];
-// COMPLETION — the delegated agent reports back after finishing (蓝色完工).
-const PAT_DONE_ACTIONS = [
-  '交差了',
-  '把成果递了回来',
-  '报告任务完成',
-  '把活儿干完了',
-  '交卷啦',
-  '搞定收工',
-  '把接力棒还了回来',
-  '汇报了战果',
-  '功成身退',
-  '把任务画上了句号',
-];
-
-function patActionFor(seed: string, pool: readonly string[]): string {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
-  return pool[Math.abs(h) % pool.length]!;
-}
-
 function SystemLine({ m, onExpand, navigationTarget, onNavigate }: { m: ChatMessage; onExpand?: () => void; navigationTarget?: string | null; onNavigate?: (agentId: string) => void }) {
   const { t } = useTranslation();
   const resolveName = useAgentNames();
@@ -299,16 +250,13 @@ function SystemLine({ m, onExpand, navigationTarget, onNavigate }: { m: ChatMess
   const isOutgoing = m.direction === 'outgoing';
   // Inter-agent traffic (有 from + to) gets the "拍一拍" treatment: the emitter's
   // avatar replaces the emoji, and a pat phrase frames the from→to relationship.
-  // 紫色派活 (source 含 user_input) = handoff; 蓝色完工 = completion.
+  // 紫色派活 (source 含 user_input) = handoff; 蓝色回报 = task update.
   const isInterAgent = isAgentHandoff(m);
   const isHandoff = isInterAgent && (m.source ?? '').includes('user_input');
   const fromName = isInterAgent ? resolveName(m.from) : '';
   const toName = isInterAgent ? resolveName(m.to) : '';
   const patText = isInterAgent
-    ? `${fromName}拍了拍${toName}，并${patActionFor(
-        m.msgId ?? m.id ?? `${m.from}:${m.to}`,
-        isHandoff ? PAT_HANDOFF_ACTIONS : PAT_DONE_ACTIONS,
-      )}`
+    ? `${fromName} → ${toName} · ${getLocale() === 'zh' ? (isHandoff ? '交接任务' : '任务进展') : (isHandoff ? 'Task handoff' : 'Task update')}`
     : '';
   const icon = isError ? '✖' : isWarning ? '⚠' : isIncoming ? '📨' : isOutgoing ? '📤' : '·';
   const cls = [
@@ -407,64 +355,34 @@ function SystemLine({ m, onExpand, navigationTarget, onNavigate }: { m: ChatMess
   );
 }
 
-function HandoffFeed({ messages, sid, currentAgent, onNavigate }: { messages: ChatMessage[]; sid: string; currentAgent: string | null; onNavigate: (agentId: string) => void }) {
+function HandoffFeed({ messages, currentAgent, onNavigate }: { messages: ChatMessage[]; sid: string; currentAgent: string | null; onNavigate: (agentId: string) => void }) {
   const { t } = useTranslation();
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const followRef = useRef(true);
-  const [following, setFollowing] = useState(true);
-  const [historyStart, setHistoryStart] = useState(() => Math.max(0, messages.length - 50));
-  const start = following ? Math.max(0, messages.length - 50) : Math.min(historyStart, Math.max(0, messages.length - 1));
-  const olderAnchor = useRef<{ top: number; height: number } | null>(null);
-  const latest = messages.at(-1);
-  const pauseFollowing = () => {
-    if (followRef.current) setHistoryStart(Math.max(0, messages.length - 50));
-    followRef.current = false;
-    setFollowing(false);
-  };
-  const jumpLatest = () => {
-    followRef.current = true;
-    setFollowing(true);
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  };
+  const [limit, setLimit] = useState(20);
+  const historyRef = useRef<HTMLDetailsElement>(null);
+  const anchor = useRef<{ element: HTMLElement; top: number } | null>(null);
   useLayoutEffect(() => {
-    if (followRef.current) jumpLatest();
-    else if (olderAnchor.current && scrollRef.current) {
-      const el = scrollRef.current;
-      el.scrollTop = olderAnchor.current.top + el.scrollHeight - olderAnchor.current.height;
+    const saved = anchor.current;
+    if (saved) {
+      const thread = historyRef.current?.closest('.cp-thread');
+      if (thread) thread.scrollTop += saved.element.getBoundingClientRect().top - saved.top;
+      anchor.current = null;
     }
-    olderAnchor.current = null;
-  }, [latest?.id, latest?.text, start]);
-  if (!latest) return null;
-  return <HandoffPane sid={sid} label={t('taskFlow.handoffs')}>
-    <div className="cp-handoffs-header">
-      <span>{t('taskFlow.handoffs')}</span>
-      {!following && <button type="button" onClick={jumpLatest}>{t('taskFlow.latestHandoff')} <ArrowDown size={12} /></button>}
-    </div>
-    <div className="cp-handoffs-scroll" ref={scrollRef} tabIndex={0}
-      aria-label={t('taskFlow.handoffs')}
-      onScroll={() => {
-        const el = scrollRef.current;
-        if (!el) return;
-        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
-        if (atBottom) { followRef.current = true; setFollowing(true); }
-        else pauseFollowing();
-      }}>
-      {start > 0 && <button type="button" className="cp-load-earlier" onClick={() => {
-        const el = scrollRef.current;
-        if (el) olderAnchor.current = { top: el.scrollTop, height: el.scrollHeight };
-        followRef.current = false;
-        setFollowing(false);
-        setHistoryStart(Math.max(0, start - 50));
-      }}>{t('chat.loadEarlier.label', { count: start })}</button>}
-      {messages.slice(start).map(message => <div className="cp-handoff-entry" key={message.id} data-handoff-id={message.id}>
-        <SystemLine m={message} onExpand={pauseFollowing} navigationTarget={handoffNavigationTarget(message, currentAgent)} onNavigate={onNavigate} />
-      </div>)}
-    </div>
-  </HandoffPane>;
+  }, [limit]);
+  if (!messages.length) return null;
+  return <details ref={historyRef} className="cp-collaboration-history">
+    <summary>{t('taskFlow.handoffs')} · {messages.length}</summary>
+    {messages.length > limit && <button type="button" className="cp-load-earlier" onClick={() => {
+      const element = historyRef.current?.querySelector<HTMLElement>('.sys-line');
+      if (element) anchor.current = { element, top: element.getBoundingClientRect().top };
+      setLimit(value => value + 20);
+    }}>{t('chat.loadEarlier.label', { count: messages.length - limit })}</button>}
+    {messages.slice(-limit).map(message => <SystemLine key={message.id} m={message}
+      navigationTarget={handoffNavigationTarget(message, currentAgent)} onNavigate={onNavigate} />)}
+  </details>;
 }
 
 export function ChatPanel() {
+  const resolveName = useAgentNames();
   const { t } = useTranslation();
   const host = useHost();
   const deliverActions = useMemo(
@@ -805,6 +723,7 @@ export function ChatPanel() {
   // render tree instead of emitting the process as a top-level timeline row.
   // When paging hides the original anchor, attach it to the first still-visible
   // source message so the process remains inspectable with partial history.
+  const hostedCompactionIds = new Set<string>();
   const processesByHostMessageId = new Map<string, typeof taskFlowProjection.processesById[string][]>();
   for (const item of visibleTimeline) {
     if (item.kind !== 'process') continue;
@@ -816,12 +735,22 @@ export function ChatPanel() {
       : visibleSources[0];
     if (!hostMessageId) continue;
     const hosted = processesByHostMessageId.get(hostMessageId) ?? [];
-    hosted.push(process);
+    const compactions = mainMessages.filter(message => message.role === 'system'
+      && message.id.startsWith('compaction:') && !!message.turnId && message.turnId === process.turnId);
+    compactions.forEach(message => hostedCompactionIds.add(message.id));
+    hosted.push({ ...process, entries: [...process.entries, ...compactions.map(message => ({
+      kind: 'lifecycle_status' as const, id: message.id, text: message.text, ts: message.ts,
+    }))].sort((a, b) => a.ts - b.ts) });
     processesByHostMessageId.set(hostMessageId, hosted);
   }
   return (
     <SummonSelectionContext.Provider value={summonSelection}>
     <aside className="chat-panel chat-rail glass-subtle" data-testid="chat-panel">
+      <nav className="cp-role-context" aria-label={getLocale() === 'zh' ? '当前对话角色' : 'Current conversation role'}>
+        {inSubAgentView && <button type="button" onClick={backToMain} title={t('taskFlow.backToMain')} aria-label={t('taskFlow.backToMain')}><ArrowLeft size={14} /></button>}
+        <span>{resolveName(activeAgentId ?? rootAgentId) || 'Forge'}</span>
+        <span className="cp-role-context-kind">{getLocale() === 'zh' ? (inSubAgentView ? '子角色对话' : '主对话') : (inSubAgentView ? 'Specialist conversation' : 'Main conversation')}</span>
+      </nav>
       <div className="cp-body">
         <ChatAgentCapsule />
 
@@ -877,7 +806,7 @@ export function ChatPanel() {
             );
           }
           const m = messageById.get(timelineItem.messageId);
-          if (!m) return null;
+          if (!m || hostedCompactionIds.has(m.id)) return null;
           const view = visibleMessages;
           const idx = view.findIndex((message) => message.id === m.id);
           const prev = idx > 0 ? view[idx - 1] : null;
@@ -1007,6 +936,7 @@ export function ChatPanel() {
                     // the final assistant message.
                     thought={undefined}
                     thoughtCollapsed
+                    activityTools={[...m.toolCalls, ...(m.segments?.flatMap(segment => segment.kind === 'tool' ? [segment.tool] : []) ?? [])]}
                     toolCalls={projectedTools}
                     segments={projectedSegments}
                     subAgents={m.subAgents}
@@ -1074,6 +1004,7 @@ export function ChatPanel() {
         {/* Approval belongs to the scrollable conversation, not the composer
             dock. Keep it outside collapsed execution/handoff groups. */}
         <PermissionPrompt />
+      <HandoffFeed key={`${activeSid}:${activeAgentId}`} sid={activeSid ?? ''} messages={handoffMessages} currentAgent={activeAgentId ?? rootAgentId} onNavigate={navigateHandoff} />
         </div>
 
         {(unread > 0 || (pendingPermission && !following)) && (
@@ -1099,7 +1030,7 @@ export function ChatPanel() {
         />
       )}
 
-      <HandoffFeed key={`${activeSid}:${activeAgentId}`} sid={activeSid ?? ''} messages={handoffMessages} currentAgent={activeAgentId ?? rootAgentId} onNavigate={navigateHandoff} />
+
       {showFirstHint && (
         <div className="cp-first-hint" role="note">
           <div className="cp-first-hint-copy">
@@ -1117,14 +1048,6 @@ export function ChatPanel() {
           </button>
         </div>
       )}
-      {inSubAgentView && (
-        <div className="cp-subagent-bar">
-          <button type="button" className="cp-subagent-back" onClick={backToMain}>
-            <ArrowLeft size={14} aria-hidden="true" />
-            {t('taskFlow.backToMain')}
-          </button>
-        </div>
-      )}
       {showWorkingDots && (
         <div className="cp-working-dots" role="status" aria-label={t('taskFlow.processRunning')}>
           <span className="dot-pulse" aria-hidden="true">
@@ -1134,6 +1057,7 @@ export function ChatPanel() {
       )}
       <Composer
         highlight={showFirstHint}
+        delegatedWorkRunning={hasRunningHandoff(handoffMessages, activeAgentId ?? rootAgentId, streamingByAgent)}
         specialistSummonEnabled={canSummonSpecialistFromActiveThread(activeAgentId, rootAgentId)}
       />
     </aside>

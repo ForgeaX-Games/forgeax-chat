@@ -197,3 +197,8 @@ export function hasPendingAskUser(tools: Iterable<AskUserToolLike>): boolean {
 export function formatAskUserValues(values: readonly string[], emptyLabel: string): string {
   return values.length ? values.join('; ') : emptyLabel;
 }
+
+/** A terminal turn cannot retain an answerable request. No answer is inferred. */
+export function closePendingAsk<T extends AskUserToolLike>(tool: T): T {
+  return isPendingAskUser(tool) ? { ...tool, status: 'done' } : tool;
+}

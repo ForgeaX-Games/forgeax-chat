@@ -602,7 +602,13 @@ function processFromMessage(
     startedAt,
     ...(settled ? { finishedAt: message.ts + (message.durationMs ?? 0) } : {}),
     ...(settled ? { durationMs: measuredDuration } : {}),
-    entries,
+    // A terminal parent turn cannot keep its own unfinished tool rows live.
+    // Preserve missing results as interrupted rather than inventing success;
+    // delegated agents have independent lifecycle entries and remain untouched.
+    entries: settled ? entries.map(entry => entry.kind === 'tool'
+      && (entry.step.status === 'running' || entry.step.status === 'pending')
+      ? { ...entry, step: { ...entry.step, status: 'frozen' as const } }
+      : entry) : entries,
     ...(todo ? { todo } : {}),
     agentIds: processAgents(message, ownerAgentId),
   };

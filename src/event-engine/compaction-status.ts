@@ -30,16 +30,3 @@ export function formatCompactionStatus(event: StoredEvent): SystemMessage | null
     timestamp: event.ts ?? Date.now(),
   };
 }
-
-/** Loading a history snapshot is a distinct public fact from compaction. */
-export function formatContextReload(event: StoredEvent): SystemMessage | null {
-  const p = event.payload ?? {};
-  if (p.visibility === 'private_reasoning' || p.mode !== 'snapshot' || typeof p.patchId !== 'string' || !p.patchId) return null;
-  return {
-    kind: 'system', source: '', level: 'info', agent: event.emitterId ?? '',
-    turnId: typeof p.turnId === 'string' ? p.turnId : undefined,
-    compactionId: `context-reload:${event.emitterId ?? ''}:${p.patchId}`,
-    text: getLocale() === 'zh' ? '已从对话历史重新载入上下文 · 用量重新计算' : 'Context reloaded from conversation history · usage recalculated',
-    timestamp: event.ts ?? Date.now(),
-  };
-}

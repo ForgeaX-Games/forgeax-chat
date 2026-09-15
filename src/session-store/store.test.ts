@@ -868,6 +868,25 @@ describe('chat segment visibility', () => {
     expect(joined[1]).toMatchObject({ visibility: 'public_summary', text: 'public summary' });
   });
 
+  it('sends the displayed model without reading another window shared selection', async () => {
+    const sid = 'sid-model-snapshot';
+    setShellTarget(tab(sid, 'forge', 'codex'));
+    let reads = 0;
+    let selected: string | undefined;
+    globalThis.fetch = (async (input, init) => {
+      if (String(input) === '/api/commands/get_agent_model/query') reads++;
+      if (String(input) === '/api/cli/chat') {
+        selected = JSON.parse(String(init?.body)).model;
+        return new Response('event: done\ndata: {"type":"done","stopReason":"end_turn","providerId":"codex"}\n\n',
+          { headers: { 'content-type': 'text/event-stream' } });
+      }
+      return new Response('{}');
+    }) as typeof fetch;
+    await useChatStore.getState().sendMessage('continue', { model: 'gpt-5.6-luna' });
+    expect(selected).toBe('gpt-5.6-luna');
+    expect(reads).toBe(0);
+  });
+
   it('preserves public-summary visibility through CLI SSE buffering and sends the selected model', async () => {
     const sid = 'sid-public-summary';
     setShellTarget(tab(sid, 'forge', 'codex'));

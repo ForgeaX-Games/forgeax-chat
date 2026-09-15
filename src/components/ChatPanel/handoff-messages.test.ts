@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ChatMessage } from '../../session-store';
-import { isAgentHandoff, handoffNavigationTarget, hasRunningHandoff } from './handoff-messages';
+import { isAgentHandoff, handoffNavigationTarget, hasRunningHandoff, runningHandoffs } from './handoff-messages';
 import { messageReadSnapshot, unreadMessageCount } from './unread-messages';
 
 const handoff = (from: string, to: string) => ({
@@ -48,4 +48,11 @@ test('Stop remains available for a live outgoing handoff, not unrelated or compl
   expect(hasRunningHandoff([sent, returned], 'forge', { suzu: true })).toBe(false);
   expect(hasRunningHandoff([sent, returned, sent], 'forge', { suzu: true })).toBe(true);
   expect(hasRunningHandoff([sent], null, { suzu: true })).toBe(false);
+});
+
+test('active collaboration excludes completed and unrelated work and deduplicates assignments', () => {
+ const sent = handoff('forge', 'suzu');
+ expect(runningHandoffs([sent, sent], 'forge', {suzu:true,rin:true})).toEqual([sent]);
+ expect(runningHandoffs([sent, handoff('suzu','forge')], 'forge', {suzu:true})).toEqual([]);
+ expect(runningHandoffs([sent], 'forge', {suzu:false})).toEqual([]);
 });

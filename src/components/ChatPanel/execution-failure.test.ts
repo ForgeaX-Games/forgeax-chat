@@ -31,3 +31,13 @@ test('explicit API cancellation is an interruption, not an unknown failure', () 
   expect(executionFailureKind('aborted by API')).toBe('interrupted');
   expect(executionFailureKind('aborted by API: unexpected failure')).toBe('unknown');
 });
+
+
+test('connection startup failure is not presented as a tool execution failure', () => {
+  const error = "protocol: codex_appserver_required: Ask User requires Codex app-server's timeout-free dynamic tool channel; refusing finite MCP fallback: codex app-server initialize timed out after 30000ms";
+  expect(executionFailureKind(error)).toBe('connection');
+  expect(executionFailureKind('protocol: connect ECONNREFUSED 127.0.0.1')).toBe('connection');
+  expect(executionFailureKind('protocol: tool execution timed out')).toBe('protocol');
+  expect(executionFailureMessages('zh').connection).toContain('连接');
+  expect(executionFailureMessages('en').protocol).not.toContain('tool');
+});

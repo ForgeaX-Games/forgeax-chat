@@ -7,13 +7,14 @@ export function failureContinuation(laterStatuses: readonly string[], otherAgent
   return undefined;
 }
 
-export type FailureKind = 'validation' | 'interrupted' | 'protocol' | 'unknown';
+export type FailureKind = 'validation' | 'interrupted' | 'protocol' | 'connection' | 'unknown';
 
 /** Classify public error text without depending on a particular host tool.
  * Producer diagnostics may contain truncated JSON, so retain the text intact. */
 export function executionFailureKind(error: string): FailureKind {
   if (/"errorCategory"\s*:\s*"validation"|invalid (?:arguments|parameters)|validation (?:failed|error)|InputValidationError|value does not match pattern/i.test(error)) return 'validation';
   if (/^(?:aborted by API|turn interrupted|turn aborted|request (?:cancelled|canceled)|execution interrupted)$/i.test(error.trim())) return 'interrupted';
+  if (/(?:app-server|connection).*initialize timed out|ECONNREFUSED|connection refused/i.test(error)) return 'connection';
   if (/^protocol:|"errorCategory"\s*:\s*"protocol"/i.test(error.trim())) return 'protocol';
   return 'unknown';
 }
@@ -23,7 +24,8 @@ const messages = {
     validation: 'A tool request did not pass validation. This turn has stopped.',
     interrupted: 'This turn was stopped.',
     interruptedHelp: 'Completed work is preserved. You can continue in a later turn.',
-    protocol: 'A tool could not complete its request. This turn has stopped.',
+    protocol: 'The request could not be completed. This turn has stopped.',
+    connection: 'The agent connection could not be established. This turn has stopped.',
     unknown: 'This turn could not be completed.',
     validationHelp: 'Review the parameter details and correct the request or update the affected tool before continuing.',
     help: 'Completed steps are preserved. Review the details before deciding how to continue.',
@@ -37,7 +39,8 @@ const messages = {
     validation: '工具请求未通过参数校验，本回合已停止。',
     interrupted: '本回合已停止。',
     interruptedHelp: '已完成的工作已保留，可以在后续对话中继续。',
-    protocol: '工具未能完成请求，本回合已停止。',
+    protocol: '请求未能完成，本回合已停止。',
+    connection: '未能建立 Agent 连接，本回合已停止。',
     unknown: '本回合未能完成。',
     validationHelp: '请查看详情中的参数信息，修正请求或更新相关工具后再继续。',
     help: '已完成的步骤会保留，请查看详情后决定如何继续。',

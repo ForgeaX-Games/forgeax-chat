@@ -1,3 +1,7 @@
+import { ForgeText } from './message-parts/ForgeText';
+import { collaborationUpdates } from './collaboration-updates';
+import { CollaborationDock } from './CollaborationDock';
+import { collaborationWork, isCollaborationActive } from './collaboration-status';
 import { DelegationCard } from './DelegationCard';
 import type { DelegationMessage } from '../../event-engine/delegation-status';
 import { failureContinuation } from './execution-failure';
@@ -357,6 +361,8 @@ function SystemLine({ m, onExpand, navigationTarget, onNavigate }: { m: ChatMess
 
 function HandoffFeed({ messages, currentAgent, onNavigate }: { messages: ChatMessage[]; sid: string; currentAgent: string | null; onNavigate: (agentId: string) => void }) {
   const { t } = useTranslation();
+  const resolveName = useAgentNames();
+  const zh = getLocale() === 'zh';
   const [limit, setLimit] = useState(20);
   const historyRef = useRef<HTMLDetailsElement>(null);
   const anchor = useRef<{ element: HTMLElement; top: number } | null>(null);
@@ -369,19 +375,30 @@ function HandoffFeed({ messages, currentAgent, onNavigate }: { messages: ChatMes
     }
   }, [limit]);
   if (!messages.length) return null;
-  return <details ref={historyRef} className="cp-collaboration-history">
-    <summary>{t('taskFlow.handoffs')} · {messages.length}</summary>
+  return <>
+    <details ref={historyRef} className="cp-collaboration-history">
+    <summary>{t('taskFlow.handoffs')} · {messages.length} {getLocale() === 'zh' ? '条消息' : 'messages'}</summary>
     {messages.length > limit && <button type="button" className="cp-load-earlier" onClick={() => {
-      const element = historyRef.current?.querySelector<HTMLElement>('.sys-line');
+      const element = historyRef.current?.querySelector<HTMLElement>('.cp-handoff-log-entry');
       if (element) anchor.current = { element, top: element.getBoundingClientRect().top };
       setLimit(value => value + 20);
     }}>{t('chat.loadEarlier.label', { count: messages.length - limit })}</button>}
-    {messages.slice(-limit).map(message => <SystemLine key={message.id} m={message}
-      navigationTarget={handoffNavigationTarget(message, currentAgent)} onNavigate={onNavigate} />)}
-  </details>;
+    {messages.slice(-limit).map(message => {
+      const target = handoffNavigationTarget(message, currentAgent);
+      const label = message.source?.includes('user_input') ? (zh ? '派发任务' : 'Assigned task') : (zh ? '收到消息' : 'Message received');
+      return <details className="cp-handoff-log-entry" key={message.id}>
+        <summary><span>{resolveName(message.from ?? '') || message.from} → {resolveName(message.to ?? '') || message.to} · {label}</span><time>{new Date(message.ts).toLocaleTimeString(zh ? 'zh-CN' : 'en-GB', { hour: '2-digit', minute: '2-digit' })}</time></summary>
+        <div className="cp-handoff-log-body">
+          <ForgeText text={message.text} animated={false} size="sm" />
+          {target && <button type="button" className="cp-collaboration-toggle" onClick={() => onNavigate(target)}>{zh ? '查看角色对话' : 'View conversation'} <ArrowRight size={12} aria-hidden="true" /></button>}
+        </div>
+      </details>;
+    })}
+  </details></>;
 }
 
 export function ChatPanel() {
+  const collaborationExpansion = useRef(new Map<string, boolean>());
   const resolveName = useAgentNames();
   const { t } = useTranslation();
   const host = useHost();
@@ -391,7 +408,6 @@ export function ChatPanel() {
   );
   const messages = useActiveMessages();
   const streamingByAgent = useActiveStreamingByAgent();
-  const mainMessages = useMemo(() => messages.filter(message => !isAgentHandoff(message)), [messages]);
   const handoffMessages = useMemo(() => messages.filter(isAgentHandoff), [messages]);
   // The session's bound agent owns every turn it streams, so it is also the
   // default attribution for the round's tasks (`providerId` names the kernel,
@@ -399,6 +415,11 @@ export function ChatPanel() {
   const ownerAgentId = useShellStore(
     (s) => s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null,
   );
+  const groupedUpdates = useMemo(() => collaborationUpdates(messages, ownerAgentId), [messages, ownerAgentId]);
+  const mainMessages = useMemo(() => {
+    const groupedIds = new Set(groupedUpdates.map(message => message.id));
+    return messages.filter(message => !isAgentHandoff(message) && !groupedIds.has(message.id));
+  }, [messages, groupedUpdates]);
   const projectionSid = useShellStore((s) => s.activeSid);
   const sessionTabs = useShellStore((s) => s.tabs);
   const knownSessionSidsRef = useRef<Set<string> | null>(null);
@@ -620,12 +641,34 @@ export function ChatPanel() {
   const rewindDirtyNotice = useActiveRewindDirtyNotice();
   const chatStreaming = useActiveStreaming();
   const pendingPermission = usePendingPermission(activeSid);
+  const peerMessages = useChatStore(state => activeSid ? state.bySid[activeSid]?.messagesByAgent : undefined);
+  const collaboration = useMemo(() => {
+    const waiting = Object.entries(peerMessages ?? {}).filter(([, rows]) => {
+      const latest = rows.filter(row => row.role === 'assistant').at(-1);
+      return latest?.status === 'streaming' && hasPendingAskUser([
+        ...latest.toolCalls, ...(latest.segments?.flatMap(segment => segment.kind === 'tool' ? [segment.tool] : []) ?? []),
+      ]);
+    }).map(([agent]) => agent);
+    return collaborationWork(messages, activeAgentId ?? rootAgentId, streamingByAgent, pendingPermission?.agent, waiting);
+  }, [messages, activeAgentId, rootAgentId, streamingByAgent, pendingPermission?.agent, peerMessages]);
+  const collaboratorCount = new Set(collaboration.filter(item => isCollaborationActive(item.status)).map(item => item.agent)).size;
   const latestAssistant = messages.filter((message) => message.role === 'assistant').at(-1);
   const waitingForAnswer = latestAssistant?.status === 'streaming' && hasPendingAskUser([
     ...latestAssistant.toolCalls,
     ...(latestAssistant.segments?.flatMap((segment) => segment.kind === 'tool' ? [segment.tool] : []) ?? []),
   ]);
-  const showWorkingDots = chatStreaming && !pendingPermission && !waitingForAnswer;
+  const showActivity = chatStreaming && !pendingPermission && !waitingForAnswer;
+  // Only inspect this turn: completed turns must never lend a stale tool label.
+  const activeTools = latestAssistant?.status === 'streaming'
+    ? [...latestAssistant.toolCalls,
+      ...(latestAssistant.segments?.flatMap((segment) => segment.kind === 'tool' ? [segment.tool] : []) ?? [])]
+    : [];
+  const latestRunningTool = activeTools.filter((tool) => tool.status === 'running').at(-1);
+  const activityLabel = latestRunningTool
+    ? `${t('taskFlow.processRunning')} · ${latestRunningTool.name.replace(/_/g, ' ')}`
+    : collaboratorCount > 0
+      ? (getLocale() === 'zh' ? `正在处理任务 · ${collaboratorCount} 位角色协作中` : `Working on the task · ${collaboratorCount} ${collaboratorCount === 1 ? 'collaborator' : 'collaborators'}`)
+      : `${t('taskFlow.thinking')}…`;
   const checkpointMsgIds = useActiveCheckpointMsgIds();
   // 确认浮层:点「⟲ 回到这里」后置 {msgId};null = 关闭。
   const [rewindConfirm, setRewindConfirm] = useState<string | null>(null);
@@ -747,7 +790,7 @@ export function ChatPanel() {
     <SummonSelectionContext.Provider value={summonSelection}>
     <aside className="chat-panel chat-rail glass-subtle" data-testid="chat-panel">
       <nav className="cp-role-context" aria-label={getLocale() === 'zh' ? '当前对话角色' : 'Current conversation role'}>
-        {inSubAgentView && <button type="button" onClick={backToMain} title={t('taskFlow.backToMain')} aria-label={t('taskFlow.backToMain')}><ArrowLeft size={14} /></button>}
+        {inSubAgentView && <button type="button" onClick={backToMain} title={t('taskFlow.backToMain')} aria-label={t('taskFlow.backToMain')}><ArrowLeft size={14} aria-hidden="true" /><span>{t('taskFlow.backToMain')}</span></button>}
         <span>{resolveName(activeAgentId ?? rootAgentId) || 'Forge'}</span>
         <span className="cp-role-context-kind">{getLocale() === 'zh' ? (inSubAgentView ? '子角色对话' : '主对话') : (inSubAgentView ? 'Specialist conversation' : 'Main conversation')}</span>
       </nav>
@@ -1004,7 +1047,10 @@ export function ChatPanel() {
         {/* Approval belongs to the scrollable conversation, not the composer
             dock. Keep it outside collapsed execution/handoff groups. */}
         <PermissionPrompt />
-      <HandoffFeed key={`${activeSid}:${activeAgentId}`} sid={activeSid ?? ''} messages={handoffMessages} currentAgent={activeAgentId ?? rootAgentId} onNavigate={navigateHandoff} />
+      {(collaboration.length > 0 || handoffMessages.length > 0) && <CollaborationDock key={`${activeSid}:${activeAgentId}`} work={collaboration} updates={groupedUpdates} onNavigate={navigateHandoff}
+        initialExpanded={collaborationExpansion.current.get(JSON.stringify([activeSid, activeAgentId ?? rootAgentId])) ?? false}
+        onExpandedChange={open => { collaborationExpansion.current.set(JSON.stringify([activeSid, activeAgentId ?? rootAgentId]), open); }}
+        history={handoffMessages.length > 0 ? <HandoffFeed sid={activeSid ?? ''} messages={handoffMessages} currentAgent={activeAgentId ?? rootAgentId} onNavigate={navigateHandoff} /> : undefined} /> }
         </div>
 
         {(unread > 0 || (pendingPermission && !following)) && (
@@ -1048,11 +1094,9 @@ export function ChatPanel() {
           </button>
         </div>
       )}
-      {showWorkingDots && (
-        <div className="cp-working-dots" role="status" aria-label={t('taskFlow.processRunning')}>
-          <span className="dot-pulse" aria-hidden="true">
-            <span /><span /><span />
-          </span>
+      {showActivity && (
+        <div className="cp-live-activity" role="status" aria-live="polite" aria-atomic="true">
+          <span className="cp-live-activity-label" title={activityLabel}>{activityLabel}</span>
         </div>
       )}
       <Composer

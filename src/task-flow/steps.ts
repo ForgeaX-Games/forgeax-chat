@@ -31,7 +31,9 @@ function baseName(path: string): string {
 }
 
 export function stepLabel(tool: TaskFlowToolCall): string {
-  const path = stringArg(tool.args, 'file_path', 'path', 'file');
+  const changes = objectOf(tool.args).changes;
+  const path = stringArg(tool.args, 'file_path', 'path', 'file')
+    ?? (Array.isArray(changes) ? stringArg(changes[0], 'path') : undefined);
   const command = stringArg(tool.args, 'command', 'cmd');
   const key = LABEL_KEYS[tool.name];
   const label = key ? t(`taskFlow.tool.${key}`) : tool.name.replace(/[_-]+/g, ' ');
@@ -84,8 +86,9 @@ export function buildStep(
  * asset count, which outranks the plain settled/failed marker.
  */
 export function stepBadge(step: Step): string {
+  if (step.status === 'frozen') return t('taskFlow.processAborted');
   if (step.diff) return `+${step.diff.insertions} −${step.diff.deletions}`;
   if (step.assetCount) return t('taskFlow.badgeAssets', { count: step.assetCount });
   if (step.status === 'error') return t('taskFlow.badgeError');
-  return step.status === 'done' || step.status === 'frozen' ? t('taskFlow.badgeDone') : '';
+  return step.status === 'done' ? t('taskFlow.badgeDone') : '';
 }

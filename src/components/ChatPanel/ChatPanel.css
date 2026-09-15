@@ -551,12 +551,22 @@ button.cp-agent-bar-id.is-empty:focus-visible .cp-agent-bar-id-arrow {
   color: rgba(196,163,255,0.95);
 }
 
-.cp-working-dots {
+.cp-live-activity {
   flex: none;
   display: flex;
   align-items: center;
-  height: 28px;
-  padding: 0 14px;
+  min-height: 28px;
+  min-width: 0;
+  padding: 2px 18px;
+}
+.cp-live-activity-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 20px;
 }
 
 .cp-thread {
@@ -5052,7 +5062,7 @@ button.cb-mbsel-menu-head {
 .sys-pat-navigate:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 /* A subtle activity shimmer; preserve readable static text for reduced motion. */
-.kc-statusword-in, .kc-loading-label, .tx-phase-running .tx-proc-mt {
+.cp-live-activity-label, .kc-statusword-in, .kc-loading-label, .tx-phase-running .tx-proc-mt {
   color: var(--text-secondary, #aaa);
   background: linear-gradient(100deg, #929292 25%, #eeeeee 48%, #929292 70%);
   background-size: 220% 100%;
@@ -5061,9 +5071,15 @@ button.cb-mbsel-menu-head {
   -webkit-text-fill-color: transparent;
   animation: kc-work-shimmer 2.4s linear infinite;
 }
+/* Keep composer activity quieter than the conversation's content. */
+.cp-live-activity-label {
+  color: #929292;
+  background-image: linear-gradient(100deg, #858585 25%, #b8b8b8 48%, #858585 70%);
+  animation-duration: 3s;
+}
 @keyframes kc-work-shimmer { from { background-position: 170% 0; } to { background-position: -70% 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .kc-statusword-in, .kc-loading-label, .tx-phase-running .tx-proc-mt { animation: none; background: none; -webkit-text-fill-color: currentColor; }
+  .cp-live-activity-label, .kc-statusword-in, .kc-loading-label, .tx-phase-running .tx-proc-mt { animation: none; background: none; -webkit-text-fill-color: currentColor; }
 }
 
 .status-stopped, .tx-phase-aborted > .tx-proc-head { color: var(--color-text-secondary); }
@@ -5087,3 +5103,49 @@ button.cb-mbsel-menu-head {
 .cb-slash-name { grid-column: 1; white-space: normal; overflow-wrap: anywhere; }
 .cb-slash-desc { grid-column: 1; white-space: normal; font-style: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--color-text-secondary); }
 .cb-slash-item .cb-slash-arrow { grid-column: 2; grid-row: 1 / span 3; align-self: start; margin: 0; }
+
+.tx-delegation-detail { display: grid; gap: 8px; overflow-wrap: anywhere; }
+.tx-delegation-brief { white-space: pre-wrap; }
+.tx-delegation-detail small { color: var(--color-text-secondary, #999); }
+.cp-active-handoffs { display: grid; gap: 6px; margin: 8px 0; }
+.cp-active-handoffs > button { display: grid; grid-template-columns: 1fr auto; gap: 5px 10px; width: 100%; padding: 9px 12px; text-align: left; font: inherit; font-size: 12px; color: var(--color-text-secondary, #aaa); background: transparent; border: 1px solid var(--color-border, #393939); border-radius: 8px; cursor: pointer; }
+.cp-collaborator-status { grid-column: 1; animation: collaborator-pulse 2s ease-in-out infinite; }
+.cp-collaborator-brief { grid-column: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cp-active-handoffs svg { grid-column: 2; grid-row: 1 / 3; align-self: center; }
+.cp-active-handoffs > button:hover { background: rgba(255,255,255,.04); }
+@keyframes collaborator-pulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .cp-collaborator-status { animation: none; } }
+
+/* Tool details share one compact surface, rather than one card per scalar. */
+.tx-tool-inputs { display: grid; gap: 0; margin: 4px 0 10px; border: 1px solid var(--color-border, #393939); border-radius: 6px; overflow: hidden; }
+.tx-tool-field { display: grid; grid-template-columns: minmax(64px, 28%) minmax(0, 1fr); align-items: baseline; gap: 8px; padding: 5px 9px; font-size: 12px; }
+.tx-tool-field + .tx-tool-field { border-top: 1px solid rgba(128,128,128,.12); }
+.tx-tool-detail-label { font-size: 11px; color: var(--color-text-secondary, #999); margin: 0; overflow-wrap: anywhere; }
+.tx-tool-field-value { color: var(--color-text, #ccc); overflow-wrap: anywhere; }
+.tx-tool-field.is-block { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.tx-tool-detail-content { font: 11px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; margin: 0; padding: 8px 10px; background: rgba(128,128,128,.055); border-radius: 5px; color: var(--color-text-secondary, #b0b0b0); }
+.tx-tool-output { border-top: 1px solid var(--color-border, #393939); padding-top: 8px; margin-top: 8px; }
+.tx-tool-output > .tx-tool-detail-label { margin-bottom: 5px; }
+.tx-value { min-width: 0; }
+.tx-value-toggle { display: block; border: 0; background: none; padding: 5px 0; color: var(--color-text-secondary, #aaa); font: inherit; font-size: 11px; cursor: pointer; }
+.tx-value-toggle:hover { color: var(--color-text, #ddd); }
+.tx-data-fields { margin: 0; font-size: 11px; line-height: 1.6; max-height: 320px; overflow: auto; }
+.tx-data-field { display: grid; grid-template-columns: minmax(60px, 30%) minmax(0, 1fr); gap: 8px; padding: 3px 0; }
+.tx-data-field dt { color: var(--color-text-secondary, #999); overflow-wrap: anywhere; }
+.tx-data-field dd { margin: 0; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.tx-data-field > details { grid-column: 1 / -1; min-width: 0; }
+.tx-data-field summary { cursor: pointer; color: var(--color-text-secondary, #aaa); overflow-wrap: anywhere; }
+.tx-data-field details > .tx-data-fields { margin-left: 9px; padding-left: 9px; border-left: 1px solid var(--color-border, #393939); }
+.tx-data-count { margin-left: 6px; opacity: .55; }
+.tx-code-add { color: #8cba9b; }
+.tx-code-remove { color: #c99393; }
+.tx-code-range { color: #8aa7ba; }
+
+.tx-transport-details { margin-top: 6px; font-size: 11px; color: var(--color-text-secondary, #999); }
+.tx-transport-details > summary { cursor: pointer; }
+
+.cp-role-context button { gap: 5px; padding: 3px 7px; font: inherit; color: var(--color-text-secondary); white-space: nowrap; flex-shrink: 0; border-radius: 4px; }
+.cp-role-context button:hover { background: var(--color-bg-secondary); color: var(--color-text-primary); }
+.cp-role-context button:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.cp-role-context > span:not(.cp-role-context-kind) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-role-context-kind { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

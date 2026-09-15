@@ -7,7 +7,6 @@
  */
 const CHAT_MESSAGE_EVENTS = new Set([
   'compaction.status',
-  'kernel_history_applied',
   'delegation:state',
   'user_input',
   'message',

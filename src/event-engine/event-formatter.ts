@@ -26,7 +26,7 @@ import { registerSubagentFormatters } from './subagent-events';
 import { stringifyToolResult, truncateToolResult } from './tool-result';
 import { normalizeToolCall } from './tool-name';
 import { t } from '@/i18n';
-import { formatCompactionStatus, formatContextReload } from './compaction-status';
+import { formatCompactionStatus } from './compaction-status';
 import { isChatMessageEvent } from './chat-visibility';
 
 // ── Minimal LLMMessage shape (matches wire format from forgeax-server) ──
@@ -457,7 +457,9 @@ export function formatEvent(event: StoredEvent, viewerId?: string): RendererMess
   const p = (event.payload ?? {}) as Record<string, unknown>;
   // Apply before error/warning shortcuts too: diagnostics may carry both.
   if (!isChatMessageEvent(event.type, p)) return null;
-  if (event.type === 'kernel_history_applied') return formatContextReload(event);
+  // Snapshot acknowledgements also occur on the first turn. They do not
+  // establish compaction, history recovery, or a token-usage recalculation.
+  if (event.type === 'kernel_history_applied') return null;
   if (event.type === 'compaction.status') return formatCompactionStatus(event);
   if (event.type === 'delegation:state') return formatDelegationStatus(event);
   const delegation = formatDelegationStatus(event);

@@ -620,7 +620,7 @@ describe('projectWorkTimeline', () => {
     const assistant = message('a1', 'assistant', [
       { kind: 'tool', tool: todo('in_progress'), ts: 2 },
       { kind: 'tool', tool: pendingAsk, ts: 3 },
-    ]);
+    ], 'streaming');
     assistant.turnId = 'turn-todo-ask';
 
     const result = projectWorkTimeline([assistant]);
@@ -800,5 +800,35 @@ describe('projectWorkTimeline', () => {
       { kind: 'artifact', artifactId: 'artifact-replayed' },
     ]);
     assert.equal(result.artifactMessageIds['artifact-replayed'], 'a1');
+  });
+});
+
+
+describe('terminal process tool status', () => {
+  for (const status of ['done', 'error', 'streaming'] as const) {
+    it(`projects unfinished tools for ${status} without inventing results`, () => {
+      const pending = { ...tool('read_file', 'unfinished'), status: 'running' as const };
+      const assistant = message('a1', 'assistant', [
+        { kind: 'tool', tool: pending, ts: 2 },
+        { kind: 'tool', tool: tool('read_file', 'finished'), ts: 3 },
+      ], status);
+      const result = projectWorkTimeline([assistant]);
+      const process = Object.values(result.processesById)[0]!;
+      const steps = process.entries.flatMap(entry => entry.kind === 'tool' ? [entry.step] : []);
+      assert.equal(steps[0]?.status, status === 'streaming' ? 'running' : 'frozen');
+      assert.equal(steps[1]?.status, 'done');
+      assert.equal(pending.status, 'running');
+      assert.equal(steps[0]?.tool?.result, undefined);
+    });
+  }
+  it('stops unfinished tools on an aborted turn even if its message is still streaming', () => {
+    const assistant = message('a1', 'assistant', [{ kind: 'tool', tool: {
+      ...tool('bash', 'pending'), status: 'running',
+    }, ts: 2 }], 'streaming');
+    assistant.turnAborted = true;
+    const process = Object.values(projectWorkTimeline([assistant]).processesById)[0]!;
+    assert.equal(process.phase, 'aborted');
+    const entry = process.entries[0]!;
+    assert.equal(entry.kind === 'tool' && entry.step.status, 'frozen');
   });
 });

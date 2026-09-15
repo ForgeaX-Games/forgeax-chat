@@ -1,0 +1,46 @@
+.cp-collaboration-dock { flex: none; margin: 6px 12px; border: 1px solid var(--color-border-default); border-radius: 10px; background: var(--color-bg-secondary, #202024); overflow: hidden; font-size: 12px; }
+.cp-collaboration-heading { padding: 8px 10px 4px; color: var(--color-text-primary); font-size: 11px; }
+.cp-collaboration-items { max-height: min(220px, 28vh); overflow-y: auto; overscroll-behavior: contain; }
+.cp-collaboration-item { display: flex; align-items: flex-start; gap: 8px; width: 100%; border: 0; background: transparent; padding: 9px 10px; color: var(--color-text-secondary); font: inherit; text-align: left; cursor: pointer; }
+.cp-collaboration-item > svg { flex: none; margin-top: 2px; color: var(--primary); }
+.cp-collaboration-item:hover { background: color-mix(in srgb, var(--color-text-primary) 5%, transparent); }
+.cp-collaboration-item:focus-visible, .cp-collaboration-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.cp-collaboration-content { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.cp-collaboration-title { color: var(--color-text-primary); font-weight: 600; }
+.cp-collaboration-summary { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; line-height: 1.5; }
+.cp-collaboration-content small { font-size: 10px; opacity: .8; font-variant-numeric: tabular-nums; }
+.cp-collaboration-link { display: flex; align-items: center; gap: 3px; flex: none; font-size: 10px; color: var(--primary); }
+.cp-collaboration-result { font-size: 11px; border-top: 1px solid var(--color-border-default); }
+.cp-collaboration-item[data-status="failed"] > svg, .cp-collaboration-item[data-status="waiting_permission"] > svg { color: var(--color-warning, #e9b75b); }
+.cp-collaboration-toggle { border: 0; background: transparent; color: var(--primary); padding: 6px 10px; font: inherit; font-size: 10px; cursor: pointer; }
+.cp-collaboration-spinner { animation: collaboration-spin 1.6s linear infinite; }
+@keyframes collaboration-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .cp-collaboration-spinner { animation: none; } }
+
+.cp-collaboration-updates { border-top: 1px solid var(--color-border-default); font-size: 11px; }
+.cp-collaboration-updates > summary { padding: 7px 10px; cursor: pointer; color: var(--color-text-secondary); }
+.cp-collaboration-update-list { max-height: 160px; overflow-y: auto; padding: 0 10px; }
+.cp-collaboration-update { padding: 8px 0; border-top: 1px solid var(--color-border-default); }
+.cp-collaboration-update > time { display: block; font-size: 10px; margin-bottom: 5px; color: var(--color-text-secondary); }
+
+/* Keep the only collaboration entry compact and inside scrollback. */
+.cp-collaboration-dock { margin: 8px 0; border: 0; border-top: 1px solid var(--color-border-default); border-radius: 0; background: transparent; }
+.cp-collaboration-heading { display: list-item; padding: 10px 4px; cursor: pointer; color: var(--color-text-secondary); font-size: 12px; }
+.cp-collaboration-heading:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.cp-collaboration-heading[data-active="true"] > span { background: linear-gradient(100deg, var(--color-text-secondary) 30%, var(--color-text-primary) 50%, var(--color-text-secondary) 70%); background-size: 250% 100%; background-clip: text; -webkit-background-clip: text; color: transparent; animation: collaboration-sweep 2.4s linear infinite; }
+.cp-collaboration-dock > .cp-collaboration-history { margin-top: 4px; }
+@keyframes collaboration-sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .cp-collaboration-heading[data-active="true"] > span { animation: none; } }
+
+/* The conversation owns scrolling; never crop an active collaborator mid-row. */
+.cp-collaboration-items { max-height: none; overflow: visible; }
+.cp-collaboration-summary { -webkit-line-clamp: 1; }
+.cp-collaboration-item { padding: 7px 4px; }
+.cp-handoff-log-entry { border-top: 1px solid var(--color-border-default); font-size: 11px; color: var(--color-text-secondary); }
+.cp-handoff-log-entry > summary { display: flex; align-items: center; gap: 8px; padding: 8px 4px; cursor: pointer; }
+.cp-handoff-log-entry > summary::before { content: '▸'; flex: none; }
+.cp-handoff-log-entry[open] > summary::before { content: '▾'; }
+.cp-handoff-log-entry > summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-handoff-log-entry time { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
+.cp-handoff-log-entry > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.cp-handoff-log-body { padding: 4px 12px 8px; overflow-wrap: anywhere; }

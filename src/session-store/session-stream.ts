@@ -31,7 +31,7 @@ import {
   type TurnSnapshotFrame,
 } from '../session-bridge';
 import { ratioFromUsage } from '../event-engine/turn-accumulator';
-import { formatCompactionStatus, formatContextReload } from '../event-engine/compaction-status';
+import { formatCompactionStatus } from '../event-engine/compaction-status';
 import { isChatMessageEvent } from '../event-engine/chat-visibility';
 import { mergeToolResult } from '../event-engine/tool-result';
 import { inferToolNameFromResult, normalizeHookToolCall } from '../event-engine/event-formatter';
@@ -574,11 +574,7 @@ export function dispatchSessionEvent(evt: SessionEvent): void {
     return;
   }
 
-  if (type === 'kernel_history_applied') {
-    const message = visible ? formatContextReload({ ...event, emitterId: emitter ?? undefined }) : null;
-    if (message) pushSystemMessage(sid, emitter, { ...message, ts: message.timestamp });
-    return;
-  }
+  if (type === 'kernel_history_applied') return; // Internal acknowledgement, not a user-visible recovery.
 
   if (type === 'compaction.status') {
     const message = visible ? formatCompactionStatus({ ...event, emitterId: emitter ?? undefined }) : null;

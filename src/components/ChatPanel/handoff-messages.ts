@@ -24,15 +24,19 @@ export function handoffNavigationTarget(message: ChatMessage, currentAgent: stri
  * session activity and incoming handoffs do not confer cancellation ownership.
  */
 export function hasRunningHandoff(messages: ChatMessage[], currentAgent: string | null, running: Record<string, boolean>): boolean {
-  if (!currentAgent) return false;
-  const current = agentIdFromRef(currentAgent);
+  return runningHandoffs(messages, currentAgent, running).length > 0;
+}
+
+/** Latest outgoing assignments whose recipients are actually streaming in this session. */
+export function runningHandoffs(messages: ChatMessage[], currentAgent: string | null, running: Record<string, boolean>): ChatMessage[] {
+  if (!currentAgent) return [];
   const seen = new Set<string>();
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]!;
+  const result: ChatMessage[] = [];
+  for (const message of [...messages].reverse()) {
     const peer = handoffNavigationTarget(message, currentAgent);
     if (!peer || seen.has(peer)) continue;
     seen.add(peer);
-    if (agentIdFromRef(message.from!) === current && running[peer]) return true;
+    if (agentIdFromRef(message.from!) === agentIdFromRef(currentAgent) && running[peer]) result.unshift(message);
   }
-  return false;
+  return result;
 }

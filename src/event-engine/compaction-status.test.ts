@@ -105,17 +105,15 @@ test('live and replay retain the owning turn for inline process placement', () =
   expect(replay([event])[0]?.turnId).toBe('owner-turn');
 });
 
-test('snapshot reload is distinct from compaction in both replay and live views', () => {
-  const event: StoredEvent = { type: 'kernel_history_applied', emitterId: 'forge', ts: 22,
-    payload: { mode: 'snapshot', patchId: 'history-1', summary: 'SECRET' } };
-  const message = formatEvent(event);
-  expect(message?.kind).toBe('system');
-  expect(JSON.stringify(message)).not.toContain('SECRET');
-  expect(JSON.stringify(message)).toContain('context-reload:forge:history-1');
-  expect(formatEvent({ ...event, payload: { mode: 'delta', patchId: 'history-2' } })).toBeNull();
-  expect(replay([event]).some(m => m.id === 'context-reload:forge:history-1')).toBe(true);
-  dispatchSessionEvent({ type: 'session-event', sid, emitterId: 'forge', event: { ...event, source: 'runtime' } });
-  expect(useChatStore.getState().bySid[sid]?.messagesByAgent.forge?.some(m => m.id === 'context-reload:forge:history-1')).toBe(true);
+test('history acknowledgements stay diagnostic in live and replay, including first-turn snapshots', () => {
+  for (const epoch of [1, 2]) {
+    const event: StoredEvent = { type: 'kernel_history_applied', emitterId: 'forge', ts: 22,
+      payload: { mode: 'snapshot', epoch, patchId: `history-${epoch}`, summary: 'SECRET' } };
+    expect(formatEvent(event)).toBeNull();
+    expect(replay([event]).some(m => m.id?.startsWith('context-reload:'))).toBe(false);
+    dispatchSessionEvent({ type: 'session-event', sid, emitterId: 'forge', event: { ...event, source: 'runtime' } });
+    expect(useChatStore.getState().bySid[sid]?.messagesByAgent.forge?.some(m => m.id?.startsWith('context-reload:')) ?? false).toBe(false);
+  }
 });
 
 test('live kernel switching replaces old occupancy even when the new estimate rounds to zero', () => {

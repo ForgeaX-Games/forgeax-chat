@@ -502,8 +502,12 @@ export function Composer({
         ?? passiveSessionCatalogModel(catalog, m.selected, getLastModel(providerId));
       const current = stillCurrent();
       if (fallback && fallback !== m.selected && current) {
-        const res = await setAgentModels(sid, agentPath, [fallback]);
-        const selected = res.selected ?? fallback;
+        // Passive refreshes must not write shared configuration: windows can
+        // have different provider selections and otherwise overwrite each
+        // other indefinitely via runtime:config-revision notifications.
+        const selected = needsInitialSeed
+          ? (await setAgentModels(sid, agentPath, [fallback])).selected ?? fallback
+          : fallback;
         nextModel = { sid, agentPath, selected, chain: [selected], raw: [selected] };
         // The write may finish after a session/provider switch. Preserve the
         // marker in that case so the new route gets its own remembered seed.
@@ -1443,6 +1447,7 @@ export function Composer({
         ...(attachments ? { attachments } : {}),
         ...(isTargetStreaming && attachments ? { handoff: 'steer' as const } : {}),
         target: { sid: owner.sid, agentId: owner.agentId },
+        model: agentModel?.selected ?? undefined,
         summonAgentId: resolvedSummonAgentIdRef.current,
       });
       submitPreparingRef.current = false;

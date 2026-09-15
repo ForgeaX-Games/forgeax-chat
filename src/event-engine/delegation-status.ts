@@ -6,6 +6,7 @@ export interface DelegationSnapshot {
   ownerTaskId: string;
   agent: string;
   status: 'queued' | 'running' | 'waiting_permission' | 'stopping' | 'returned';
+  outcome?: 'completed' | 'failed' | 'cancelled';
 }
 export type DelegationMessage = { delegation?: DelegationSnapshot };
 
@@ -46,7 +47,7 @@ export function formatDelegationStatus(event: StoredEvent): SystemMessage | null
     const content = typeof p.content === 'string' ? p.content : '';
     text = `${recovery}\n\n${content}`;
   } else return null;
-  const delegation = event.type === 'delegation:state' ? { delegationId: p.delegationId, ownerTaskId: p.ownerTaskId as string, agent: p.agent as string, status: p.status as DelegationSnapshot['status'] } : undefined;
+  const delegation = event.type === 'delegation:state' ? { delegationId: p.delegationId, ownerTaskId: p.ownerTaskId as string, agent: p.agent as string, status: p.status as DelegationSnapshot['status'], ...(p.status === 'returned' ? { outcome: p.outcome as DelegationSnapshot['outcome'] } : {}) } : undefined;
   return { ...(delegation ? { delegation, compactionId: `delegation:${delegation.ownerTaskId}:${delegation.delegationId}` } : {}), kind: 'system', source: event.source ?? '', text, agent: event.emitterId ?? '', timestamp: event.ts ?? Date.now(),
     direction: 'incoming', from: typeof p.fromAgent === 'string' ? p.fromAgent : undefined,
     to: typeof event.to === 'string' ? event.to : undefined };

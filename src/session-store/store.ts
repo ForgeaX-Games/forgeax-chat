@@ -80,6 +80,8 @@ export interface QueuedMessage {
 }
 
 export interface SendMessageOpts {
+  /** Model displayed by the submitting composer, pinned to this request. */
+  model?: string;
   handoff?: 'steer';
   attachments?: Array<Record<string, unknown>>;
   /** Internal target pin used after async preparation and queue flushes. */
@@ -1587,11 +1589,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       // their CLI-global model, so a visible Luna selection can silently run
       // Sol. Resolve immediately before the request so the turn and the label
       // share one source of truth.
-      let selectedModel: string | undefined;
+      let selectedModel = opts?.model?.trim() || undefined;
       try {
         const { getAgentModel } = await import('@forgeax/interface/lib/model-config');
-        const state = await getAgentModel(startSid, activeAgent);
-        selectedModel = state.selected?.trim() || undefined;
+        if (!selectedModel) {
+          const state = await getAgentModel(startSid, activeAgent);
+          selectedModel = state.selected?.trim() || undefined;
+        }
       } catch {
         // Keep provider-native fallback when an old/unscaffolded session has no
         // agent model record; failure to read optional routing must not block chat.

@@ -1,3 +1,4 @@
+import { prepareChatSend } from '../send-preparation';
 /** `@forgeax/chat` conversation store (R4 — message content owned by chat).
  *
  *  This is the real home of the *message-content* domain extracted from
@@ -74,6 +75,8 @@ export interface QueuedMessage {
   id: string;
   /** Optimistic user bubble rendered at enqueue time. */
   optimisticMessageId?: string;
+  /** Model chosen when the user queued this message. */
+  model?: string;
   text: string;
   ts: number;
   summonAgentId?: string | null;
@@ -559,7 +562,7 @@ interface ChatStoreState {
   ) => void;
 
   // ── Message queue (Cursor-style "keep typing while streaming") ──
-  enqueueMessage: (text: string, opts?: Pick<SendMessageOpts, 'summonAgentId'>) => void;
+  enqueueMessage: (text: string, opts?: Pick<SendMessageOpts, 'summonAgentId' | 'model'>) => void;
   dequeueMessage: (id: string) => void;
   clearQueue: () => void;
   flushQueuedForAgent: (sid: string, agentId: string) => void;
@@ -1074,6 +1077,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const item: QueuedMessage = {
       id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       optimisticMessageId,
+      ...(opts?.model ? { model: opts.model } : {}),
       text: t,
       ts,
       ...(opts && 'summonAgentId' in opts ? { summonAgentId: opts.summonAgentId } : {}),
@@ -1175,6 +1179,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // Invalid/stale targets therefore leave the queue intact for recovery.
     void get().sendMessage(head.text, {
       target: { sid, agentId },
+      ...(head.model ? { model: head.model } : {}),
       ...(head.optimisticMessageId ? { existingUserMessageId: head.optimisticMessageId } : {}),
       ...('summonAgentId' in head ? { summonAgentId: head.summonAgentId } : {}),
       onAccepted: () => set((s) => {
@@ -1264,7 +1269,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       console.warn('[chat.sendMessage] target no longer owns session', opts.target);
       return;
     }
-    opts?.onAccepted?.();
     const sysAgent = targetAgent ?? '__none__';
     const pushSys = (txt: string): void =>
       get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
@@ -1275,6 +1279,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // render as turns in this thread.
     const loopMatch = trimmed.match(/^\/loop\s+(\d+)\s+(.+)$/s);
     if (loopMatch) {
+      opts?.onAccepted?.();
       const intervalSec = Math.max(15, Math.min(3600, Number(loopMatch[1])));
       const inlinePrompt = loopMatch[2].trim();
       const daemonId = `chat-loop-${Date.now().toString(36)}`;
@@ -1298,6 +1303,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // /tool <surface> <action> [jsonArgs] — split-surface plugin RPC.
     const toolMatch = trimmed.match(/^\/tool\s+(\S+)\s+(\S+)(?:\s+(.+))?$/s);
     if (toolMatch) {
+      opts?.onAccepted?.();
       const surfaceId = toolMatch[1];
       const action = toolMatch[2];
       const argsRaw = toolMatch[3]?.trim();
@@ -1378,6 +1384,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           return;
         }
       } else {
+        opts?.onAccepted?.();
         const displayText = expandPillsForDisplay(trimmed);
         get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
           id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
@@ -1443,6 +1450,21 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const displayText = expandPillsForDisplay(trimmed);
 
     const displayAttachments = toChatAttachments(opts?.attachments);
+
+    try {
+      const preparation = prepareChatSend({ sessionId: startSid });
+      if (preparation) await preparation;
+    }
+    catch (error) {
+      if (!opts?.existingUserMessageId) get().patchMessages(startSid, activeAgent, messages => [...messages, {
+        id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
+        ...(displayAttachments ? { attachments: displayAttachments } : {}),
+      }]);
+      pushSys(`Message was not sent: ${error instanceof Error ? error.message : 'host preparation failed'}`);
+      return;
+    }
+
+    opts?.onAccepted?.();
 
     // ── Interrupt-send (steer) ──
     if (opts?.handoff === 'steer') {

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { executionFailureKind, executionFailureMessages, failureContinuation } from './execution-failure';
+import { executionFailureKind, executionFailureMessages, failureContinuation, laterAssistantStatuses } from './execution-failure';
 
 test('summarizes public validation errors even when a protocol envelope is truncated', () => {
   const text = 'protocol: tool "example_tool" failed 2 consecutive times: {"toolUseId":"call_x","isError":true,"content":"Invalid arguments for example_tool at $.params.operationId: value does not match pattern';
@@ -40,4 +40,19 @@ test('connection startup failure is not presented as a tool execution failure', 
   expect(executionFailureKind('protocol: tool execution timed out')).toBe('protocol');
   expect(executionFailureMessages('zh').connection).toContain('连接');
   expect(executionFailureMessages('en').protocol).not.toContain('tool');
+});
+
+ test('steering is neutral only for the exact controller signal, preserving real failures', () => {
+  expect(executionFailureKind('steered by inbound event')).toBe('steered');
+  expect(executionFailureKind('steered by inbound event: runtime crashed')).toBe('unknown');
+  expect(executionFailureKind('protocol: steered by inbound event')).toBe('protocol');
+  expect(failureContinuation([], false)).toBeUndefined();
+  expect(executionFailureMessages('en').steered).not.toContain('continuing');
+ });
+
+test('missing or terminal message does not claim later activity', () => {
+ const messages = [{id:'a', role:'assistant', status:'done'}, {id:'b', role:'assistant', status:'error'}];
+ expect(laterAssistantStatuses(messages,'missing')).toEqual([]);
+ expect(laterAssistantStatuses(messages,'b')).toEqual([]);
+ expect(laterAssistantStatuses(messages,'a')).toEqual(['error']);
 });

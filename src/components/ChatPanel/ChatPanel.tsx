@@ -1,10 +1,12 @@
+import { requestGroups } from './request-groups';
+import { RequestCard } from './RequestCard';
 import { ForgeText } from './message-parts/ForgeText';
 import { collaborationUpdates } from './collaboration-updates';
 import { CollaborationDock } from './CollaborationDock';
 import { collaborationWork, isCollaborationActive } from './collaboration-status';
 import { DelegationCard } from './DelegationCard';
 import type { DelegationMessage } from '../../event-engine/delegation-status';
-import { failureContinuation } from './execution-failure';
+import { executionFailureKind, failureContinuation, laterAssistantStatuses } from './execution-failure';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ExternalLink, ArrowDown, ArrowLeft, ArrowRight, Undo2, ChevronDown, X } from 'lucide-react';
@@ -786,47 +788,7 @@ export function ChatPanel() {
     }))].sort((a, b) => a.ts - b.ts) });
     processesByHostMessageId.set(hostMessageId, hosted);
   }
-  return (
-    <SummonSelectionContext.Provider value={summonSelection}>
-    <aside className="chat-panel chat-rail glass-subtle" data-testid="chat-panel">
-      <nav className="cp-role-context" aria-label={getLocale() === 'zh' ? '当前对话角色' : 'Current conversation role'}>
-        {inSubAgentView && <button type="button" onClick={backToMain} title={t('taskFlow.backToMain')} aria-label={t('taskFlow.backToMain')}><ArrowLeft size={14} aria-hidden="true" /><span>{t('taskFlow.backToMain')}</span></button>}
-        <span>{resolveName(activeAgentId ?? rootAgentId) || 'Forge'}</span>
-        <span className="cp-role-context-kind">{getLocale() === 'zh' ? (inSubAgentView ? '子角色对话' : '主对话') : (inSubAgentView ? 'Specialist conversation' : 'Main conversation')}</span>
-      </nav>
-      <div className="cp-body">
-        <ChatAgentCapsule />
-
-        <div className="cp-thread thin-scrollbar" ref={threadRef} tabIndex={0}>
-        {messages.length === 0 && (
-          <div className="cp-empty">
-            <div className="cp-empty-title">{t('chat.empty.title')}</div>
-            <div className="cp-empty-sub">
-              {t('chat.empty.subtitle')}
-            </div>
-            {/* 2026-05-17 — EmptyBusReadout / EmptySurfacesReadout /
-               EmptyEventsTicker 3 张卡片删除。bus host 总数 / kind 拆分 /
-               UI surfaces / live events 等信号统一由底栏 GlobalStatusBar
-               (PulseFeeds 6 chip) 承载,空 session 不该塞这么多调试信息。 */}
-          </div>
-        )}
-
-        {mainMessages.length > renderLimit && (
-          <button
-            className="cp-load-earlier"
-            onClick={() => {
-              scrollFollowRef.current?.pause();
-              const el = threadRef.current;
-              if (el) topAnchorRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
-              setRenderLimit((n) => Math.min(mainMessages.length, n + MEMLEAK_CASE02_RENDER_WINDOW));
-            }}
-            title={t('chat.loadEarlier.tooltip')}
-          >
-            ↑ {t('chat.loadEarlier.label', { count: mainMessages.length - renderLimit })}
-          </button>
-        )}
-
-        {visibleTimeline.map((timelineItem) => {
+  const renderTimelineItem = (timelineItem: WorkTimelineItem, grouped = false) => {
           if (timelineItem.kind === 'process') {
             // Rendered inside the owning ForgeCard below.
             return null;
@@ -972,6 +934,7 @@ export function ChatPanel() {
               ) : (
                 <div className={`msg-block${isRewound ? ' is-rewound' : ''}`}>
                   <ForgeCard
+                    hideHeader={grouped}
                     status={m.status === 'streaming' ? 'running' : m.status === 'error' ? 'error' : 'done'}
                     text={projectedText}
                     // Raw provider reasoning is fail-closed. Public summaries
@@ -985,7 +948,7 @@ export function ChatPanel() {
                     subAgents={m.subAgents}
                     errorMessage={m.errorMessage}
                     failureContinuation={m.errorMessage ? failureContinuation(
-                      mainMessages.slice(mainMessages.indexOf(m) + 1).filter(message => message.role === 'assistant').map(message => message.status),
+                      laterAssistantStatuses(mainMessages, m.id),
                       Boolean(activeAgentId ?? rootAgentId) && Object.entries(streamingByAgent).some(([agentId, running]) => running && agentId !== (activeAgentId ?? rootAgentId)),
                     ) : undefined}
                     providerId={m.providerId}
@@ -1027,13 +990,73 @@ export function ChatPanel() {
                       const hasArtifact = (turn?.artifactIds ?? []).some(
                         (artifactId) => !!taskFlowProjection.artifactsById[artifactId],
                       );
-                      return <ProcessAccordion key={`process-${process.id}`} process={process} hasArtifact={hasArtifact} />;
+                      return <ProcessAccordion key={`process-${process.id}`} process={process} hasArtifact={hasArtifact} errorMessage={m.errorMessage} />;
                     })}
                   />
                 </div>
               )}
             </Fragment>
           );
+  };
+  return (
+    <SummonSelectionContext.Provider value={summonSelection}>
+    <aside className="chat-panel chat-rail glass-subtle" data-testid="chat-panel">
+      <nav className="cp-role-context" aria-label={getLocale() === 'zh' ? '当前对话角色' : 'Current conversation role'}>
+        {inSubAgentView && <button type="button" onClick={backToMain} title={t('taskFlow.backToMain')} aria-label={t('taskFlow.backToMain')}><ArrowLeft size={14} aria-hidden="true" /><span>{t('taskFlow.backToMain')}</span></button>}
+        <span>{resolveName(activeAgentId ?? rootAgentId) || 'Forge'}</span>
+        <span className="cp-role-context-kind">{getLocale() === 'zh' ? (inSubAgentView ? '子角色对话' : '主对话') : (inSubAgentView ? 'Specialist conversation' : 'Main conversation')}</span>
+      </nav>
+      <div className="cp-body">
+        <ChatAgentCapsule />
+
+        <div className="cp-thread thin-scrollbar" ref={threadRef} tabIndex={0}>
+        {messages.length === 0 && (
+          <div className="cp-empty">
+            <div className="cp-empty-title">{t('chat.empty.title')}</div>
+            <div className="cp-empty-sub">
+              {t('chat.empty.subtitle')}
+            </div>
+            {/* 2026-05-17 — EmptyBusReadout / EmptySurfacesReadout /
+               EmptyEventsTicker 3 张卡片删除。bus host 总数 / kind 拆分 /
+               UI surfaces / live events 等信号统一由底栏 GlobalStatusBar
+               (PulseFeeds 6 chip) 承载,空 session 不该塞这么多调试信息。 */}
+          </div>
+        )}
+
+        {mainMessages.length > renderLimit && (
+          <button
+            className="cp-load-earlier"
+            onClick={() => {
+              scrollFollowRef.current?.pause();
+              const el = threadRef.current;
+              if (el) topAnchorRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
+              setRenderLimit((n) => Math.min(mainMessages.length, n + MEMLEAK_CASE02_RENDER_WINDOW));
+            }}
+            title={t('chat.loadEarlier.tooltip')}
+          >
+            ↑ {t('chat.loadEarlier.label', { count: mainMessages.length - renderLimit })}
+          </button>
+        )}
+
+        {requestGroups(visibleTimeline.filter(item => item.kind !== 'message' || !hostedCompactionIds.has(item.messageId)), mainMessages).map(group => {
+          if (group.assistantIds.length < 2) return group.items.map(item => renderTimelineItem(item));
+          const latest = messageById.get(group.assistantIds.at(-1)!);
+          if (!latest) return null;
+          const history = group.items.slice(0, -1);
+          const previous = group.assistantIds.slice(0, -1).flatMap(id => messageById.get(id) ?? []);
+          const actionable = previous.some(message => message.status === 'streaming' || hasPendingAskUser([
+            ...message.toolCalls, ...(message.segments?.flatMap(segment => segment.kind === 'tool' ? [segment.tool] : []) ?? []),
+          ]));
+          const failures = previous.filter(message => message.errorMessage && !['steered', 'interrupted'].includes(executionFailureKind(message.errorMessage))).length;
+          return <RequestCard key={`${activeSid}:${activeAgentId}:${group.key}`} id={`${activeSid}:${activeAgentId}:${group.key}`}
+            count={previous.length} failures={failures} actionable={actionable}
+            header={<ForgeCard headerOnly status={latest.status === 'streaming' ? 'running' : latest.status === 'error' ? 'error' : 'done'}
+              text="" errorMessage={latest.errorMessage} providerId={latest.providerId}
+              agentName={activeAgentId ?? undefined} agentId={activeAgentId ?? undefined} timestamp={formatTs(latest.ts)}
+              activityTools={[...latest.toolCalls, ...(latest.segments?.flatMap(segment => segment.kind === 'tool' ? [segment.tool] : []) ?? [])]} />}
+            history={history.map(item => renderTimelineItem(item, true))}>
+            {renderTimelineItem(group.items.at(-1)!, true)}
+          </RequestCard>;
         })}
         {/* code-only 软回退:消息列表不动,横幅挂线程尾部提供恢复入口。
             会话回退但目标消息不在本地列表(刷新边界)时同样兜底渲染在尾部。 */}

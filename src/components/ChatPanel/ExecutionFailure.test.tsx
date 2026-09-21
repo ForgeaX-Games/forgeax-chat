@@ -31,3 +31,13 @@ test('user cancellation has a pause marker rather than an error alert', () => {
   expect(html).not.toContain('lucide-alert-circle');
   expect(html).toContain('data-failure-kind="interrupted"');
 });
+
+test('steered execution is neutral and does not invent an active continuation', () => {
+ const html = renderToStaticMarkup(<ExecutionFailure error="steered by inbound event" />);
+ expect(html).toContain('收到新反馈，本次执行已让出');
+ expect(html).not.toContain('lucide-alert-circle');
+ expect(html).not.toContain('正在后续执行');
+ expect(html).toContain('steered by inbound event');
+ const active = renderToStaticMarkup(<ExecutionFailure error="steered by inbound event" continuation="working" />);
+ expect(active).toContain('正在后续执行');
+});

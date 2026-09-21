@@ -1429,7 +1429,7 @@ export function Composer({
           // Read the latest committed resolution at the capture point: model
           // readiness/file reads above are async, so the previously rendered
           // local value could be stale if the catalog disappeared meanwhile.
-          enqueueMessage(t, { summonAgentId: resolvedSummonAgentIdRef.current });
+          enqueueMessage(t, { summonAgentId: resolvedSummonAgentIdRef.current, model: agentModel?.selected ?? undefined });
           clearComposerDraft(owner.sid, owner.agentId);
           setText('');
           return;
@@ -1476,9 +1476,9 @@ export function Composer({
   // it immediately, jumping ahead of the rest. Mid-turn → steer-interrupt the
   // running turn; idle → plain send. The remaining queued items keep their
   // order and flush after this one's turn ends.
-  const onQueuedSendNow = (q: { id: string; text: string; summonAgentId?: string | null }) => {
+  const onQueuedSendNow = (q: { id: string; text: string; model?: string; summonAgentId?: string | null }) => {
     dequeueMessage(q.id);
-    void sendMessage(q.text, queuedSendOptions(q.summonAgentId, isStreaming && canInterrupt, 'summonAgentId' in q));
+    void sendMessage(q.text, { ...queuedSendOptions(q.summonAgentId, isStreaming && canInterrupt, 'summonAgentId' in q), ...(q.model ? { model: q.model } : {}) });
   };
 
   // Per-chip "edit" (✎): pull the queued text back into the composer input for

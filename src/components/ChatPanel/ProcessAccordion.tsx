@@ -1,3 +1,4 @@
+import { executionFailureKind } from './execution-failure';
 import { AskUserBatch } from './message-parts/AskUserCard';
 import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
 import { processWaitsForPermission } from './execution-status';
@@ -20,7 +21,7 @@ export { formatDuration } from './process-display';
 
 /** The process is owned by the Forge response body. Todo is rendered as one of
  * its entries, never as a sibling owned by an artifact or by a user message. */
-export function ProcessAccordion({ process, hasArtifact }: { process: ProcessTrace; hasArtifact: boolean }) {
+export function ProcessAccordion({ process, hasArtifact, errorMessage }: { process: ProcessTrace; hasArtifact: boolean; errorMessage?: string }) {
   const { t } = useTranslation();
   const pendingPermission = usePendingPermission(process.sid ?? null);
   const waitingPermission = processWaitsForPermission(process, pendingPermission);
@@ -44,13 +45,14 @@ export function ProcessAccordion({ process, hasArtifact }: { process: ProcessTra
 
   const now = useProcessClock(live);
   const duration = formatDuration(process.durationMs ?? Math.max(0, now - process.startedAt));
-  const phaseLabel = process.phase === 'error' ? t('taskFlow.processError')
+  const steered = !live && executionFailureKind(errorMessage ?? '') === 'steered';
+  const phaseLabel = steered ? (getLocale() === 'zh' ? '收到新反馈' : 'new feedback received') : process.phase === 'error' ? t('taskFlow.processError')
     : process.phase === 'aborted' ? (getLocale() === 'zh' ? '已停止' : 'stopped')
       : process.phase === 'waiting_for_input' ? waitingLabel : '';
 
   return (
     <section
-      className={`tx-proc tx-process tx-phase-${process.phase} ${open ? 'is-open' : ''}`}
+      className={`tx-proc tx-process tx-phase-${steered ? 'steered' : process.phase} ${open ? 'is-open' : ''}`}
       data-testid="chat-process"
       data-process-id={process.id}
       data-phase={process.phase}

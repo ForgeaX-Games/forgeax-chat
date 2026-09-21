@@ -24,6 +24,8 @@ import { formatDuration } from './process-display';
 import { deriveExecutionStage, executionStageLabelKey, workingLabel } from './execution-stage';
 
 interface ForgeCardProps {
+  hideHeader?: boolean;
+  headerOnly?: boolean;
   status: 'done' | 'running' | 'waiting' | 'error';
   text: string;
   thought?: string;
@@ -107,6 +109,8 @@ function useProviderBusDeepLink(): (extensionId: string) => void {
 }
 
 export function ForgeCard({
+  hideHeader = false,
+  headerOnly = false,
   status,
   text,
   thought,
@@ -170,7 +174,7 @@ export function ForgeCard({
 
   return (
     <div className={`forge-card kc-${status}`}>
-      <div className="kc-header">
+      {!hideHeader && <div className="kc-header">
         {/* ADR-0019: WEBM 状态机. 没 avatarRules (老资源/默认 agent) 时回退到原 PNG.
          *  size=28 跟 .kc-logo 对齐 (CSS 已从 20→28 + radius 4→50%). */}
         <AgentAvatarVideo
@@ -197,14 +201,14 @@ export function ForgeCard({
           {status === 'done' && <CheckCircle2 size={14} className="status-done" />}
           {status === 'running' && executionStage !== 'waiting_for_input' && <Loader2 size={14} className="status-running spin" />}
           {(status === 'waiting' || (status === 'running' && executionStage === 'waiting_for_input')) && <Clock size={14} className="status-waiting" />}
-          {status === 'error' && (executionFailureKind(errorMessage ?? '') === 'interrupted'
+          {status === 'error' && (['interrupted', 'steered'].includes(executionFailureKind(errorMessage ?? ''))
             ? <CirclePause size={14} className="status-stopped" />
             : <AlertCircle size={14} className="status-error" />)}
         </span>
         {status === 'done' && text.length > 0 && <KcCopyBtn text={text} />}
-      </div>
+      </div>}
 
-      <div className="kc-body">
+      {!headerOnly && <div className="kc-body">
           {status === 'running' && !text && (
             <div className="kc-loading">
               <span className="kc-loading-label">
@@ -395,7 +399,7 @@ export function ForgeCard({
               </div>
             );
           })()}
-      </div>
+      </div>}
     </div>
   );
 }

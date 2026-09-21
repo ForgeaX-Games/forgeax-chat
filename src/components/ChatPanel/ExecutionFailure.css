@@ -9,3 +9,7 @@
 .kc-execution-failure summary:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 
 .kc-execution-failure[data-failure-kind="interrupted"] .kc-failure-summary svg { color: inherit; }
+
+.kc-execution-failure[data-failure-kind="steered"] { border: 0; background: transparent; padding: 4px 0; }
+.kc-execution-failure[data-failure-kind="steered"] .kc-failure-summary svg { color: inherit; }
+.tx-phase-steered > .tx-proc-head { color: var(--color-text-secondary); }

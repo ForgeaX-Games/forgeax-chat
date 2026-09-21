@@ -1,3 +1,4 @@
+import { registerChatSendPreparation } from '../send-preparation';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { useShellStore, type ChatTab } from '@forgeax/interface/store';
 import {
@@ -279,6 +280,18 @@ describe('chat store turn targeting regressions', () => {
 
     accepted?.();
     expect(useChatStore.getState().queuedMessages[key]).toEqual([second]);
+  });
+
+  it('keeps the submitted model when a queued message flushes later', () => {
+    const sid = 'sid-model-queue';
+    const agentId = 'forge';
+    let received: SendMessageOpts | undefined;
+    setShellTarget(tab(sid, agentId));
+    useChatStore.getState().enqueueMessage('continue the game', { model: 'gpt-5.6-luna' });
+    useChatStore.setState({ sendMessage: async (_text, opts) => { received = opts; } });
+    useChatStore.getState().flushQueuedForAgent(sid, agentId);
+    expect(received?.model).toBe('gpt-5.6-luna');
+    expect(received?.target).toEqual({ sid, agentId });
   });
 
   it('keeps the specialist snapshot when a queued message flushes later', () => {
@@ -924,4 +937,39 @@ describe('chat segment visibility', () => {
       visibility: 'public_summary',
     }));
   });
+});
+
+it.each([undefined, 'steer'] as const)('does not send a turn when origin preparation fails (%s)', async handoff => {
+  setShellTarget(tab('origin-session', 'forge', 'codex'));
+  let requests = 0;
+  globalThis.fetch = (async () => { requests++; return Response.json({}); }) as typeof fetch;
+  const remove = registerChatSendPreparation(() => { throw new Error('origin unavailable'); });
+  try { await useChatStore.getState().sendMessage('hello', handoff ? { handoff } : undefined); }
+  finally { remove(); }
+  expect(requests).toBe(0);
+  expect(useChatStore.getState().bySid['origin-session']?.messagesByAgent.forge?.some(message => message.text.includes('origin unavailable'))).toBe(true);
+});
+
+it('keeps queued text when the originating editor cannot prepare the send', async () => {
+  setShellTarget(tab('origin-queue', 'forge', 'codex'));
+  useChatStore.setState({ queuedMessages: { 'origin-queue::forge': [queued('pending-1', 'keep this text')] } });
+  const remove = registerChatSendPreparation(() => { throw new Error('origin unavailable'); });
+  try {
+    useChatStore.getState().flushQueuedForAgent('origin-queue', 'forge');
+    await Bun.sleep(0);
+    expect(useChatStore.getState().queuedMessages['origin-queue::forge']?.[0].text).toBe('keep this text');
+  } finally { remove(); }
+});
+
+ it.each(['/loop 60 repeat task', '/tool editor discover', '/status'])('dequeues an accepted command exactly once (%s)', async text => {
+  setShellTarget(tab('command-queue', 'forge', 'codex'));
+  useChatStore.setState({ queuedMessages: { 'command-queue::forge': [queued('command-1', text)] } });
+  let writes = 0;
+  globalThis.fetch = (async (_url, init) => { if (init?.method === 'POST') writes++; return Response.json({ skills: [], ok: true }); }) as typeof fetch;
+  useChatStore.getState().flushQueuedForAgent('command-queue', 'forge');
+  await Bun.sleep(0);
+  expect(useChatStore.getState().queuedMessages['command-queue::forge'] ?? []).toHaveLength(0);
+  useChatStore.getState().flushQueuedForAgent('command-queue', 'forge');
+  await Bun.sleep(0);
+  expect(writes).toBe(1);
 });

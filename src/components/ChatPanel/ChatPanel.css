@@ -5149,3 +5149,10 @@ button.cb-mbsel-menu-head {
 .cp-role-context button:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .cp-role-context > span:not(.cp-role-context-kind) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cp-role-context-kind { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.cp-request-card { min-width: 0; margin: 14px 0; }
+.cp-request-card > .forge-card { margin-bottom: 8px; }
+.cp-request-history-toggle { display: block; border: 0; background: transparent; color: var(--color-text-secondary, #aaa); font: inherit; font-size: 12px; text-align: left; padding: 8px 0; cursor: pointer; }
+.cp-request-history-toggle:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.cp-request-history { border-left: 1px solid color-mix(in srgb, currentColor 16%, transparent); padding-left: 12px; }
+.cp-request-card .msg-block { margin-top: 8px; }

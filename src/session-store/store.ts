@@ -1,8 +1,49 @@
-import { prepareChatSend } from '../send-preparation';
+import {
+	beginChatTurn,
+	type ChatAttachment,
+	type ChatMessage,
+	type ChatSegment,
+	chatFirstToken,
+	chatToolResult,
+	chatTurnEnd,
+	expandPills,
+	expandPillsForDisplay,
+	parseSse,
+	resolveReplyLanguage,
+	type SubAgentRun,
+	type ToolCall,
+	t,
+	useShellStore,
+} from "@forgeax/chat/runtime";
+import type { ArtifactSummary } from "@forgeax/types/artifact-summary";
+import { create } from "zustand";
+import {
+	parseEventLines,
+	trimToCompactBoundary,
+} from "../event-engine/event-replay";
+import { hydrateLedgerBlobs } from "../event-engine/ledger-blob-hydration";
+import {
+	buildMainCallbacks,
+	buildSubCallbacks,
+	finalizeStreamingStatus,
+	type MessageEffects,
+	makeInMemEffects,
+	rendererToolCallToLegacy,
+} from "../event-engine/message-builder";
+import {
+	applyRewindMask,
+	findPendingRewind,
+} from "../event-engine/rewind-mask";
+import { normalizeToolCall } from "../event-engine/tool-name";
+import { TurnAccumulator } from "../event-engine/turn-accumulator";
+import type { StoredEvent, ToolCallMessage } from "../event-engine/types";
+import { replayPermissionEvents } from "../permission-stream";
+import { prepareChatSend } from "../send-preparation";
+import { hasPendingAskUser } from "../task-flow/ask-user-protocol";
 /** `@forgeax/chat` conversation store (R4 — message content owned by chat).
  *
  *  This is the real home of the *message-content* domain extracted from
- *  `@forgeax/interface`'s monolithic `useShellStore`. The session REGISTRY
+ *  `the former shared shell`'s monolithic `useShellStore`. The session REGISTRY
  *  (`tabs` / `activeSid` / agent binding) and agent-runtime state stay in the
  *  shared interface base;
  *  this store owns only what is chat-private: the conversation messages, their
@@ -28,111 +69,123 @@ import { prepareChatSend } from '../send-preparation';
  *  override) are read on demand from `useShellStore.getState()`. This store never
  *  writes the registry; the registry never writes messages.
  */
-import { latestContextUsage, type ContextUsage } from '../event-engine/context-usage';
-import { create } from 'zustand';
-import { t } from '@/i18n';
-import {
-  useShellStore,
-  type ChatAttachment,
-  type ChatMessage,
-  type ChatSegment,
-  type SubAgentRun,
-  type ToolCall,
-} from '@forgeax/interface/store';
-import { parseSse } from '@forgeax/interface/lib/sse';
-import { expandPills, expandPillsForDisplay } from '@forgeax/interface/lib/composer-bridge';
-import { resolveReplyLanguage } from '@forgeax/interface/lib/reply-language';
+
 // 必须是**静态** import:动态 import 的 await 会把请求推到下一个微任务,改掉产品钉住的
 // 派发顺序(2026-08-06:为拿 traceparent 在 fetch 前插了一句 await import,"连续两次
 // sendMessage 后已发出 2 个请求"这条回归断言从 2 变 0)。该模块顶层无副作用,与同包已
 // 静态引入的 lib/sse 等同级,不引入新耦合。
-import { beginChatTurn, chatFirstToken, chatToolResult, chatTurnEnd } from '@forgeax/interface/lib/trace';
-import { replayPermissionEvents } from '@forgeax/interface/lib/permission-stream';
-import { TurnAccumulator } from '../event-engine/turn-accumulator';
-import {
-  parseEventLines,
-  trimToCompactBoundary,
-} from '../event-engine/event-replay';
-import { hydrateLedgerBlobs } from '../event-engine/ledger-blob-hydration';
-import { applyRewindMask, findPendingRewind } from '../event-engine/rewind-mask';
-import {
-  buildMainCallbacks,
-  buildSubCallbacks,
-  finalizeStreamingStatus,
-  makeInMemEffects,
-  rendererToolCallToLegacy,
-  type MessageEffects,
-} from '../event-engine/message-builder';
-import { normalizeToolCall } from '../event-engine/tool-name';
-import { closePendingAsk } from '../task-flow/ask-user-protocol';
-import type { StoredEvent, ToolCallMessage } from '../event-engine/types';
-import type { ArtifactSummary } from '@forgeax/types/artifact-summary';
 
 // ── Local types (chat-owned) ────────────────────────────────────────────────
 
 /** One client-side queued message awaiting its turn (Cursor-style queue). */
 export interface QueuedMessage {
-  id: string;
-  /** Optimistic user bubble rendered at enqueue time. */
-  optimisticMessageId?: string;
-  /** Model chosen when the user queued this message. */
-  model?: string;
-  text: string;
-  ts: number;
-  summonAgentId?: string | null;
+	id: string;
+	/** Optimistic user bubble rendered at enqueue time. */
+	optimisticMessageId?: string;
+	text: string;
+	ts: number;
+	summonAgentId?: string | null;
 }
 
 export interface SendMessageOpts {
-  /** Model displayed by the submitting composer, pinned to this request. */
-  model?: string;
-  handoff?: 'steer';
-  attachments?: Array<Record<string, unknown>>;
-  /** Internal target pin used after async preparation and queue flushes. */
-  target?: { sid: string; agentId: string };
-  /** Internal acceptance callback; invoked after the pinned target is validated. */
-  onAccepted?: () => void;
-  /** Per-message specialist snapshot; never read from mutable Composer state. */
-  summonAgentId?: string | null;
-  /** Internal queue hand-off: reuse the user bubble already in the timeline. */
-  existingUserMessageId?: string;
+	handoff?: "steer";
+	attachments?: Array<Record<string, unknown>>;
+	/** Internal target pin used after async preparation and queue flushes. */
+	target?: { sid: string; agentId: string };
+	/** Internal acceptance callback; invoked after the pinned target is validated. */
+	onAccepted?: () => void;
+	/** Per-message specialist snapshot; never read from mutable Composer state. */
+	summonAgentId?: string | null;
+	/** Internal queue hand-off: reuse the user bubble already in the timeline. */
+	existingUserMessageId?: string;
 }
 
-function artifactSummaryFromStoredPayload(payload: Record<string, unknown>): ArtifactSummary | null {
-  const resolution = payload.resolution && typeof payload.resolution === 'object'
-    ? payload.resolution as Record<string, unknown> : null;
-  if (!resolution || (resolution.kind !== 'summary' && resolution.kind !== 'unavailable')) return null;
-  const raw = resolution.summary;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const summary = raw as Record<string, unknown>;
-  if (typeof summary.id !== 'string' || typeof summary.sid !== 'string' || typeof summary.turnId !== 'string' || !Array.isArray(summary.files)) return null;
-  const files = summary.files.flatMap((item): ArtifactSummary['files'] => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
-    const file = item as Record<string, unknown>;
-    if (typeof file.path !== 'string' || !['edit', 'new', 'del'].includes(String(file.change))) return [];
-    return [{
-      path: file.path,
-      change: file.change as 'edit' | 'new' | 'del',
-      ...(typeof file.insertions === 'number' ? { insertions: file.insertions } : {}),
-      ...(typeof file.deletions === 'number' ? { deletions: file.deletions } : {}),
-      ...(typeof file.binary === 'boolean' ? { binary: file.binary } : {}),
-    }];
-  });
-  const agents = Array.isArray(summary.agents) ? summary.agents.filter((agent): agent is string => typeof agent === 'string') : [];
-  return {
-    id: summary.id,
-    sid: summary.sid,
-    turnId: summary.turnId,
-    checkpointMsgId: typeof summary.checkpointMsgId === 'string' ? summary.checkpointMsgId : undefined,
-    files,
-    status: resolution.kind === 'unavailable' ? 'unavailable' : summary.status === 'partial' ? 'partial' : 'complete',
-    derivedUnavailable: summary.derivedUnavailable === true,
-    unavailableReason: typeof summary.unavailableReason === 'string' ? summary.unavailableReason : undefined,
-    reliableCandidatePaths: Array.isArray(summary.reliableCandidatePaths) ? summary.reliableCandidatePaths.filter((path): path is string => typeof path === 'string') : undefined,
-    unattributedCount: typeof summary.unattributedCount === 'number' ? summary.unattributedCount : undefined,
-    agents,
-    durationMs: typeof summary.durationMs === 'number' ? summary.durationMs : undefined,
-    semantic: summary.semantic && typeof summary.semantic === 'object' ? summary.semantic as ArtifactSummary['semantic'] : undefined,
-  };
+function artifactSummaryFromStoredPayload(
+	payload: Record<string, unknown>,
+): ArtifactSummary | null {
+	const resolution =
+		payload.resolution && typeof payload.resolution === "object"
+			? (payload.resolution as Record<string, unknown>)
+			: null;
+	if (
+		!resolution ||
+		(resolution.kind !== "summary" && resolution.kind !== "unavailable")
+	)
+		return null;
+	const raw = resolution.summary;
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+	const summary = raw as Record<string, unknown>;
+	if (
+		typeof summary.id !== "string" ||
+		typeof summary.sid !== "string" ||
+		typeof summary.turnId !== "string" ||
+		!Array.isArray(summary.files)
+	)
+		return null;
+	const files = summary.files.flatMap((item): ArtifactSummary["files"] => {
+		if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+		const file = item as Record<string, unknown>;
+		if (
+			typeof file.path !== "string" ||
+			!["edit", "new", "del"].includes(String(file.change))
+		)
+			return [];
+		return [
+			{
+				path: file.path,
+				change: file.change as "edit" | "new" | "del",
+				...(typeof file.insertions === "number"
+					? { insertions: file.insertions }
+					: {}),
+				...(typeof file.deletions === "number"
+					? { deletions: file.deletions }
+					: {}),
+				...(typeof file.binary === "boolean" ? { binary: file.binary } : {}),
+			},
+		];
+	});
+	const agents = Array.isArray(summary.agents)
+		? summary.agents.filter(
+				(agent): agent is string => typeof agent === "string",
+			)
+		: [];
+	return {
+		id: summary.id,
+		sid: summary.sid,
+		turnId: summary.turnId,
+		checkpointMsgId:
+			typeof summary.checkpointMsgId === "string"
+				? summary.checkpointMsgId
+				: undefined,
+		files,
+		status:
+			resolution.kind === "unavailable"
+				? "unavailable"
+				: summary.status === "partial"
+					? "partial"
+					: "complete",
+		derivedUnavailable: summary.derivedUnavailable === true,
+		unavailableReason:
+			typeof summary.unavailableReason === "string"
+				? summary.unavailableReason
+				: undefined,
+		reliableCandidatePaths: Array.isArray(summary.reliableCandidatePaths)
+			? summary.reliableCandidatePaths.filter(
+					(path): path is string => typeof path === "string",
+				)
+			: undefined,
+		unattributedCount:
+			typeof summary.unattributedCount === "number"
+				? summary.unattributedCount
+				: undefined,
+		agents,
+		durationMs:
+			typeof summary.durationMs === "number" ? summary.durationMs : undefined,
+		semantic:
+			summary.semantic && typeof summary.semantic === "object"
+				? (summary.semantic as ArtifactSummary["semantic"])
+				: undefined,
+	};
 }
 
 /**
@@ -144,119 +197,150 @@ function artifactSummaryFromStoredPayload(payload: Record<string, unknown>): Art
  * on the native AskUserCard path.
  */
 function askQuestionSignature(value: unknown): string | null {
-  let source = value;
-  if (typeof source === 'string') {
-    try { source = JSON.parse(source) as unknown; } catch { return null; }
-  }
-  if (!source || typeof source !== 'object' || Array.isArray(source)) return null;
-  const root = source as Record<string, unknown>;
-  const rawQuestions = Array.isArray(root.questions)
-    ? root.questions
-    : typeof root.question === 'string' ? [root] : [];
-  if (rawQuestions.length === 0) return null;
-  const questions = rawQuestions.flatMap((raw): Array<Record<string, unknown>> => {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
-    const question = raw as Record<string, unknown>;
-    if (typeof question.question !== 'string' || !question.question.trim()) return [];
-    const options = Array.isArray(question.options)
-      ? question.options.flatMap((option): Array<Record<string, string>> => {
-        if (typeof option === 'string') return [{ label: option }];
-        if (!option || typeof option !== 'object' || Array.isArray(option)) return [];
-        const item = option as Record<string, unknown>;
-        if (typeof item.label !== 'string') return [];
-        return [{
-          label: item.label,
-          ...(typeof item.description === 'string' ? { description: item.description } : {}),
-        }];
-      })
-      : [];
-    return [{
-      question: question.question,
-      ...(typeof question.header === 'string' ? { header: question.header } : {}),
-      multiSelect: question.multiSelect === true,
-      options,
-    }];
-  });
-  return questions.length > 0 ? JSON.stringify(questions) : null;
+	let source = value;
+	if (typeof source === "string") {
+		try {
+			source = JSON.parse(source) as unknown;
+		} catch {
+			return null;
+		}
+	}
+	if (!source || typeof source !== "object" || Array.isArray(source))
+		return null;
+	const root = source as Record<string, unknown>;
+	const rawQuestions = Array.isArray(root.questions)
+		? root.questions
+		: typeof root.question === "string"
+			? [root]
+			: [];
+	if (rawQuestions.length === 0) return null;
+	const questions = rawQuestions.flatMap(
+		(raw): Array<Record<string, unknown>> => {
+			if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+			const question = raw as Record<string, unknown>;
+			if (typeof question.question !== "string" || !question.question.trim())
+				return [];
+			const options = Array.isArray(question.options)
+				? question.options.flatMap((option): Array<Record<string, string>> => {
+						if (typeof option === "string") return [{ label: option }];
+						if (!option || typeof option !== "object" || Array.isArray(option))
+							return [];
+						const item = option as Record<string, unknown>;
+						if (typeof item.label !== "string") return [];
+						return [
+							{
+								label: item.label,
+								...(typeof item.description === "string"
+									? { description: item.description }
+									: {}),
+							},
+						];
+					})
+				: [];
+			return [
+				{
+					question: question.question,
+					...(typeof question.header === "string"
+						? { header: question.header }
+						: {}),
+					multiSelect: question.multiSelect === true,
+					options,
+				},
+			];
+		},
+	);
+	return questions.length > 0 ? JSON.stringify(questions) : null;
 }
 
 function markReplayPermissionAsks(events: StoredEvent[]): StoredEvent[] {
-  const signatures = new Set<string>();
-  for (const event of events) {
-    if (event.type !== 'permission:request' && event.type !== 'permission:resolved') continue;
-    const payload = event.payload ?? {};
-    const toolName = typeof payload.toolName === 'string' ? payload.toolName : '';
-    if (normalizeToolCall(toolName, {}).name !== 'ask_user') continue;
-    const signature = askQuestionSignature(payload.input);
-    if (signature) signatures.add(signature);
-  }
-  if (signatures.size === 0) return events;
-  return events.map((event) => {
-    if (event.type !== 'hook:toolCall') return event;
-    const payload = event.payload ?? {};
-    const name = typeof payload.name === 'string' ? payload.name : '';
-    if (normalizeToolCall(name, {}).name !== 'ask_user' || payload.permissionPrompt === true) return event;
-    const signature = askQuestionSignature(payload.args);
-    if (!signature || !signatures.has(signature)) return event;
-    return { ...event, payload: { ...payload, permissionPrompt: true } };
-  });
+	const signatures = new Set<string>();
+	for (const event of events) {
+		if (
+			event.type !== "permission:request" &&
+			event.type !== "permission:resolved"
+		)
+			continue;
+		const payload = event.payload ?? {};
+		const toolName =
+			typeof payload.toolName === "string" ? payload.toolName : "";
+		if (normalizeToolCall(toolName, {}).name !== "ask_user") continue;
+		const signature = askQuestionSignature(payload.input);
+		if (signature) signatures.add(signature);
+	}
+	if (signatures.size === 0) return events;
+	return events.map((event) => {
+		if (event.type !== "hook:toolCall") return event;
+		const payload = event.payload ?? {};
+		const name = typeof payload.name === "string" ? payload.name : "";
+		if (
+			normalizeToolCall(name, {}).name !== "ask_user" ||
+			payload.permissionPrompt === true
+		)
+			return event;
+		const signature = askQuestionSignature(payload.args);
+		if (!signature || !signatures.has(signature)) return event;
+		return { ...event, payload: { ...payload, permissionPrompt: true } };
+	});
 }
 
-function toChatAttachments(raw: Array<Record<string, unknown>> | undefined): ChatAttachment[] | undefined {
-  if (!raw?.length) return undefined;
-  const out: ChatAttachment[] = [];
-  for (const item of raw) {
-    const kind = typeof item.kind === 'string' ? item.kind : 'file';
-    out.push({
-      kind,
-      name: typeof item.name === 'string' ? item.name : undefined,
-      mediaType: typeof item.mediaType === 'string' ? item.mediaType : undefined,
-      data: typeof item.data === 'string' ? item.data : undefined,
-      path: typeof item.path === 'string' ? item.path : undefined,
-    });
-  }
-  return out;
+function toChatAttachments(
+	raw: Array<Record<string, unknown>> | undefined,
+): ChatAttachment[] | undefined {
+	if (!raw?.length) return undefined;
+	const out: ChatAttachment[] = [];
+	for (const item of raw) {
+		const kind = typeof item.kind === "string" ? item.kind : "file";
+		out.push({
+			kind,
+			name: typeof item.name === "string" ? item.name : undefined,
+			mediaType:
+				typeof item.mediaType === "string" ? item.mediaType : undefined,
+			data: typeof item.data === "string" ? item.data : undefined,
+			path: typeof item.path === "string" ? item.path : undefined,
+		});
+	}
+	return out;
 }
 
 /** checkpoint 软回退挂起态(Cursor 语义)。非 null = 被回退段置灰显示中。 */
 export interface PendingRewind {
-  boundaryId: string;
-  targetMsgId: string;
-  mode: 'both' | 'conversation' | 'code';
-  keptDirty: string[];
-  overwrite: { files: string[] } | null;
+	boundaryId: string;
+	targetMsgId: string;
+	mode: "both" | "conversation" | "code";
+	keptDirty: string[];
+	overwrite: { files: string[] } | null;
 }
 
 export interface RewindDirtyNotice {
-  boundaryId: string;
-  keptDirty: string[];
-  overwrite: { files: string[] } | null;
+	boundaryId: string;
+	keptDirty: string[];
+	overwrite: { files: string[] } | null;
 }
 
 /** Per-session conversation slice — everything chat-private about one `sid`. */
 export interface ConvSlice {
-  /** Per-agent message slots, keyed by `agentPath`. */
-  messagesByAgent: Record<string, ChatMessage[]>;
-  /** Per-agent streaming flags. */
-  streamingByAgent: Record<string, boolean>;
-  /** Context occupancy (0..100), scoped to the emitting agent. */
-  contextByAgent: Record<string, ContextUsage>;
-  /** Currently in-flight server-side `Run.id` (cli-provider path). */
-  runId: string | null;
-  pendingRewind: PendingRewind | null;
-  rewindDirtyNotice: RewindDirtyNotice | null;
-  /** msgId -> 是否有代码 checkpoint。 */
-  checkpointMsgIds: Record<string, boolean>;
+	/** Per-agent message slots, keyed by `agentPath`. */
+	messagesByAgent: Record<string, ChatMessage[]>;
+	/** Per-agent streaming flags. */
+	streamingByAgent: Record<string, boolean>;
+	/** Context-window fill ratio (0..1) for the session. */
+	contextPct: number;
+	/** Currently in-flight server-side `Run.id` (cli-provider path). */
+	runId: string | null;
+	pendingRewind: PendingRewind | null;
+	rewindDirtyNotice: RewindDirtyNotice | null;
+	/** msgId -> 是否有代码 checkpoint。 */
+	checkpointMsgIds: Record<string, boolean>;
 }
 
 const EMPTY_CONV: ConvSlice = {
-  messagesByAgent: {},
-  streamingByAgent: {},
-  contextByAgent: {},
-  runId: null,
-  pendingRewind: null,
-  rewindDirtyNotice: null,
-  checkpointMsgIds: {},
+	messagesByAgent: {},
+	streamingByAgent: {},
+	contextPct: 0,
+	runId: null,
+	pendingRewind: null,
+	rewindDirtyNotice: null,
+	checkpointMsgIds: {},
 };
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -264,36 +348,43 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 // ── Module-private runtime maps (moved verbatim from the shared store) ───────
 
 function newId(): string {
-  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+	return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
 /** Per-sid owner of the in-flight turn controller. */
 interface TurnController {
-  controller: AbortController;
-  agentId: string;
+	controller: AbortController;
+	agentId: string;
 }
 const _abortByTab = new Map<string, TurnController>();
 
 /** EventSource tails opened by loadThreadHistory for runs still streaming. */
 const _tailsByTab = new Map<string, Set<EventSource>>();
 function trackTail(sid: string, es: EventSource): void {
-  let set = _tailsByTab.get(sid);
-  if (!set) { set = new Set(); _tailsByTab.set(sid, set); }
-  set.add(es);
+	let set = _tailsByTab.get(sid);
+	if (!set) {
+		set = new Set();
+		_tailsByTab.set(sid, set);
+	}
+	set.add(es);
 }
 function untrackTail(sid: string, es: EventSource): void {
-  const set = _tailsByTab.get(sid);
-  if (!set) return;
-  set.delete(es);
-  if (set.size === 0) _tailsByTab.delete(sid);
+	const set = _tailsByTab.get(sid);
+	if (!set) return;
+	set.delete(es);
+	if (set.size === 0) _tailsByTab.delete(sid);
 }
 function closeThreadHistoryTails(sid: string): void {
-  const set = _tailsByTab.get(sid);
-  if (!set) return;
-  for (const es of set) {
-    try { es.close(); } catch { /* */ }
-  }
-  _tailsByTab.delete(sid);
+	const set = _tailsByTab.get(sid);
+	if (!set) return;
+	for (const es of set) {
+		try {
+			es.close();
+		} catch {
+			/* */
+		}
+	}
+	_tailsByTab.delete(sid);
 }
 
 // ── Pure segment reducers (moved from Interface; Chat owns them now) ─────────
@@ -301,1715 +392,2564 @@ function closeThreadHistoryTails(sid: string): void {
 /** Push `chunk` into `segments`, coalescing into the last segment when it
  *  matches kind (text↔text, thinking↔thinking). Tool segments never coalesce. */
 export function appendChatSegment(
-  segments: ChatSegment[],
-  next:
-    | { kind: 'text'; ts: number; text: string }
-    | { kind: 'thinking'; ts: number; text: string; visibility?: 'public_summary' | 'private_reasoning' },
+	segments: ChatSegment[],
+	next:
+		| { kind: "text"; ts: number; text: string }
+		| {
+				kind: "thinking";
+				ts: number;
+				text: string;
+				visibility?: "public_summary" | "private_reasoning";
+		  },
 ): ChatSegment[] {
-  if (!next.text) return segments;
-  const last = segments[segments.length - 1];
-  const sameThinkingVisibility = last?.kind === 'thinking' && next.kind === 'thinking'
-    && last.visibility === next.visibility;
-  if (last && last.kind === next.kind && (next.kind !== 'thinking' || sameThinkingVisibility)) {
-    const merged: ChatSegment =
-      next.kind === 'text'
-        ? { kind: 'text', ts: last.ts, text: (last as { text: string }).text + next.text }
-        : {
-          kind: 'thinking',
-          ts: last.ts,
-          text: (last as { text: string }).text + next.text,
-          ...(next.visibility ? { visibility: next.visibility } : {}),
-        };
-    return [...segments.slice(0, -1), merged];
-  }
-  return [...segments, next];
+	if (!next.text) return segments;
+	const last = segments[segments.length - 1];
+	const sameThinkingVisibility =
+		last?.kind === "thinking" &&
+		next.kind === "thinking" &&
+		last.visibility === next.visibility;
+	if (
+		last &&
+		last.kind === next.kind &&
+		(next.kind !== "thinking" || sameThinkingVisibility)
+	) {
+		const merged: ChatSegment =
+			next.kind === "text"
+				? {
+						kind: "text",
+						ts: last.ts,
+						text: (last as { text: string }).text + next.text,
+					}
+				: {
+						kind: "thinking",
+						ts: last.ts,
+						text: (last as { text: string }).text + next.text,
+						...(next.visibility ? { visibility: next.visibility } : {}),
+					};
+		return [...segments.slice(0, -1), merged];
+	}
+	return [...segments, next];
 }
 
 /** Replace an existing tool segment (matched by callId) with a fresh ToolCall,
  *  or append a new tool segment when no match is found. */
 export function upsertToolSegment(
-  segments: ChatSegment[],
-  ts: number,
-  next: ToolCall,
+	segments: ChatSegment[],
+	ts: number,
+	next: ToolCall,
 ): ChatSegment[] {
-  const idx = segments.findIndex(
-    (s) => s.kind === 'tool' && (s as { tool: ToolCall }).tool.callId === next.callId,
-  );
-  if (idx >= 0) {
-    const updated: ChatSegment = { kind: 'tool', ts: segments[idx].ts, tool: next };
-    return [...segments.slice(0, idx), updated, ...segments.slice(idx + 1)];
-  }
-  return [...segments, { kind: 'tool', ts, tool: next }];
+	const idx = segments.findIndex(
+		(s) =>
+			s.kind === "tool" &&
+			(s as { tool: ToolCall }).tool.callId === next.callId,
+	);
+	if (idx >= 0) {
+		const updated: ChatSegment = {
+			kind: "tool",
+			ts: segments[idx].ts,
+			tool: next,
+		};
+		return [...segments.slice(0, idx), updated, ...segments.slice(idx + 1)];
+	}
+	return [...segments, { kind: "tool", ts, tool: next }];
 }
 
 // ── AG-UI replay (subprocess providers: claude-code / codex / cursor-agent) ──
 
 export interface AguiStoredEvent {
-  id: string;
-  seq: number;
-  ts: number;
-  runId: string;
-  event: { type: string } & Record<string, unknown>;
+	id: string;
+	seq: number;
+	ts: number;
+	runId: string;
+	event: { type: string } & Record<string, unknown>;
 }
 
 function consumeAguiEvents(events: AguiStoredEvent[]): {
-  text: string;
-  thinking?: string;
-  toolCalls: ToolCall[];
-  status: 'streaming' | 'done' | 'error';
-  segments: ChatSegment[];
-  lastSeq: number;
+	text: string;
+	thinking?: string;
+	toolCalls: ToolCall[];
+	status: "streaming" | "done" | "error";
+	segments: ChatSegment[];
+	lastSeq: number;
 } {
-  let text = '';
-  let thinking = '';
-  const tcMap = new Map<string, ToolCall>();
-  const order: string[] = [];
-  let segments: ChatSegment[] = [];
-  let finished = false;
-  let errored = false;
-  let lastSeq = -1;
+	let text = "";
+	let thinking = "";
+	const tcMap = new Map<string, ToolCall>();
+	const order: string[] = [];
+	let segments: ChatSegment[] = [];
+	let finished = false;
+	let errored = false;
+	let lastSeq = -1;
 
-  const upsertTc = (id: string, ts: number, next: ToolCall): void => {
-    tcMap.set(id, next);
-    if (!order.includes(id)) order.push(id);
-    segments = upsertToolSegment(segments, ts, next);
-  };
+	const upsertTc = (id: string, ts: number, next: ToolCall): void => {
+		tcMap.set(id, next);
+		if (!order.includes(id)) order.push(id);
+		segments = upsertToolSegment(segments, ts, next);
+	};
 
-  for (const stored of events) {
-    if (typeof stored.seq === 'number' && stored.seq > lastSeq) lastSeq = stored.seq;
-    const ev = stored.event;
-    const ts = stored.ts ?? Date.now();
-    switch (ev.type) {
-      case 'TEXT_MESSAGE_CONTENT':
-      case 'TEXT_MESSAGE_CHUNK': {
-        const delta = (ev.delta as string | undefined) ?? (ev.content as string | undefined) ?? '';
-        if (delta) {
-          text += delta;
-          segments = appendChatSegment(segments, { kind: 'text', ts, text: delta });
-        }
-        break;
-      }
-      case 'THINKING_TEXT_MESSAGE_CONTENT':
-      case 'THINKING_MESSAGE_CONTENT':
-      case 'REASONING_MESSAGE_CONTENT':
-      case 'REASONING_MESSAGE_CHUNK': {
-        const delta = (ev.delta as string | undefined) ?? (ev.content as string | undefined) ?? '';
-        if (delta) {
-          thinking += delta;
-          segments = appendChatSegment(segments, { kind: 'thinking', ts, text: delta });
-        }
-        break;
-      }
-      case 'TOOL_CALL_START': {
-        const id = (ev.toolCallId as string | undefined) ?? '';
-        const name = normalizeToolCall((ev.toolCallName as string | undefined) ?? '', {}).name;
-        if (!id || tcMap.has(id)) break;
-        upsertTc(id, ts, { callId: id, name, args: '', status: 'running' });
-        break;
-      }
-      case 'TOOL_CALL_ARGS':
-      case 'TOOL_CALL_CHUNK': {
-        const id = (ev.toolCallId as string | undefined) ?? '';
-        const delta = (ev.delta as string | undefined) ?? '';
-        const cur = tcMap.get(id);
-        if (cur) {
-          const curArgs = typeof cur.args === 'string' ? cur.args : '';
-          upsertTc(id, ts, { ...cur, args: curArgs + delta });
-        }
-        break;
-      }
-      case 'TOOL_CALL_END': {
-        const id = (ev.toolCallId as string | undefined) ?? '';
-        const cur = tcMap.get(id);
-        if (cur) {
-          let parsed: unknown = cur.args;
-          if (typeof parsed === 'string' && parsed) {
-            try { parsed = JSON.parse(parsed); } catch { /* keep raw string */ }
-          }
-          upsertTc(id, ts, { ...cur, status: 'done', args: parsed });
-        }
-        break;
-      }
-      case 'TOOL_CALL_RESULT': {
-        const id = (ev.toolCallId as string | undefined) ?? '';
-        const result = (ev.result as unknown) ?? (ev.content as unknown);
-        const cur = tcMap.get(id);
-        if (cur) {
-          upsertTc(id, ts, {
-            ...cur,
-            status: 'done',
-            result: typeof result === 'string' ? result : JSON.stringify(result),
-          });
-        }
-        break;
-      }
-      case 'STEP_STARTED': {
-        const id = `step:${stored.seq}`;
-        const name = normalizeToolCall((ev.stepName as string | undefined) ?? 'step', {}).name;
-        upsertTc(id, ts, {
-          callId: id,
-          name,
-          args: ev.input ?? null,
-          status: 'running',
-        });
-        break;
-      }
-      case 'STEP_FINISHED': {
-        const stepName = (ev.stepName as string | undefined) ?? '';
-        for (const id of order) {
-          const cur = tcMap.get(id);
-          if (cur && cur.status === 'running' && cur.name === stepName && id.startsWith('step:')) {
-            upsertTc(id, ts, { ...cur, status: 'done' });
-            break;
-          }
-        }
-        break;
-      }
-      case 'RUN_FINISHED': finished = true; break;
-      case 'RUN_ERROR':    errored = true;  break;
-      default: break;
-    }
-  }
+	for (const stored of events) {
+		if (typeof stored.seq === "number" && stored.seq > lastSeq)
+			lastSeq = stored.seq;
+		const ev = stored.event;
+		const ts = stored.ts ?? Date.now();
+		switch (ev.type) {
+			case "TEXT_MESSAGE_CONTENT":
+			case "TEXT_MESSAGE_CHUNK": {
+				const delta =
+					(ev.delta as string | undefined) ??
+					(ev.content as string | undefined) ??
+					"";
+				if (delta) {
+					text += delta;
+					segments = appendChatSegment(segments, {
+						kind: "text",
+						ts,
+						text: delta,
+					});
+				}
+				break;
+			}
+			case "THINKING_TEXT_MESSAGE_CONTENT":
+			case "THINKING_MESSAGE_CONTENT":
+			case "REASONING_MESSAGE_CONTENT":
+			case "REASONING_MESSAGE_CHUNK": {
+				const delta =
+					(ev.delta as string | undefined) ??
+					(ev.content as string | undefined) ??
+					"";
+				if (delta) {
+					thinking += delta;
+					segments = appendChatSegment(segments, {
+						kind: "thinking",
+						ts,
+						text: delta,
+					});
+				}
+				break;
+			}
+			case "TOOL_CALL_START": {
+				const id = (ev.toolCallId as string | undefined) ?? "";
+				const name = normalizeToolCall(
+					(ev.toolCallName as string | undefined) ?? "",
+					{},
+				).name;
+				if (!id || tcMap.has(id)) break;
+				upsertTc(id, ts, { callId: id, name, args: "", status: "running" });
+				break;
+			}
+			case "TOOL_CALL_ARGS":
+			case "TOOL_CALL_CHUNK": {
+				const id = (ev.toolCallId as string | undefined) ?? "";
+				const delta = (ev.delta as string | undefined) ?? "";
+				const cur = tcMap.get(id);
+				if (cur) {
+					const curArgs = typeof cur.args === "string" ? cur.args : "";
+					upsertTc(id, ts, { ...cur, args: curArgs + delta });
+				}
+				break;
+			}
+			case "TOOL_CALL_END": {
+				const id = (ev.toolCallId as string | undefined) ?? "";
+				const cur = tcMap.get(id);
+				if (cur) {
+					let parsed: unknown = cur.args;
+					if (typeof parsed === "string" && parsed) {
+						try {
+							parsed = JSON.parse(parsed);
+						} catch {
+							/* keep raw string */
+						}
+					}
+					upsertTc(id, ts, { ...cur, status: "done", args: parsed });
+				}
+				break;
+			}
+			case "TOOL_CALL_RESULT": {
+				const id = (ev.toolCallId as string | undefined) ?? "";
+				const result = (ev.result as unknown) ?? (ev.content as unknown);
+				const cur = tcMap.get(id);
+				if (cur) {
+					upsertTc(id, ts, {
+						...cur,
+						status: "done",
+						result:
+							typeof result === "string" ? result : JSON.stringify(result),
+					});
+				}
+				break;
+			}
+			case "STEP_STARTED": {
+				const id = `step:${stored.seq}`;
+				const name = normalizeToolCall(
+					(ev.stepName as string | undefined) ?? "step",
+					{},
+				).name;
+				upsertTc(id, ts, {
+					callId: id,
+					name,
+					args: ev.input ?? null,
+					status: "running",
+				});
+				break;
+			}
+			case "STEP_FINISHED": {
+				const stepName = (ev.stepName as string | undefined) ?? "";
+				for (const id of order) {
+					const cur = tcMap.get(id);
+					if (
+						cur &&
+						cur.status === "running" &&
+						cur.name === stepName &&
+						id.startsWith("step:")
+					) {
+						upsertTc(id, ts, { ...cur, status: "done" });
+						break;
+					}
+				}
+				break;
+			}
+			case "RUN_FINISHED":
+				finished = true;
+				break;
+			case "RUN_ERROR":
+				errored = true;
+				break;
+			default:
+				break;
+		}
+	}
 
-  const status: 'streaming' | 'done' | 'error' = errored ? 'error' : finished ? 'done' : 'streaming';
-  return {
-    text,
-    thinking: thinking || undefined,
-    toolCalls: order.map((id) => tcMap.get(id)!).filter(Boolean),
-    status,
-    segments,
-    lastSeq,
-  };
+	const status: "streaming" | "done" | "error" = errored
+		? "error"
+		: finished
+			? "done"
+			: "streaming";
+	return {
+		text,
+		thinking: thinking || undefined,
+		toolCalls: order.map((id) => tcMap.get(id)!).filter(Boolean),
+		status,
+		segments,
+		lastSeq,
+	};
 }
 
 /** R3: server fetch_session_events 签名 `args=[sid, agentPath]`。 */
-async function fetchSessionEventsNdjson(sid: string, agentPath: string): Promise<string> {
-  try {
-    const r = await fetch('/api/commands/fetch_session_events/query', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ args: [sid, agentPath] }),
-    });
-    if (!r.ok) return '';
-    const raw = (await r.json()) as {
-      ok?: boolean; data?: string;
-      result?: { ok?: boolean; data?: string };
-    };
-    return (raw.result?.data ?? raw.data) ?? '';
-  } catch {
-    return '';
-  }
+async function fetchSessionEventsNdjson(
+	sid: string,
+	agentPath: string,
+): Promise<string> {
+	try {
+		const r = await fetch("/api/commands/fetch_session_events/query", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ args: [sid, agentPath] }),
+		});
+		if (!r.ok) return "";
+		const raw = (await r.json()) as {
+			ok?: boolean;
+			data?: string;
+			result?: { ok?: boolean; data?: string };
+		};
+		return raw.result?.data ?? raw.data ?? "";
+	} catch {
+		return "";
+	}
 }
 
-async function fetchSessionBlob(sid: string, agentPath: string, sha256: string): Promise<Uint8Array> {
-  const response = await fetch('/api/commands/fetch_blob/query', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ args: [sid, agentPath, sha256] }),
-  });
-  if (!response.ok) throw new Error(`fetch_blob returned ${response.status}`);
-  const raw = (await response.json()) as {
-    data?: { data?: string };
-    result?: { ok?: boolean; data?: { data?: string } };
-  };
-  const base64 = raw.result?.data?.data ?? raw.data?.data;
-  if (!base64) throw new Error('fetch_blob returned no data');
-  const binary = atob(base64);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+async function fetchSessionBlob(
+	sid: string,
+	agentPath: string,
+	sha256: string,
+): Promise<Uint8Array> {
+	const response = await fetch("/api/commands/fetch_blob/query", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ args: [sid, agentPath, sha256] }),
+	});
+	if (!response.ok) throw new Error(`fetch_blob returned ${response.status}`);
+	const raw = (await response.json()) as {
+		data?: { data?: string };
+		result?: { ok?: boolean; data?: { data?: string } };
+	};
+	const base64 = raw.result?.data?.data ?? raw.data?.data;
+	if (!base64) throw new Error("fetch_blob returned no data");
+	const binary = atob(base64);
+	return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
 
 // ── Store shape ──────────────────────────────────────────────────────────────
 
 interface ChatStoreState {
-  /** Per-session conversation slices, keyed by `sid`. */
-  bySid: Record<string, ConvSlice>;
-  /** Client-side queued messages, keyed by `${sid}::${agentId}`. */
-  queuedMessages: Record<string, QueuedMessage[]>;
+	/** Per-session conversation slices, keyed by `sid`. */
+	bySid: Record<string, ConvSlice>;
+	/** Client-side queued messages, keyed by `${sid}::${agentId}`. */
+	queuedMessages: Record<string, QueuedMessage[]>;
 
-  // ── low-level mutation primitives (used by session-stream + sendMessage) ──
-  /** Patch a specific `(sid, agentId)` message slot. */
-  patchMessages: (sid: string, agentId: string, updater: (msgs: ChatMessage[]) => ChatMessage[]) => void;
-  /** Apply message-slot patches in a single Zustand commit. */
-  batchPatchMessages: (patches: Array<{
-    sid: string;
-    agentId: string;
-    updater: (msgs: ChatMessage[]) => ChatMessage[];
-  }>) => void;
-  /** Read a `(sid, agentId)` message slot (empty array if absent). */
-  readMessages: (sid: string, agentId: string) => ChatMessage[];
-  /** Set the per-agent streaming flag. */
-  setStreaming: (sid: string, agentId: string, val: boolean) => void;
-  /** Merge a partial patch into a session's conv slice. */
-  patchConv: (sid: string, patch: Partial<ConvSlice>) => void;
+	// ── low-level mutation primitives (used by session-stream + sendMessage) ──
+	/** Patch a specific `(sid, agentId)` message slot. */
+	patchMessages: (
+		sid: string,
+		agentId: string,
+		updater: (msgs: ChatMessage[]) => ChatMessage[],
+	) => void;
+	/** Apply message-slot patches in a single Zustand commit. */
+	batchPatchMessages: (
+		patches: Array<{
+			sid: string;
+			agentId: string;
+			updater: (msgs: ChatMessage[]) => ChatMessage[];
+		}>,
+	) => void;
+	/** Read a `(sid, agentId)` message slot (empty array if absent). */
+	readMessages: (sid: string, agentId: string) => ChatMessage[];
+	/** Set the per-agent streaming flag. */
+	setStreaming: (sid: string, agentId: string, val: boolean) => void;
+	/** Merge a partial patch into a session's conv slice. */
+	patchConv: (sid: string, patch: Partial<ConvSlice>) => void;
 
-  // ── send + stream ──
-  sendMessage: (text: string, opts?: SendMessageOpts) => Promise<void>;
+	// ── send + stream ──
+	sendMessage: (text: string, opts?: SendMessageOpts) => Promise<void>;
 
-  // ── WAL / replay history ──
-  loadSession: (sid: string, agentPath: string, opts?: { force?: boolean }) => Promise<void>;
-  loadThreadHistory: (threadId: string) => Promise<void>;
+	// ── WAL / replay history ──
+	loadSession: (
+		sid: string,
+		agentPath: string,
+		opts?: { force?: boolean },
+	) => Promise<void>;
+	loadThreadHistory: (threadId: string) => Promise<void>;
 
-  // ── checkpoint rewind ──
-  loadCheckpoints: (sid: string) => Promise<void>;
-  performRewind: (sid: string, msgId: string, mode: 'both' | 'conversation' | 'code') => Promise<void>;
-  performRewindCancel: (sid: string) => Promise<void>;
-  performOverwriteDirty: (sid: string) => Promise<void>;
-  performUndoOverwrite: (sid: string) => Promise<void>;
-  applyRewindEvent: (
-    sid: string,
-    kind: 'done' | 'cancelled' | 'finalized' | 'overwrite' | 'overwrite-undone',
-    payload: Record<string, unknown>,
-  ) => void;
+	// ── checkpoint rewind ──
+	loadCheckpoints: (sid: string) => Promise<void>;
+	performRewind: (
+		sid: string,
+		msgId: string,
+		mode: "both" | "conversation" | "code",
+	) => Promise<void>;
+	performRewindCancel: (sid: string) => Promise<void>;
+	performOverwriteDirty: (sid: string) => Promise<void>;
+	performUndoOverwrite: (sid: string) => Promise<void>;
+	applyRewindEvent: (
+		sid: string,
+		kind: "done" | "cancelled" | "finalized" | "overwrite" | "overwrite-undone",
+		payload: Record<string, unknown>,
+	) => void;
 
-  // ── Message queue (Cursor-style "keep typing while streaming") ──
-  enqueueMessage: (text: string, opts?: Pick<SendMessageOpts, 'summonAgentId' | 'model'>) => void;
-  dequeueMessage: (id: string) => void;
-  clearQueue: () => void;
-  flushQueuedForAgent: (sid: string, agentId: string) => void;
+	// ── Message queue (Cursor-style "keep typing while streaming") ──
+	enqueueMessage: (
+		text: string,
+		opts?: Pick<SendMessageOpts, "summonAgentId">,
+	) => void;
+	dequeueMessage: (id: string) => void;
+	clearQueue: () => void;
+	flushQueuedForAgent: (sid: string, agentId: string) => void;
 
-  cancelStream: () => void;
-  clearMessages: () => void;
+	cancelStream: () => void;
+	clearMessages: () => void;
 }
 
 /** Active `(sid, agentId)` resolved from the shared Interface registry. */
 function activeTarget(): { sid: string | null; agentId: string | null } {
-  const s = useShellStore.getState();
-  const sid = s.activeSid;
-  const agentId = sid ? (s.tabs.find((t) => t.sid === sid)?.agentId ?? null) : null;
-  return { sid, agentId };
+	const s = useShellStore.getState();
+	const sid = s.activeSid;
+	const agentId = sid
+		? (s.tabs.find((t) => t.sid === sid)?.agentId ?? null)
+		: null;
+	return { sid, agentId };
 }
 
 /** Seal an in-flight assistant bubble after Stop/abort so ForgeCard leaves
  *  "正在思考" (status==='streaming' → running) without waiting for turnEnd. */
-function sealAbortedAssistantMessage(m: ChatMessage, endTs: number): ChatMessage {
-  if (m.role !== 'assistant' || m.status !== 'streaming') return m;
-  const sealTool = (tc: ToolCall): ToolCall =>
-    tc.status === 'running' ? { ...tc, status: 'done' } : tc;
-  const subAgents = m.subAgents
-    ? Object.fromEntries(
-        Object.entries(m.subAgents).map(([id, run]) => [
-          id,
-          run.status === 'streaming'
-            ? {
-                ...run,
-                status: 'done' as const,
-                toolCalls: run.toolCalls.map(sealTool),
-              }
-            : run,
-        ]),
-      )
-    : undefined;
-  return {
-    ...m,
-    status: 'done',
-    durationMs: endTs - m.ts,
-    toolCalls: m.toolCalls.map(sealTool),
-    segments: m.segments?.map((s: ChatSegment) =>
-      s.kind === 'tool' ? { ...s, tool: sealTool(s.tool) } : s,
-    ),
-    ...(subAgents ? { subAgents } : {}),
-  };
+function sealAbortedAssistantMessage(
+	m: ChatMessage,
+	endTs: number,
+): ChatMessage {
+	if (m.role !== "assistant" || m.status !== "streaming") return m;
+	const sealTool = (tc: ToolCall): ToolCall =>
+		tc.status === "running" ? { ...tc, status: "done" } : tc;
+	const subAgents = m.subAgents
+		? Object.fromEntries(
+				Object.entries(m.subAgents).map(([id, run]) => [
+					id,
+					run.status === "streaming"
+						? {
+								...run,
+								status: "done" as const,
+								toolCalls: run.toolCalls.map(sealTool),
+							}
+						: run,
+				]),
+			)
+		: undefined;
+	return {
+		...m,
+		status: "done",
+		durationMs: endTs - m.ts,
+		toolCalls: m.toolCalls.map(sealTool),
+		segments: m.segments?.map((s: ChatSegment) =>
+			s.kind === "tool" ? { ...s, tool: sealTool(s.tool) } : s,
+		),
+		...(subAgents ? { subAgents } : {}),
+	};
 }
 
 export const useChatStore = create<ChatStoreState>((set, get) => ({
-  bySid: {},
-  queuedMessages: {},
+	bySid: {},
+	queuedMessages: {},
 
-  patchConv: (sid, patch) => set((s) => ({
-    bySid: { ...s.bySid, [sid]: { ...(s.bySid[sid] ?? EMPTY_CONV), ...patch } },
-  })),
+	patchConv: (sid, patch) =>
+		set((s) => ({
+			bySid: {
+				...s.bySid,
+				[sid]: { ...(s.bySid[sid] ?? EMPTY_CONV), ...patch },
+			},
+		})),
 
-  patchMessages: (sid, agentId, updater) =>
-    get().batchPatchMessages([{ sid, agentId, updater }]),
+	patchMessages: (sid, agentId, updater) =>
+		get().batchPatchMessages([{ sid, agentId, updater }]),
 
-  batchPatchMessages: (patches) => set((s) => {
-    if (patches.length === 0) return s;
-    let changed = false;
-    const nextBySid = { ...s.bySid };
-    const clonedBySid = new Map<string, ConvSlice>();
+	batchPatchMessages: (patches) =>
+		set((s) => {
+			if (patches.length === 0) return s;
+			let changed = false;
+			const nextBySid = { ...s.bySid };
+			const clonedBySid = new Map<string, ConvSlice>();
 
-    for (const { sid, agentId, updater } of patches) {
-      let conv = clonedBySid.get(sid);
-      if (!conv) {
-        const current = nextBySid[sid] ?? EMPTY_CONV;
-        conv = { ...current, messagesByAgent: { ...current.messagesByAgent } };
-        clonedBySid.set(sid, conv);
-        nextBySid[sid] = conv;
-      }
-      const previous = conv.messagesByAgent[agentId] ?? EMPTY_MESSAGES;
-      const next = updater(previous);
-      if (next === previous) continue;
-      conv.messagesByAgent[agentId] = next;
-      changed = true;
-    }
-    return changed ? { bySid: nextBySid } : s;
-  }),
+			for (const { sid, agentId, updater } of patches) {
+				let conv = clonedBySid.get(sid);
+				if (!conv) {
+					const current = nextBySid[sid] ?? EMPTY_CONV;
+					conv = {
+						...current,
+						messagesByAgent: { ...current.messagesByAgent },
+					};
+					clonedBySid.set(sid, conv);
+					nextBySid[sid] = conv;
+				}
+				const previous = conv.messagesByAgent[agentId] ?? EMPTY_MESSAGES;
+				const next = updater(previous);
+				if (next === previous) continue;
+				conv.messagesByAgent[agentId] = next;
+				changed = true;
+			}
+			return changed ? { bySid: nextBySid } : s;
+		}),
 
-  readMessages: (sid, agentId) => get().bySid[sid]?.messagesByAgent[agentId] ?? EMPTY_MESSAGES,
+	readMessages: (sid, agentId) =>
+		get().bySid[sid]?.messagesByAgent[agentId] ?? EMPTY_MESSAGES,
 
-  setStreaming: (sid, agentId, val) => {
-    // After Stop, ignore late setStreaming(true) until the next user send.
-    // Otherwise abort races / late WS frames flip the Stop button back on.
-    if (val && isAgentStreamSuppressed(sid, agentId)) return;
-    // Mirror the per-(sid, agentId) busy flag into the shared registry so its surfaces
-    // (SessionSwitcher / AgentsPanel) can render a spinner without importing
-    // chat message state. Interface owns the flag's storage; chat owns its truth.
-    useShellStore.getState().setAgentBusy(sid, agentId, val);
-    set((s) => {
-      const conv = s.bySid[sid] ?? EMPTY_CONV;
-      if (Boolean(conv.streamingByAgent[agentId]) === val) return s;
-      return {
-        bySid: {
-          ...s.bySid,
-          [sid]: { ...conv, streamingByAgent: { ...conv.streamingByAgent, [agentId]: val } },
-        },
-      };
-    });
-  },
+	setStreaming: (sid, agentId, val) => {
+		// After Stop, ignore late setStreaming(true) until the next user send.
+		// Otherwise abort races / late WS frames flip the Stop button back on.
+		if (val && isAgentStreamSuppressed(sid, agentId)) return;
+		// Mirror the per-(sid, agentId) busy flag into the shared registry so its surfaces
+		// (SessionSwitcher / AgentsPanel) can render a spinner without importing
+		// chat message state. Interface owns the flag's storage; chat owns its truth.
+		useShellStore.getState().setAgentBusy(sid, agentId, val);
+		set((s) => {
+			const conv = s.bySid[sid] ?? EMPTY_CONV;
+			if (Boolean(conv.streamingByAgent[agentId]) === val) return s;
+			return {
+				bySid: {
+					...s.bySid,
+					[sid]: {
+						...conv,
+						streamingByAgent: { ...conv.streamingByAgent, [agentId]: val },
+					},
+				},
+			};
+		});
+	},
 
-  loadSession: async (sid: string, agentPath: string, opts?: { force?: boolean }) => {
-    // forgeax: each (sid, agentPath) has its own ledger
-    //   `<sid>/agents/<agentPath>/events/events-N.jsonl` + blobs/.
-    if (!sid || !agentPath) return;
-    try {
-      // Defense in depth: don't clobber a slot whose tail assistant is in a
-      // non-terminal (streaming/error) state — in-memory is more recent than
-      // the WAL (broken model / abort wrote user_input but no assistant_complete).
-      // 多 tab 同步:带身份锚(`live:` msgId)的在途流式气泡走 merge 保留(下方
-      // commit),不再挡整个回放 —— 否则中途加入的 tab 看不到历史;`force` 供
-      // resume-gap 全量恢复(server 已声明本地态陈旧)。
-      const slotSnap = get().bySid[sid]?.messagesByAgent[agentPath] ?? [];
-      const nonDaemon = slotSnap.filter((m) => !m.id.startsWith('daemon-tick-'));
-      const tailAsst = [...nonDaemon].reverse().find((m) => m.role === 'assistant');
-      const tailAnchored = typeof tailAsst?.msgId === 'string' && tailAsst.msgId.startsWith('live:');
-      const slotHasUnpersistedAsst =
-        nonDaemon.length > 0 && tailAsst !== undefined &&
-        (tailAsst.status === 'streaming' || tailAsst.status === 'error');
-      if (slotHasUnpersistedAsst && !opts?.force && !(tailAsst.status === 'streaming' && tailAnchored)) return;
+	loadSession: async (
+		sid: string,
+		agentPath: string,
+		opts?: { force?: boolean },
+	) => {
+		// forgeax: each (sid, agentPath) has its own ledger
+		//   `<sid>/agents/<agentPath>/events/events-N.jsonl` + blobs/.
+		if (!sid || !agentPath) return;
+		try {
+			// Defense in depth: don't clobber a slot whose tail assistant is in a
+			// non-terminal (streaming/error) state — in-memory is more recent than
+			// the WAL (broken model / abort wrote user_input but no assistant_complete).
+			// 多 tab 同步:带身份锚(`live:` msgId)的在途流式气泡走 merge 保留(下方
+			// commit),不再挡整个回放 —— 否则中途加入的 tab 看不到历史;`force` 供
+			// resume-gap 全量恢复(server 已声明本地态陈旧)。
+			const slotSnap = get().bySid[sid]?.messagesByAgent[agentPath] ?? [];
+			const nonDaemon = slotSnap.filter(
+				(m) => !m.id.startsWith("daemon-tick-"),
+			);
+			const tailAsst = [...nonDaemon]
+				.reverse()
+				.find((m) => m.role === "assistant");
+			const tailAnchored =
+				typeof tailAsst?.msgId === "string" &&
+				tailAsst.msgId.startsWith("live:");
+			const slotHasUnpersistedAsst =
+				nonDaemon.length > 0 &&
+				tailAsst !== undefined &&
+				(tailAsst.status === "streaming" || tailAsst.status === "error");
+			if (
+				slotHasUnpersistedAsst &&
+				!opts?.force &&
+				!(tailAsst.status === "streaming" && tailAnchored)
+			)
+				return;
 
-      const ndjson = await fetchSessionEventsNdjson(sid, agentPath);
-      const rawEvents = parseEventLines(ndjson);
-      await hydrateLedgerBlobs(
-        rawEvents,
-        (blob) => fetchSessionBlob(sid, agentPath, blob.sha256),
-        {
-          onError: (blob, error) => {
-            console.warn(
-              `[chat.loadSession] failed to hydrate blob sid=${sid} agent=${agentPath} sha=${blob.sha256}`,
-              error instanceof Error ? error.message : String(error),
-            );
-          },
-        },
-      );
-      const pendingRw = findPendingRewind(rawEvents);
-      const events = markReplayPermissionAsks(trimToCompactBoundary(
-        applyRewindMask(rawEvents, pendingRw ? { keepBoundaryVisible: pendingRw.boundaryId } : {}),
-      ));
-      // Permission cards use a side channel rather than ChatMessage, so feed
-      // their durable request/resolution events through the same reducer on
-      // replay. This is what keeps a resolved CLI AskUserQuestion as a
-      // collapsed summary after a refresh.
-      replayPermissionEvents(sid, events);
-      if (events.length === 0) {
-        // Don't wipe a populated slot. Cold-start (slot has only daemon-tick-*
-        // live bubbles or nothing) clears to the surviving daemon bubbles.
-        if (nonDaemon.length > 0) return;
-        get().patchMessages(sid, agentPath, (prev) =>
-          prev.filter((mm) => mm.id.startsWith('daemon-tick-')));
-        return;
-      }
+			const ndjson = await fetchSessionEventsNdjson(sid, agentPath);
+			const rawEvents = parseEventLines(ndjson);
+			await hydrateLedgerBlobs(
+				rawEvents,
+				(blob) => fetchSessionBlob(sid, agentPath, blob.sha256),
+				{
+					onError: (blob, error) => {
+						console.warn(
+							`[chat.loadSession] failed to hydrate blob sid=${sid} agent=${agentPath} sha=${blob.sha256}`,
+							error instanceof Error ? error.message : String(error),
+						);
+					},
+				},
+			);
+			const pendingRw = findPendingRewind(rawEvents);
+			const events = markReplayPermissionAsks(
+				trimToCompactBoundary(
+					applyRewindMask(
+						rawEvents,
+						pendingRw ? { keepBoundaryVisible: pendingRw.boundaryId } : {},
+					),
+				),
+			);
+			// Permission cards use a side channel rather than ChatMessage, so feed
+			// their durable request/resolution events through the same reducer on
+			// replay. This is what keeps a resolved CLI AskUserQuestion as a
+			// collapsed summary after a refresh.
+			replayPermissionEvents(sid, events);
+			if (events.length === 0) {
+				// Don't wipe a populated slot. Cold-start (slot has only daemon-tick-*
+				// live bubbles or nothing) clears to the surviving daemon bubbles.
+				if (nonDaemon.length > 0) return;
+				get().patchMessages(sid, agentPath, (prev) =>
+					prev.filter((mm) => mm.id.startsWith("daemon-tick-")),
+				);
+				return;
+			}
 
-      // Replay through TurnAccumulator — same callbacks as live SSE.
-      const messages: ChatMessage[] = [];
-      let replayTimestamp = 0;
-      const replayEffects = makeInMemEffects(messages, newId, () => replayTimestamp);
-      let replayContextUsage: ContextUsage | undefined;
-      const mainCbs = buildMainCallbacks(replayEffects);
-      let curPid: string | undefined;
-      const acc = new TurnAccumulator({
-        ...mainCbs,
-        onMessage: (msg) => {
-          mainCbs.onMessage?.(msg);
-          const ts = msg.timestamp ?? Date.now();
-          if (msg.kind === 'assistant_complete') {
-            const pid = curPid ?? 'forgeax';
-            replayEffects.applyMain((m) => {
-              let segs = m.segments ?? [];
-              if (msg.thinking?.trim()) segs = appendChatSegment(segs, { kind: 'thinking', ts, text: msg.thinking });
-              if (msg.text?.trim()) segs = appendChatSegment(segs, { kind: 'text', ts, text: msg.text });
-              return { ...m, segments: segs, providerId: m.providerId ?? pid };
-            });
-          } else if (msg.kind === 'tool_call') {
-            const tc = rendererToolCallToLegacy(msg as ToolCallMessage);
-            replayEffects.applyMain((m) => ({ ...m, segments: upsertToolSegment(m.segments ?? [], ts, tc) }));
-          }
-        },
-        onUpdateMessage: (callId, merged) => {
-          mainCbs.onUpdateMessage?.(callId, merged);
-          if (merged.kind === 'tool_call') {
-            const tc = rendererToolCallToLegacy(merged as ToolCallMessage);
-            replayEffects.applyMain((m) => ({ ...m, segments: upsertToolSegment(m.segments ?? [], merged.timestamp ?? replayTimestamp, tc) }));
-          }
-        },
-        // Native zero is valid after compaction; invalid estimates are ignored
-        // by the accumulator, just as they are in the live path.
-        onMeta: (m) => {
-          if (m.contextUsage) replayContextUsage = latestContextUsage(replayContextUsage, m.contextUsage);
-        },
-        onTurn: (turn) => {
-          mainCbs.onTurn?.(turn);
-          if (turn.agent && turn.agent !== 'user') replayEffects.sealMain?.();
-        },
-      }, agentPath);
+			// Replay through TurnAccumulator — same callbacks as live SSE.
+			const messages: ChatMessage[] = [];
+			let replayTimestamp = 0;
+			const replayEffects = makeInMemEffects(
+				messages,
+				newId,
+				() => replayTimestamp,
+			);
+			let replayContextPct = 0;
+			const mainCbs = buildMainCallbacks(replayEffects);
+			let curPid: string | undefined;
+			const acc = new TurnAccumulator(
+				{
+					...mainCbs,
+					onMessage: (msg) => {
+						mainCbs.onMessage?.(msg);
+						const ts = msg.timestamp ?? Date.now();
+						if (msg.kind === "assistant_complete") {
+							const pid = curPid ?? "forgeax";
+							replayEffects.applyMain((m) => {
+								let segs = m.segments ?? [];
+								if (msg.thinking?.trim())
+									segs = appendChatSegment(segs, {
+										kind: "thinking",
+										ts,
+										text: msg.thinking,
+									});
+								if (msg.text?.trim())
+									segs = appendChatSegment(segs, {
+										kind: "text",
+										ts,
+										text: msg.text,
+									});
+								return {
+									...m,
+									segments: segs,
+									providerId: m.providerId ?? pid,
+								};
+							});
+						} else if (msg.kind === "tool_call") {
+							const tc = rendererToolCallToLegacy(msg as ToolCallMessage);
+							replayEffects.applyMain((m) => ({
+								...m,
+								segments: upsertToolSegment(m.segments ?? [], ts, tc),
+							}));
+						}
+					},
+					onUpdateMessage: (callId, merged) => {
+						mainCbs.onUpdateMessage?.(callId, merged);
+						if (merged.kind === "tool_call") {
+							const tc = rendererToolCallToLegacy(merged as ToolCallMessage);
+							replayEffects.applyMain((m) => ({
+								...m,
+								segments: upsertToolSegment(
+									m.segments ?? [],
+									merged.timestamp ?? replayTimestamp,
+									tc,
+								),
+							}));
+						}
+					},
+					// Match the live stream path: a zero/invalid usage report must not
+					// erase the last valid context percentage from the replay.
+					onMeta: (m) => {
+						if (m.contextPct !== undefined && m.contextPct > 0)
+							replayContextPct = m.contextPct;
+					},
+					onTurn: (turn) => {
+						mainCbs.onTurn?.(turn);
+						if (turn.agent && turn.agent !== "user") replayEffects.sealMain?.();
+					},
+				},
+				agentPath,
+			);
 
-      const sorted = [...events].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
-      const knownAssistantIds = new Set<string>();
-      let pendingUserAssistantId: string | null = null;
-      let openTurnStartedAt: number | null = null;
-      let openTurnAssistantId: string | null = null;
-      const settledAnchors = new Set<string>();
-      const lastAssistant = (turnId?: string): ChatMessage | undefined => {
-        if (turnId) {
-          for (let i = messages.length - 1; i >= 0; i--) {
-            const message = messages[i]!;
-            if (message.role === 'assistant' && message.turnId === turnId) return message;
-          }
-        }
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i]!.role === 'assistant') return messages[i];
-        }
-        return undefined;
-      };
-      for (const ev of sorted) {
-        replayTimestamp = ev.ts ?? Date.now();
-        const p = (ev as { type?: string; payload?: { providerId?: unknown } }).payload;
-        const pid = p && typeof p.providerId === 'string' && p.providerId ? p.providerId : undefined;
-        if (ev.type === 'user_input' || ev.type === 'hook:turnStart') curPid = pid;
-        else if (pid) curPid = pid;
+			const sorted = [...events].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+			const knownAssistantIds = new Set<string>();
+			let pendingUserAssistantId: string | null = null;
+			let openTurnStartedAt: number | null = null;
+			let openTurnAssistantId: string | null = null;
+			const settledAnchors = new Set<string>();
+			const lastAssistant = (turnId?: string): ChatMessage | undefined => {
+				if (turnId) {
+					for (let i = messages.length - 1; i >= 0; i--) {
+						const message = messages[i]!;
+						if (message.role === "assistant" && message.turnId === turnId)
+							return message;
+					}
+				}
+				for (let i = messages.length - 1; i >= 0; i--) {
+					if (messages[i]?.role === "assistant") return messages[i];
+				}
+				return undefined;
+			};
+			for (const ev of sorted) {
+				replayTimestamp = ev.ts ?? Date.now();
+				const p = (ev as { type?: string; payload?: { providerId?: unknown } })
+					.payload;
+				const pid =
+					p && typeof p.providerId === "string" && p.providerId
+						? p.providerId
+						: undefined;
+				if (ev.type === "user_input" || ev.type === "hook:turnStart")
+					curPid = pid;
+				else if (pid) curPid = pid;
 
-        const sourceAgent = typeof ev.source === 'string' && ev.source.startsWith('agent:')
-          ? ev.source.slice('agent:'.length)
-          : null;
-        const eventEmitter = typeof ev.emitterId === 'string' ? ev.emitterId : sourceAgent;
-        const ownAgentEvent = eventEmitter === null || eventEmitter === agentPath;
-        if (ev.type === 'hook:turnStart' && ownAgentEvent) {
-          openTurnStartedAt = ev.ts ?? Date.now();
-          openTurnAssistantId = pendingUserAssistantId;
-          pendingUserAssistantId = null;
-        }
+				const sourceAgent =
+					typeof ev.source === "string" && ev.source.startsWith("agent:")
+						? ev.source.slice("agent:".length)
+						: null;
+				const eventEmitter =
+					typeof ev.emitterId === "string" ? ev.emitterId : sourceAgent;
+				const ownAgentEvent =
+					eventEmitter === null || eventEmitter === agentPath;
+				if (ev.type === "hook:turnStart" && ownAgentEvent) {
+					openTurnStartedAt = ev.ts ?? Date.now();
+					openTurnAssistantId = pendingUserAssistantId;
+					pendingUserAssistantId = null;
+				}
 
-        const assistantBeforeFeed = lastAssistant()?.id ?? null;
-        const turnPayload = ev.type === 'hook:turnEnd'
-          ? ev.payload as Record<string, unknown> | undefined
-          : undefined;
-        // Only an explicit host wait keeps a turn open. An unresolved card
-        // cannot override a terminal event: its pending handle may be gone.
-        const pendingAskBeforeFeed = ev.type === 'hook:turnEnd'
-          && ownAgentEvent && !turnPayload?.error
-          && turnPayload?.aborted !== true && turnPayload?.waitingForInput === true;
-        if (!pendingAskBeforeFeed) acc.feed(ev);
-        if (ev.type === 'hook:turnEnd' && ownAgentEvent && !pendingAskBeforeFeed) {
-          const ended = lastAssistant();
-          if (ended) {
-            ended.toolCalls = ended.toolCalls.map(closePendingAsk);
-            ended.segments = ended.segments?.map(segment => segment.kind === 'tool'
-              ? { ...segment, tool: closePendingAsk(segment.tool) } : segment);
-          }
-        }
+				const assistantBeforeFeed = lastAssistant()?.id ?? null;
+				const turnPayload =
+					ev.type === "hook:turnEnd"
+						? (ev.payload as Record<string, unknown> | undefined)
+						: undefined;
+				const currentAssistant = lastAssistant();
+				const pendingAskBeforeFeed =
+					ev.type === "hook:turnEnd" &&
+					ownAgentEvent &&
+					!turnPayload?.error &&
+					turnPayload?.aborted !== true &&
+					(turnPayload?.waitingForInput === true ||
+						(currentAssistant
+							? hasPendingAskUser([
+									...currentAssistant.toolCalls,
+									...(currentAssistant.segments?.flatMap((segment) =>
+										segment.kind === "tool" ? [segment.tool] : [],
+									) ?? []),
+								])
+							: false));
+				// TurnAccumulator treats a normal turn-end as a seal boundary. A
+				// provider may omit waitingForInput, so do not feed that boundary
+				// while the Ask User call is still unresolved.
+				if (!pendingAskBeforeFeed) acc.feed(ev);
 
-        const tail = lastAssistant();
-        if (ev.type === 'hook:turnStart' && ownAgentEvent) {
-          const turnId = typeof (ev.payload as Record<string, unknown> | undefined)?.turnId === 'string'
-            ? (ev.payload as Record<string, unknown>).turnId as string : undefined;
-          if (turnId && tail) {
-            const index = messages.findIndex((message) => message.id === tail.id);
-            if (index >= 0) messages[index] = { ...messages[index]!, turnId };
-          }
-        }
-        if (ev.type === 'user_input') {
-          // Human user_input creates a new assistant skeleton and is a real
-          // turn boundary. Inter-agent user_input renders as a system row and
-          // must not erase the currently open turn identity.
-          if (tail && tail.id !== assistantBeforeFeed) {
-            openTurnStartedAt = null;
-            openTurnAssistantId = null;
-            pendingUserAssistantId = tail.id;
-          }
-        }
-        if (openTurnStartedAt !== null && openTurnAssistantId === null &&
-            tail && !knownAssistantIds.has(tail.id)) {
-          openTurnAssistantId = tail.id;
-        }
-        if (ev.type === 'artifact:resolved' && ownAgentEvent) {
-          const artifact = artifactSummaryFromStoredPayload(ev.payload ?? {});
-          if (artifact) {
-            const target = lastAssistant(artifact.turnId);
-            if (target) {
-              const index = messages.findIndex((message) => message.id === target.id);
-              if (index >= 0) messages[index] = {
-                ...messages[index]!,
-                artifact,
-                artifactAnchorSeq: typeof ev.seq === 'number' ? ev.seq : undefined,
-                turnId: messages[index]!.turnId ?? artifact.turnId,
-              };
-            }
-          }
-        }
-        for (const m of messages) {
-          if (m.role === 'assistant') knownAssistantIds.add(m.id);
-        }
-        if (ev.type === 'hook:turnEnd' && ownAgentEvent) {
-          // A provider may emit a lifecycle checkpoint while Ask User is
-          // waiting. Keep the replay cursor and streaming assistant alive
-          // until the later final turn-end.
-          if (pendingAskBeforeFeed) continue;
+				const tail = lastAssistant();
+				if (ev.type === "hook:turnStart" && ownAgentEvent) {
+					const turnId =
+						typeof (ev.payload as Record<string, unknown> | undefined)
+							?.turnId === "string"
+							? ((ev.payload as Record<string, unknown>).turnId as string)
+							: undefined;
+					if (turnId && tail) {
+						const index = messages.findIndex(
+							(message) => message.id === tail.id,
+						);
+						if (index >= 0) messages[index] = { ...messages[index]!, turnId };
+					}
+				}
+				if (ev.type === "user_input") {
+					// Human user_input creates a new assistant skeleton and is a real
+					// turn boundary. Inter-agent user_input renders as a system row and
+					// must not erase the currently open turn identity.
+					if (tail && tail.id !== assistantBeforeFeed) {
+						openTurnStartedAt = null;
+						openTurnAssistantId = null;
+						pendingUserAssistantId = tail.id;
+					}
+				}
+				if (
+					openTurnStartedAt !== null &&
+					openTurnAssistantId === null &&
+					tail &&
+					!knownAssistantIds.has(tail.id)
+				) {
+					openTurnAssistantId = tail.id;
+				}
+				if (ev.type === "artifact:resolved" && ownAgentEvent) {
+					const artifact = artifactSummaryFromStoredPayload(ev.payload ?? {});
+					if (artifact) {
+						const target = lastAssistant(artifact.turnId);
+						if (target) {
+							const index = messages.findIndex(
+								(message) => message.id === target.id,
+							);
+							if (index >= 0)
+								messages[index] = {
+									...messages[index]!,
+									artifact,
+									artifactAnchorSeq:
+										typeof ev.seq === "number" ? ev.seq : undefined,
+									turnId: messages[index]?.turnId ?? artifact.turnId,
+								};
+						}
+					}
+				}
+				for (const m of messages) {
+					if (m.role === "assistant") knownAssistantIds.add(m.id);
+				}
+				if (ev.type === "hook:turnEnd" && ownAgentEvent) {
+					// A provider may emit a lifecycle checkpoint while Ask User is
+					// waiting. Keep the replay cursor and streaming assistant alive
+					// until the later final turn-end.
+					if (pendingAskBeforeFeed) continue;
 
-          if (openTurnStartedAt !== null) {
-            settledAnchors.add(`live:${agentPath}:${openTurnStartedAt}`);
-          }
+					if (openTurnStartedAt !== null) {
+						settledAnchors.add(`live:${agentPath}:${openTurnStartedAt}`);
+					}
 
-          const targetId = openTurnAssistantId ?? lastAssistant()?.id;
-          const targetIndex = targetId
-            ? messages.findIndex((message) => message.id === targetId)
-            : -1;
-          if (targetIndex >= 0) {
-            const target = messages[targetIndex]!;
-            const startedAt = openTurnStartedAt ?? target.ts;
-            const endTs = ev.ts ?? Date.now();
-            const durationMs = typeof turnPayload?.durationMs === 'number'
-              ? Math.max(0, turnPayload.durationMs)
-              : Math.max(0, endTs - startedAt);
-            messages[targetIndex] = {
-              ...target,
-              ...(openTurnStartedAt !== null ? { msgId: `live:${agentPath}:${openTurnStartedAt}` } : {}),
-              status: turnPayload?.error || turnPayload?.aborted === true ? 'error' : 'done',
-              ...(turnPayload?.aborted === true ? { turnAborted: true } : {}),
-              ...(typeof turnPayload?.error === 'string' ? { errorMessage: turnPayload.error } : {}),
-              durationMs,
-            };
-          }
-          openTurnStartedAt = null;
-          openTurnAssistantId = null;
-        }
-      }
-      acc.flush();
-      if (openTurnStartedAt !== null && openTurnAssistantId !== null) {
-        const anchor = `live:${agentPath}:${openTurnStartedAt}`;
-        const idx = messages.findIndex((m) => m.id === openTurnAssistantId);
-        if (idx >= 0) messages[idx] = { ...messages[idx]!, msgId: anchor };
-      }
-      finalizeStreamingStatus(messages);
+					const targetId = openTurnAssistantId ?? lastAssistant()?.id;
+					const targetIndex = targetId
+						? messages.findIndex((message) => message.id === targetId)
+						: -1;
+					if (targetIndex >= 0) {
+						const target = messages[targetIndex]!;
+						const startedAt = openTurnStartedAt ?? target.ts;
+						const endTs = ev.ts ?? Date.now();
+						const durationMs =
+							typeof turnPayload?.durationMs === "number"
+								? Math.max(0, turnPayload.durationMs)
+								: Math.max(0, endTs - startedAt);
+						messages[targetIndex] = {
+							...target,
+							...(openTurnStartedAt !== null
+								? { msgId: `live:${agentPath}:${openTurnStartedAt}` }
+								: {}),
+							status:
+								turnPayload?.error || turnPayload?.aborted === true
+									? "error"
+									: "done",
+							...(turnPayload?.aborted === true ? { turnAborted: true } : {}),
+							...(typeof turnPayload?.error === "string"
+								? { errorMessage: turnPayload.error }
+								: {}),
+							durationMs,
+						};
+					}
+					openTurnStartedAt = null;
+					openTurnAssistantId = null;
+				}
+			}
+			acc.flush();
+			if (openTurnStartedAt !== null && openTurnAssistantId !== null) {
+				const anchor = `live:${agentPath}:${openTurnStartedAt}`;
+				const idx = messages.findIndex((m) => m.id === openTurnAssistantId);
+				if (idx >= 0) messages[idx] = { ...messages[idx]!, msgId: anchor };
+			}
+			finalizeStreamingStatus(messages);
 
-      // Commit to bySid[sid].messagesByAgent[agentPath], preserving live
-      // daemon-tick-* bubbles + 带锚的在途流式气泡 (multi-tab §5.3) already in the slot.
-      // WAL replay 从未闭合 turnStart 派生同一个 live anchor，因此按身份去重，
-      // 不按文本前缀猜测（自动续轮可能与上一条正文相似）。
-      let settledReplay = false;
-      set((s) => {
-        const conv = s.bySid[sid] ?? EMPTY_CONV;
-        const prev = conv.messagesByAgent[agentPath] ?? [];
-        const liveDaemonMsgs = prev.filter((mm) => mm.id.startsWith('daemon-tick-'));
-        // A completed WAL turn replaces its stale live bubble. Preserve newer
-        // live work that arrived while the history request was in flight.
-        const unchanged = prev === slotSnap || (!conv.messagesByAgent[agentPath] && slotSnap.length === 0);
-        const liveStreaming = prev.filter((mm) =>
-          mm.status === 'streaming' && typeof mm.msgId === 'string' && mm.msgId.startsWith('live:') &&
-          !(unchanged && settledAnchors.has(mm.msgId)));
-        const liveAnchors = new Set(liveStreaming.map((mm) => mm.msgId));
-        const walMessages = liveAnchors.size === 0
-          ? messages
-          : messages.filter((mm) => !mm.msgId || !liveAnchors.has(mm.msgId));
-        const keep = [...liveDaemonMsgs, ...liveStreaming];
-        const merged = keep.length === 0
-          ? walMessages
-          : [...walMessages, ...keep].sort((a, b) => a.ts - b.ts);
-        settledReplay = unchanged && settledAnchors.size > 0 && openTurnStartedAt === null &&
-          !merged.some((message) => message.status === 'streaming');
-        return {
-          bySid: {
-            ...s.bySid,
-            [sid]: {
-              ...conv,
-              messagesByAgent: { ...conv.messagesByAgent, [agentPath]: merged },
-              contextByAgent: replayContextUsage ? { ...conv.contextByAgent, [agentPath]: latestContextUsage(conv.contextByAgent[agentPath], replayContextUsage) } : conv.contextByAgent,
-            },
-          },
-        };
-      });
-      // The composer and working dots also read the shared busy registry.
-      // Recover both flags when the durable terminal event was missed live.
-      if (settledReplay) get().setStreaming(sid, agentPath, false);
+			// Commit to bySid[sid].messagesByAgent[agentPath], preserving live
+			// daemon-tick-* bubbles + 带锚的在途流式气泡 (multi-tab §5.3) already in the slot.
+			// WAL replay 从未闭合 turnStart 派生同一个 live anchor，因此按身份去重，
+			// 不按文本前缀猜测（自动续轮可能与上一条正文相似）。
+			let settledReplay = false;
+			set((s) => {
+				const conv = s.bySid[sid] ?? EMPTY_CONV;
+				const prev = conv.messagesByAgent[agentPath] ?? [];
+				const liveDaemonMsgs = prev.filter((mm) =>
+					mm.id.startsWith("daemon-tick-"),
+				);
+				// A completed WAL turn replaces its stale live bubble. Preserve newer
+				// live work that arrived while the history request was in flight.
+				const unchanged =
+					prev === slotSnap ||
+					(!conv.messagesByAgent[agentPath] && slotSnap.length === 0);
+				const liveStreaming = prev.filter(
+					(mm) =>
+						mm.status === "streaming" &&
+						typeof mm.msgId === "string" &&
+						mm.msgId.startsWith("live:") &&
+						!(unchanged && settledAnchors.has(mm.msgId)),
+				);
+				const liveAnchors = new Set(liveStreaming.map((mm) => mm.msgId));
+				const walMessages =
+					liveAnchors.size === 0
+						? messages
+						: messages.filter((mm) => !mm.msgId || !liveAnchors.has(mm.msgId));
+				const keep = [...liveDaemonMsgs, ...liveStreaming];
+				const merged =
+					keep.length === 0
+						? walMessages
+						: [...walMessages, ...keep].sort((a, b) => a.ts - b.ts);
+				settledReplay =
+					unchanged &&
+					settledAnchors.size > 0 &&
+					openTurnStartedAt === null &&
+					!merged.some((message) => message.status === "streaming");
+				return {
+					bySid: {
+						...s.bySid,
+						[sid]: {
+							...conv,
+							messagesByAgent: { ...conv.messagesByAgent, [agentPath]: merged },
+							contextPct:
+								replayContextPct > 0 ? replayContextPct : conv.contextPct,
+						},
+					},
+				};
+			});
+			// The composer and working dots also read the shared busy registry.
+			// Recover both flags when the durable terminal event was missed live.
+			if (settledReplay) get().setStreaming(sid, agentPath, false);
 
-      // Deduplicate the replayed agent only. A newer parent history page must
-      // not acknowledge older child events that this browser has never seen.
-      try {
-        const { currentWsSgen, noteAppliedSeq } = await import('../session-bridge');
-        const wsSgen = currentWsSgen(sid);
-        if (wsSgen) {
-          let maxSeq = 0;
-          for (const ev of rawEvents) {
-            const evSgen = (ev as { sgen?: unknown }).sgen;
-            const evSeq = (ev as { seq?: unknown }).seq;
-            if (evSgen === wsSgen && typeof evSeq === 'number' && evSeq > maxSeq) maxSeq = evSeq;
-          }
-          if (maxSeq > 0) noteAppliedSeq(sid, wsSgen, maxSeq, agentPath);
-        }
-      } catch { /* bridge unavailable (tests) — cursor backfill is best-effort */ }
-    } catch (e) {
-      console.warn('[chat.loadSession] failed', (e as Error).message);
-    }
-  },
+			// 多 tab 同步:回放后把 cursor 回填到「与当前连接同代的最大 seq」,让直播帧
+			// 与回放重叠的部分被 seq 闸丢弃(方案 §3.5)。
+			try {
+				const { currentWsSgen, noteAppliedSeq } = await import(
+					"../session-bridge"
+				);
+				const wsSgen = currentWsSgen(sid);
+				if (wsSgen) {
+					let maxSeq = 0;
+					for (const ev of rawEvents) {
+						const evSgen = (ev as { sgen?: unknown }).sgen;
+						const evSeq = (ev as { seq?: unknown }).seq;
+						if (
+							evSgen === wsSgen &&
+							typeof evSeq === "number" &&
+							evSeq > maxSeq
+						)
+							maxSeq = evSeq;
+					}
+					if (maxSeq > 0) noteAppliedSeq(sid, wsSgen, maxSeq);
+				}
+			} catch {
+				/* bridge unavailable (tests) — cursor backfill is best-effort */
+			}
+		} catch (e) {
+			console.warn("[chat.loadSession] failed", (e as Error).message);
+		}
+	},
 
-  loadThreadHistory: async (threadId: string) => {
-    if (!threadId) return;
-    try {
-      const { agentId: activeAgentId } = activeTarget();
-      const tr = await fetch(`/api/threads/${encodeURIComponent(threadId)}`);
-      if (!tr.ok) return;
-      const tj = (await tr.json()) as { thread?: { runIds?: string[] } };
-      const runIds = tj.thread?.runIds ?? [];
-      if (runIds.length === 0) return;
+	loadThreadHistory: async (threadId: string) => {
+		if (!threadId) return;
+		try {
+			const { agentId: activeAgentId } = activeTarget();
+			const tr = await fetch(`/api/threads/${encodeURIComponent(threadId)}`);
+			if (!tr.ok) return;
+			const tj = (await tr.json()) as { thread?: { runIds?: string[] } };
+			const runIds = tj.thread?.runIds ?? [];
+			if (runIds.length === 0) return;
 
-      type RunBuild = {
-        meta: {
-          id: string; threadId: string; agentId: string; providerId: string;
-          status: string; message: string; createdAt: number; lastEventAt: number;
-        };
-        events: AguiStoredEvent[];
-      };
-      const builds = new Map<string, RunBuild>();
-      const built: ChatMessage[] = [];
-      let inFlightRunId: string | null = null;
+			type RunBuild = {
+				meta: {
+					id: string;
+					threadId: string;
+					agentId: string;
+					providerId: string;
+					status: string;
+					message: string;
+					createdAt: number;
+					lastEventAt: number;
+				};
+				events: AguiStoredEvent[];
+			};
+			const builds = new Map<string, RunBuild>();
+			const built: ChatMessage[] = [];
+			let inFlightRunId: string | null = null;
 
-      for (const runId of runIds) {
-        const rr = await fetch(`/api/runs/${encodeURIComponent(runId)}/events?stream=poll`);
-        if (!rr.ok) continue;
-        const rj = (await rr.json()) as { run?: RunBuild['meta']; events?: AguiStoredEvent[] };
-        const meta = rj.run;
-        if (!meta) continue;
-        const evs = rj.events ?? [];
-        builds.set(runId, { meta, events: evs });
+			for (const runId of runIds) {
+				const rr = await fetch(
+					`/api/runs/${encodeURIComponent(runId)}/events?stream=poll`,
+				);
+				if (!rr.ok) continue;
+				const rj = (await rr.json()) as {
+					run?: RunBuild["meta"];
+					events?: AguiStoredEvent[];
+				};
+				const meta = rj.run;
+				if (!meta) continue;
+				const evs = rj.events ?? [];
+				builds.set(runId, { meta, events: evs });
 
-        if (meta.message) {
-          built.push({
-            id: `${runId}-user`, role: 'user', text: meta.message,
-            toolCalls: [], status: 'done', ts: meta.createdAt,
-          });
-        }
-        const a = consumeAguiEvents(evs);
-        const isLive = meta.status === 'streaming' || meta.status === 'starting';
-        if (isLive) inFlightRunId = runId;
-        built.push({
-          id: `${runId}-asst`, role: 'assistant',
-          text: a.text, thinking: a.thinking, toolCalls: a.toolCalls, segments: a.segments,
-          status: isLive ? 'streaming' : a.status,
-          ts: meta.lastEventAt || meta.createdAt + 1,
-          providerId: meta.providerId,
-        });
-      }
-      built.sort((a, b) => a.ts - b.ts);
+				if (meta.message) {
+					built.push({
+						id: `${runId}-user`,
+						role: "user",
+						text: meta.message,
+						toolCalls: [],
+						status: "done",
+						ts: meta.createdAt,
+					});
+				}
+				const a = consumeAguiEvents(evs);
+				const isLive =
+					meta.status === "streaming" || meta.status === "starting";
+				if (isLive) inFlightRunId = runId;
+				built.push({
+					id: `${runId}-asst`,
+					role: "assistant",
+					text: a.text,
+					thinking: a.thinking,
+					toolCalls: a.toolCalls,
+					segments: a.segments,
+					status: isLive ? "streaming" : a.status,
+					ts: meta.lastEventAt || meta.createdAt + 1,
+					providerId: meta.providerId,
+				});
+			}
+			built.sort((a, b) => a.ts - b.ts);
 
-      // R3: threadId === sid. Commit to the thread's bound agent slot (active
-      // agent of this sid). loadThreadHistory only runs for cli-provider sids
-      // where one agent owns the thread.
-      const slotAgent = activeAgentId ?? builds.values().next().value?.meta.agentId ?? threadId;
-      get().patchConv(threadId, { runId: inFlightRunId });
-      get().patchMessages(threadId, slotAgent, () => built);
+			// R3: threadId === sid. Commit to the thread's bound agent slot (active
+			// agent of this sid). loadThreadHistory only runs for cli-provider sids
+			// where one agent owns the thread.
+			const slotAgent =
+				activeAgentId ?? builds.values().next().value?.meta.agentId ?? threadId;
+			get().patchConv(threadId, { runId: inFlightRunId });
+			get().patchMessages(threadId, slotAgent, () => built);
 
-      closeThreadHistoryTails(threadId);
-      for (const [runId, b] of builds) {
-        if (b.meta.status !== 'streaming' && b.meta.status !== 'starting') continue;
-        const lastSeq = b.events.reduce((m, e) => Math.max(m, e.seq ?? -1), -1);
-        const url =
-          `/api/runs/${encodeURIComponent(runId)}/events?stream=sse` +
-          (lastSeq >= 0 ? `&lastEventId=${encodeURIComponent(`${runId}:${lastSeq}`)}` : '');
-        const es = new EventSource(url);
-        trackTail(threadId, es);
+			closeThreadHistoryTails(threadId);
+			for (const [runId, b] of builds) {
+				if (b.meta.status !== "streaming" && b.meta.status !== "starting")
+					continue;
+				const lastSeq = b.events.reduce((m, e) => Math.max(m, e.seq ?? -1), -1);
+				const url =
+					`/api/runs/${encodeURIComponent(runId)}/events?stream=sse` +
+					(lastSeq >= 0
+						? `&lastEventId=${encodeURIComponent(`${runId}:${lastSeq}`)}`
+						: "");
+				const es = new EventSource(url);
+				trackTail(threadId, es);
 
-        const onAguiFrame = (raw: MessageEvent<string>): void => {
-          try {
-            const stored = JSON.parse(raw.data) as AguiStoredEvent;
-            b.events.push(stored);
-            const a = consumeAguiEvents(b.events);
-            const isLive = a.status === 'streaming';
-            get().patchMessages(threadId, slotAgent, (msgs) =>
-              msgs.map((m) => m.id === `${runId}-asst`
-                ? { ...m, text: a.text, thinking: a.thinking, toolCalls: a.toolCalls, segments: a.segments, status: a.status, ts: stored.ts ?? m.ts }
-                : m));
-            const conv = get().bySid[threadId];
-            if (!isLive && conv?.runId === runId) get().patchConv(threadId, { runId: null });
-            if (!isLive) {
-              try { es.close(); } catch { /* */ }
-              untrackTail(threadId, es);
-            }
-          } catch (e) {
-            console.warn('[chat.loadThreadHistory tail] parse failed', (e as Error).message);
-          }
-        };
+				const onAguiFrame = (raw: MessageEvent<string>): void => {
+					try {
+						const stored = JSON.parse(raw.data) as AguiStoredEvent;
+						b.events.push(stored);
+						const a = consumeAguiEvents(b.events);
+						const isLive = a.status === "streaming";
+						get().patchMessages(threadId, slotAgent, (msgs) =>
+							msgs.map((m) =>
+								m.id === `${runId}-asst`
+									? {
+											...m,
+											text: a.text,
+											thinking: a.thinking,
+											toolCalls: a.toolCalls,
+											segments: a.segments,
+											status: a.status,
+											ts: stored.ts ?? m.ts,
+										}
+									: m,
+							),
+						);
+						const conv = get().bySid[threadId];
+						if (!isLive && conv?.runId === runId)
+							get().patchConv(threadId, { runId: null });
+						if (!isLive) {
+							try {
+								es.close();
+							} catch {
+								/* */
+							}
+							untrackTail(threadId, es);
+						}
+					} catch (e) {
+						console.warn(
+							"[chat.loadThreadHistory tail] parse failed",
+							(e as Error).message,
+						);
+					}
+				};
 
-        const TAIL_EVENTS = [
-          'RUN_STARTED', 'RUN_FINISHED', 'RUN_ERROR',
-          'TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_CHUNK', 'TEXT_MESSAGE_END',
-          'TOOL_CALL_START', 'TOOL_CALL_ARGS', 'TOOL_CALL_CHUNK', 'TOOL_CALL_END', 'TOOL_CALL_RESULT',
-          'REASONING_START', 'REASONING_MESSAGE_START', 'REASONING_MESSAGE_CONTENT',
-          'REASONING_MESSAGE_CHUNK', 'REASONING_MESSAGE_END', 'REASONING_END',
-          'STEP_STARTED', 'STEP_FINISHED',
-        ];
-        for (const t of TAIL_EVENTS) es.addEventListener(t, onAguiFrame as EventListener);
-        es.addEventListener('message', onAguiFrame as EventListener);
-        es.onerror = () => {
-          if (es.readyState === EventSource.CLOSED) untrackTail(threadId, es);
-        };
-      }
-    } catch (e) {
-      console.warn('[chat.loadThreadHistory] failed', (e as Error).message);
-    }
-  },
+				const TAIL_EVENTS = [
+					"RUN_STARTED",
+					"RUN_FINISHED",
+					"RUN_ERROR",
+					"TEXT_MESSAGE_START",
+					"TEXT_MESSAGE_CONTENT",
+					"TEXT_MESSAGE_CHUNK",
+					"TEXT_MESSAGE_END",
+					"TOOL_CALL_START",
+					"TOOL_CALL_ARGS",
+					"TOOL_CALL_CHUNK",
+					"TOOL_CALL_END",
+					"TOOL_CALL_RESULT",
+					"REASONING_START",
+					"REASONING_MESSAGE_START",
+					"REASONING_MESSAGE_CONTENT",
+					"REASONING_MESSAGE_CHUNK",
+					"REASONING_MESSAGE_END",
+					"REASONING_END",
+					"STEP_STARTED",
+					"STEP_FINISHED",
+				];
+				for (const t of TAIL_EVENTS)
+					es.addEventListener(t, onAguiFrame as EventListener);
+				es.addEventListener("message", onAguiFrame as EventListener);
+				es.onerror = () => {
+					if (es.readyState === EventSource.CLOSED) untrackTail(threadId, es);
+				};
+			}
+		} catch (e) {
+			console.warn("[chat.loadThreadHistory] failed", (e as Error).message);
+		}
+	},
 
-  enqueueMessage: (text, opts) => {
-    const t = text.trim();
-    if (!t) return;
-    const { sid, agentId } = activeTarget();
-    if (!sid || !agentId) return;
-    const key = `${sid}::${agentId}`;
-    const ts = Date.now();
-    const optimisticMessageId = newId();
-    const item: QueuedMessage = {
-      id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      optimisticMessageId,
-      ...(opts?.model ? { model: opts.model } : {}),
-      text: t,
-      ts,
-      ...(opts && 'summonAgentId' in opts ? { summonAgentId: opts.summonAgentId } : {}),
-    };
-    const userMsg: ChatMessage = {
-      id: optimisticMessageId,
-      role: 'user',
-      text: expandPillsForDisplay(t),
-      toolCalls: [],
-      status: 'done',
-      ts,
-    };
-    // Queue state and its optimistic timeline bubble are one atomic commit. A
-    // message typed during a long reply is therefore visible immediately and
-    // keeps its chronological position when the queued turn starts later.
-    set((s) => {
-      const conv = s.bySid[sid] ?? EMPTY_CONV;
-      const messages = conv.messagesByAgent[agentId] ?? EMPTY_MESSAGES;
-      return {
-        queuedMessages: { ...s.queuedMessages, [key]: [...(s.queuedMessages[key] ?? []), item] },
-        bySid: {
-          ...s.bySid,
-          [sid]: {
-            ...conv,
-            messagesByAgent: {
-              ...conv.messagesByAgent,
-              [agentId]: [...messages, userMsg],
-            },
-          },
-        },
-      };
-    });
-  },
+	enqueueMessage: (text, opts) => {
+		const t = text.trim();
+		if (!t) return;
+		const { sid, agentId } = activeTarget();
+		if (!sid || !agentId) return;
+		const key = `${sid}::${agentId}`;
+		const ts = Date.now();
+		const optimisticMessageId = newId();
+		const item: QueuedMessage = {
+			id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			optimisticMessageId,
+			text: t,
+			ts,
+			...(opts && "summonAgentId" in opts
+				? { summonAgentId: opts.summonAgentId }
+				: {}),
+		};
+		const userMsg: ChatMessage = {
+			id: optimisticMessageId,
+			role: "user",
+			text: expandPillsForDisplay(t),
+			toolCalls: [],
+			status: "done",
+			ts,
+		};
+		// Queue state and its optimistic timeline bubble are one atomic commit. A
+		// message typed during a long reply is therefore visible immediately and
+		// keeps its chronological position when the queued turn starts later.
+		set((s) => {
+			const conv = s.bySid[sid] ?? EMPTY_CONV;
+			const messages = conv.messagesByAgent[agentId] ?? EMPTY_MESSAGES;
+			return {
+				queuedMessages: {
+					...s.queuedMessages,
+					[key]: [...(s.queuedMessages[key] ?? []), item],
+				},
+				bySid: {
+					...s.bySid,
+					[sid]: {
+						...conv,
+						messagesByAgent: {
+							...conv.messagesByAgent,
+							[agentId]: [...messages, userMsg],
+						},
+					},
+				},
+			};
+		});
+	},
 
-  dequeueMessage: (id) => {
-    const { sid, agentId } = activeTarget();
-    if (!sid || !agentId) return;
-    const key = `${sid}::${agentId}`;
-    set((s) => {
-      const cur = s.queuedMessages[key] ?? [];
-      const removed = cur.find((m) => m.id === id);
-      if (!removed) return s;
-      const conv = s.bySid[sid];
-      const messages = conv?.messagesByAgent[agentId];
-      return {
-        queuedMessages: { ...s.queuedMessages, [key]: cur.filter((m) => m.id !== id) },
-        ...(removed.optimisticMessageId && conv && messages ? {
-          bySid: {
-            ...s.bySid,
-            [sid]: {
-              ...conv,
-              messagesByAgent: {
-                ...conv.messagesByAgent,
-                [agentId]: messages.filter((m) => m.id !== removed.optimisticMessageId),
-              },
-            },
-          },
-        } : {}),
-      };
-    });
-  },
+	dequeueMessage: (id) => {
+		const { sid, agentId } = activeTarget();
+		if (!sid || !agentId) return;
+		const key = `${sid}::${agentId}`;
+		set((s) => {
+			const cur = s.queuedMessages[key] ?? [];
+			const removed = cur.find((m) => m.id === id);
+			if (!removed) return s;
+			const conv = s.bySid[sid];
+			const messages = conv?.messagesByAgent[agentId];
+			return {
+				queuedMessages: {
+					...s.queuedMessages,
+					[key]: cur.filter((m) => m.id !== id),
+				},
+				...(removed.optimisticMessageId && conv && messages
+					? {
+							bySid: {
+								...s.bySid,
+								[sid]: {
+									...conv,
+									messagesByAgent: {
+										...conv.messagesByAgent,
+										[agentId]: messages.filter(
+											(m) => m.id !== removed.optimisticMessageId,
+										),
+									},
+								},
+							},
+						}
+					: {}),
+			};
+		});
+	},
 
-  clearQueue: () => {
-    const { sid, agentId } = activeTarget();
-    if (!sid || !agentId) return;
-    const key = `${sid}::${agentId}`;
-    set((s) => {
-      if (!(key in s.queuedMessages)) return {};
-      const optimisticIds = new Set(
-        (s.queuedMessages[key] ?? []).flatMap((item) => item.optimisticMessageId ? [item.optimisticMessageId] : []),
-      );
-      const next = { ...s.queuedMessages };
-      delete next[key];
-      const conv = s.bySid[sid];
-      const messages = conv?.messagesByAgent[agentId];
-      return {
-        queuedMessages: next,
-        ...(optimisticIds.size > 0 && conv && messages ? {
-          bySid: {
-            ...s.bySid,
-            [sid]: {
-              ...conv,
-              messagesByAgent: {
-                ...conv.messagesByAgent,
-                [agentId]: messages.filter((m) => !optimisticIds.has(m.id)),
-              },
-            },
-          },
-        } : {}),
-      };
-    });
-  },
+	clearQueue: () => {
+		const { sid, agentId } = activeTarget();
+		if (!sid || !agentId) return;
+		const key = `${sid}::${agentId}`;
+		set((s) => {
+			if (!(key in s.queuedMessages)) return {};
+			const optimisticIds = new Set(
+				(s.queuedMessages[key] ?? []).flatMap((item) =>
+					item.optimisticMessageId ? [item.optimisticMessageId] : [],
+				),
+			);
+			const next = { ...s.queuedMessages };
+			delete next[key];
+			const conv = s.bySid[sid];
+			const messages = conv?.messagesByAgent[agentId];
+			return {
+				queuedMessages: next,
+				...(optimisticIds.size > 0 && conv && messages
+					? {
+							bySid: {
+								...s.bySid,
+								[sid]: {
+									...conv,
+									messagesByAgent: {
+										...conv.messagesByAgent,
+										[agentId]: messages.filter((m) => !optimisticIds.has(m.id)),
+									},
+								},
+							},
+						}
+					: {}),
+			};
+		});
+	},
 
-  flushQueuedForAgent: (sid, agentId) => {
-    const key = `${sid}::${agentId}`;
-    const head = get().queuedMessages[key]?.[0];
-    if (!head) return;
-    // Keep the item until sendMessage validates and accepts the pinned target.
-    // Invalid/stale targets therefore leave the queue intact for recovery.
-    void get().sendMessage(head.text, {
-      target: { sid, agentId },
-      ...(head.model ? { model: head.model } : {}),
-      ...(head.optimisticMessageId ? { existingUserMessageId: head.optimisticMessageId } : {}),
-      ...('summonAgentId' in head ? { summonAgentId: head.summonAgentId } : {}),
-      onAccepted: () => set((s) => {
-        const cur = s.queuedMessages[key] ?? [];
-        if (cur[0]?.id !== head.id) return {};
-        return { queuedMessages: { ...s.queuedMessages, [key]: cur.slice(1) } };
-      }),
-    });
-  },
+	flushQueuedForAgent: (sid, agentId) => {
+		const key = `${sid}::${agentId}`;
+		const head = get().queuedMessages[key]?.[0];
+		if (!head) return;
+		// Keep the item until sendMessage validates and accepts the pinned target.
+		// Invalid/stale targets therefore leave the queue intact for recovery.
+		void get().sendMessage(head.text, {
+			target: { sid, agentId },
+			...(head.optimisticMessageId
+				? { existingUserMessageId: head.optimisticMessageId }
+				: {}),
+			...("summonAgentId" in head ? { summonAgentId: head.summonAgentId } : {}),
+			onAccepted: () =>
+				set((s) => {
+					const cur = s.queuedMessages[key] ?? [];
+					if (cur[0]?.id !== head.id) return {};
+					return {
+						queuedMessages: { ...s.queuedMessages, [key]: cur.slice(1) },
+					};
+				}),
+		});
+	},
 
-  cancelStream: () => {
-    const { sid, agentId } = activeTarget();
-    if (!sid) return;
-    const conv = get().bySid[sid];
+	cancelStream: () => {
+		const { sid, agentId } = activeTarget();
+		if (!sid) return;
+		const conv = get().bySid[sid];
 
-    // Stop should only abort the current agent. The bug here is front-end
-    // re-rendering stale live state, not backend cancellation scope.
-    const c = _abortByTab.get(sid);
-    const ownsActiveController = Boolean(c && agentId && c.agentId === agentId);
-    if (ownsActiveController) c!.controller.abort();
-    // Cancellation is a terminal liveness fact even when the backend's abort
-    // event is delayed or never reaches this tab. The later turnEnd remains
-    // harmless because chatTurnEnd is idempotent.
-    if (agentId) {
-      try { chatTurnEnd(agentId, 'cancelled'); } catch { /* observability must not block Stop */ }
-    }
+		// Stop should only abort the current agent. The bug here is front-end
+		// re-rendering stale live state, not backend cancellation scope.
+		const c = _abortByTab.get(sid);
+		const ownsActiveController = Boolean(c && agentId && c.agentId === agentId);
+		if (ownsActiveController) c?.controller.abort();
+		// Cancellation is a terminal liveness fact even when the backend's abort
+		// event is delayed or never reaches this tab. The later turnEnd remains
+		// harmless because chatTurnEnd is idempotent.
+		if (agentId) {
+			try {
+				chatTurnEnd(agentId, "cancelled");
+			} catch {
+				/* observability must not block Stop */
+			}
+		}
 
-    const runId = conv?.runId ?? null;
-    if (runId) {
-      fetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
-        .catch((e) => console.warn('[chat.cancelStream] run cancel POST failed', (e as Error).message));
-    }
+		const runId = conv?.runId ?? null;
+		if (runId) {
+			fetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
+				method: "POST",
+			}).catch((e) =>
+				console.warn(
+					"[chat.cancelStream] run cancel POST failed",
+					(e as Error).message,
+				),
+			);
+		}
 
-    const qs = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
-    fetch(`/api/sessions/${encodeURIComponent(sid)}/abort${qs}`, { method: 'POST' })
-      .catch((e) => console.warn('[chat.cancelStream] session abort POST failed', (e as Error).message));
+		const qs = agentId ? `?agent=${encodeURIComponent(agentId)}` : "";
+		fetch(`/api/sessions/${encodeURIComponent(sid)}/abort${qs}`, {
+			method: "POST",
+		}).catch((e) =>
+			console.warn(
+				"[chat.cancelStream] session abort POST failed",
+				(e as Error).message,
+			),
+		);
 
-    // Optimistic UI clear + suppress late WS frames that would call
-    // setStreaming(true) again (the "need two Stops" symptom). Keep this scoped
-    // to the selected agent; do not stop Forge just because Iori was stopped.
-    // Two independent UI bindings must both be cleared:
-    //   1) streamingByAgent / busyByAgentBySid → Stop button + "回复进行中"
-    //   2) assistant message status === 'streaming' → ForgeCard "正在思考… Ns"
-    if (agentId) {
-      const endTs = Date.now();
-      suppressAgentStream(sid, agentId);
-      get().setStreaming(sid, agentId, false);
-      get().patchMessages(sid, agentId, (msgs) =>
-        msgs.map((m) => sealAbortedAssistantMessage(m, endTs)),
-      );
-      const shell = useShellStore.getState();
-      const live = shell.liveAgents[sid];
-      if (live?.some((a) => a.path === agentId && a.running)) {
-        shell.setLiveAgents(
-          sid,
-          live.map((a) => (a.path === agentId ? { ...a, running: false } : a)),
-        );
-      }
-    }
+		// Optimistic UI clear + suppress late WS frames that would call
+		// setStreaming(true) again (the "need two Stops" symptom). Keep this scoped
+		// to the selected agent; do not stop Forge just because Iori was stopped.
+		// Two independent UI bindings must both be cleared:
+		//   1) streamingByAgent / busyByAgentBySid → Stop button + "回复进行中"
+		//   2) assistant message status === 'streaming' → ForgeCard "正在思考… Ns"
+		if (agentId) {
+			const endTs = Date.now();
+			suppressAgentStream(sid, agentId);
+			get().setStreaming(sid, agentId, false);
+			get().patchMessages(sid, agentId, (msgs) =>
+				msgs.map((m) => sealAbortedAssistantMessage(m, endTs)),
+			);
+			const shell = useShellStore.getState();
+			const live = shell.liveAgents[sid];
+			if (live?.some((a) => a.path === agentId && a.running)) {
+				shell.setLiveAgents(
+					sid,
+					live.map((a) => (a.path === agentId ? { ...a, running: false } : a)),
+				);
+			}
+		}
 
-    closeThreadHistoryTails(sid);
-  },
+		closeThreadHistoryTails(sid);
+	},
 
-  clearMessages: () => {
-    const { sid, agentId } = activeTarget();
-    if (!sid || !agentId) return;
-    get().patchMessages(sid, agentId, () => []);
-  },
+	clearMessages: () => {
+		const { sid, agentId } = activeTarget();
+		if (!sid || !agentId) return;
+		get().patchMessages(sid, agentId, () => []);
+	},
 
-  sendMessage: async (text, opts) => {
-    if (!text.trim() && !opts?.attachments?.length) return;
-    const trimmed = text.trim() || '(see attached file)';
-    // Resolve the agent reply language for THIS turn (follow-input detection or
-    // the global quick-switch value). Sent as a field — the server injects a
-    // directive into composeTurnRequest's dynamicSuffix, keeping the visible
-    // user message clean (no directive leaks into the bubble or replay history).
-    const replyLanguage = resolveReplyLanguage(trimmed);
-    const summonAgentId = opts?.summonAgentId;
-    const hasSummonSnapshot = !!opts && 'summonAgentId' in opts;
-    const target = opts?.target ?? activeTarget();
-    const startSid = target.sid;
-    if (!startSid) { console.warn('[chat.sendMessage] no active session'); return; }
-    const app = useShellStore.getState();
-    const startTab = app.tabs.find((tb) => tb.sid === startSid);
-    const targetAgent = target.agentId ?? startTab?.agentId ?? null;
-    if (opts?.target && (!startTab || startTab.agentId !== targetAgent)) {
-      console.warn('[chat.sendMessage] target no longer owns session', opts.target);
-      return;
-    }
-    const sysAgent = targetAgent ?? '__none__';
-    const pushSys = (txt: string): void =>
-      get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
-        id: newId(), role: 'system', text: txt, toolCalls: [], status: 'done', ts: Date.now(),
-      }]);
+	sendMessage: async (text, opts) => {
+		if (!text.trim() && !opts?.attachments?.length) return;
+		const trimmed = text.trim() || "(see attached file)";
+		// Resolve the agent reply language for THIS turn (follow-input detection or
+		// the global quick-switch value). Sent as a field — the server injects a
+		// directive into composeTurnRequest's dynamicSuffix, keeping the visible
+		// user message clean (no directive leaks into the bubble or replay history).
+		const replyLanguage = resolveReplyLanguage(trimmed);
+		const summonAgentId = opts?.summonAgentId;
+		const hasSummonSnapshot = !!opts && "summonAgentId" in opts;
+		const target = opts?.target ?? activeTarget();
+		const startSid = target.sid;
+		if (!startSid) {
+			console.warn("[chat.sendMessage] no active session");
+			return;
+		}
+		const app = useShellStore.getState();
+		const startTab = app.tabs.find((tb) => tb.sid === startSid);
+		const targetAgent = target.agentId ?? startTab?.agentId ?? null;
+		if (opts?.target && (!startTab || startTab.agentId !== targetAgent)) {
+			console.warn(
+				"[chat.sendMessage] target no longer owns session",
+				opts.target,
+			);
+			return;
+		}
+		const sysAgent = targetAgent ?? "__none__";
+		const pushSys = (txt: string): void =>
+			get().patchMessages(startSid, sysAgent, (msgs) => [
+				...msgs,
+				{
+					id: newId(),
+					role: "system",
+					text: txt,
+					toolCalls: [],
+					status: "done",
+					ts: Date.now(),
+				},
+			]);
 
-    // /loop <intervalSec> <prompt> → spawn a long-running daemon whose ticks
-    // render as turns in this thread.
-    const loopMatch = trimmed.match(/^\/loop\s+(\d+)\s+(.+)$/s);
-    if (loopMatch) {
-      opts?.onAccepted?.();
-      const intervalSec = Math.max(15, Math.min(3600, Number(loopMatch[1])));
-      const inlinePrompt = loopMatch[2].trim();
-      const daemonId = `chat-loop-${Date.now().toString(36)}`;
-      const payload = {
-        id: daemonId, name: `Loop · ${inlinePrompt.slice(0, 32).replace(/\s+/g, ' ')}`,
-        inlinePrompt, promptFile: '', cwd: '/tmp', intervalSec, cliProvider: 'claude-code',
-        agentPersona: startTab?.agentId ?? undefined, sourceThreadId: startSid, autoStart: true,
-      };
-      try {
-        const r = await fetch('/api/daemons', {
-          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
-        });
-        const j = await r.json();
-        pushSys(r.ok ? t('store.loop.started', { daemonId, intervalSec }) : t('store.loop.createFailed', { error: j.error ?? r.status }));
-      } catch (e) {
-        pushSys(t('store.loop.networkError', { message: (e as Error).message }));
-      }
-      return;
-    }
+		// /loop <intervalSec> <prompt> → spawn a long-running daemon whose ticks
+		// render as turns in this thread.
+		const loopMatch = trimmed.match(/^\/loop\s+(\d+)\s+(.+)$/s);
+		if (loopMatch) {
+			opts?.onAccepted?.();
+			const intervalSec = Math.max(15, Math.min(3600, Number(loopMatch[1])));
+			const inlinePrompt = loopMatch[2].trim();
+			const daemonId = `chat-loop-${Date.now().toString(36)}`;
+			const payload = {
+				id: daemonId,
+				name: `Loop · ${inlinePrompt.slice(0, 32).replace(/\s+/g, " ")}`,
+				inlinePrompt,
+				promptFile: "",
+				cwd: "/tmp",
+				intervalSec,
+				cliProvider: "claude-code",
+				agentPersona: startTab?.agentId ?? undefined,
+				sourceThreadId: startSid,
+				autoStart: true,
+			};
+			try {
+				const r = await fetch("/api/daemons", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(payload),
+				});
+				const j = await r.json();
+				pushSys(
+					r.ok
+						? t("store.loop.started", { daemonId, intervalSec })
+						: t("store.loop.createFailed", { error: j.error ?? r.status }),
+				);
+			} catch (e) {
+				pushSys(
+					t("store.loop.networkError", { message: (e as Error).message }),
+				);
+			}
+			return;
+		}
 
-    // /tool <surface> <action> [jsonArgs] — split-surface plugin RPC.
-    const toolMatch = trimmed.match(/^\/tool\s+(\S+)\s+(\S+)(?:\s+(.+))?$/s);
-    if (toolMatch) {
-      opts?.onAccepted?.();
-      const surfaceId = toolMatch[1];
-      const action = toolMatch[2];
-      const argsRaw = toolMatch[3]?.trim();
-      let args: unknown = undefined;
-      if (argsRaw) {
-        try { args = JSON.parse(argsRaw); }
-        catch (e) { pushSys(t('store.tool.invalidJson', { message: (e as Error).message })); return; }
-      }
-      get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
-        id: newId(), role: 'user', text: trimmed, toolCalls: [], status: 'done', ts: Date.now(),
-      }]);
-      try {
-        const r = await fetch(`/api/bus/ui/surfaces/${encodeURIComponent(surfaceId)}/dispatch`, {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ action, args, awaitAck: true, timeoutMs: 30000 }),
-        });
-        const j = await r.json();
-        pushSys(r.ok && j.ok !== false
-          ? `✅ \`${surfaceId}.${action}\` ok\n\n\`\`\`json\n${JSON.stringify(j.result ?? j, null, 2)}\n\`\`\``
-          : `❌ \`${surfaceId}.${action}\` failed: ${j.error ?? j.message ?? r.status}`);
-      } catch (e) {
-        pushSys(t('store.tool.networkError', { message: (e as Error).message }));
-      }
-      return;
-    }
+		// /tool <surface> <action> [jsonArgs] — split-surface plugin RPC.
+		const toolMatch = trimmed.match(/^\/tool\s+(\S+)\s+(\S+)(?:\s+(.+))?$/s);
+		if (toolMatch) {
+			opts?.onAccepted?.();
+			const surfaceId = toolMatch[1];
+			const action = toolMatch[2];
+			const argsRaw = toolMatch[3]?.trim();
+			let args: unknown;
+			if (argsRaw) {
+				try {
+					args = JSON.parse(argsRaw);
+				} catch (e) {
+					pushSys(
+						t("store.tool.invalidJson", { message: (e as Error).message }),
+					);
+					return;
+				}
+			}
+			get().patchMessages(startSid, sysAgent, (msgs) => [
+				...msgs,
+				{
+					id: newId(),
+					role: "user",
+					text: trimmed,
+					toolCalls: [],
+					status: "done",
+					ts: Date.now(),
+				},
+			]);
+			try {
+				const r = await fetch(
+					`/api/bus/ui/surfaces/${encodeURIComponent(surfaceId)}/dispatch`,
+					{
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							action,
+							args,
+							awaitAck: true,
+							timeoutMs: 30000,
+						}),
+					},
+				);
+				const j = await r.json();
+				pushSys(
+					r.ok && j.ok !== false
+						? `✅ \`${surfaceId}.${action}\` ok\n\n\`\`\`json\n${JSON.stringify(j.result ?? j, null, 2)}\n\`\`\``
+						: `❌ \`${surfaceId}.${action}\` failed: ${j.error ?? j.message ?? r.status}`,
+				);
+			} catch (e) {
+				pushSys(
+					t("store.tool.networkError", { message: (e as Error).message }),
+				);
+			}
+			return;
+		}
 
-    // /<name> [args] — resolve project/bus skills before falling back to the
-    // legacy server-command transport. Skills are prompt entries, so their
-    // materialized prompt is fed into the normal kernel turn below; commands
-    // still use /api/commands and return their compact system result.
-    let wireText = expandPills(trimmed);
-    const cmdMatch = wireText.match(/^\/([a-z][a-z0-9_-]*)(?:\s+(.*))?$/s);
-    if (cmdMatch) {
-      const cmdName = cmdMatch[1];
-      const cmdArgs = cmdMatch[2]?.trim() || '';
-      const agentId = startTab?.agentId ?? null;
-      let skill: { skillId: string; extensionId: string } | undefined;
-      try {
-        const skillResp = await fetch(`/api/skills?sessionId=${encodeURIComponent(startSid)}`);
-        if (skillResp.ok) {
-          const data = (await skillResp.json()) as {
-            skills?: Array<{
-              id: string;
-              extensionId: string;
-              triggers?: Array<{ kind: string; command?: string }>;
-            }>;
-          };
-          const found = data.skills?.find((s) => s.triggers?.some((tr) => tr.kind === 'slash' && tr.command === cmdName));
-          if (found) skill = { skillId: found.id, extensionId: found.extensionId };
-        }
-      } catch {
-        // A transient skill-catalog failure should not hide builtin commands.
-      }
+		// /<name> [args] — resolve project/bus skills before falling back to the
+		// legacy server-command transport. Skills are prompt entries, so their
+		// materialized prompt is fed into the normal kernel turn below; commands
+		// still use /api/commands and return their compact system result.
+		let wireText = expandPills(trimmed);
+		const cmdMatch = wireText.match(/^\/([a-z][a-z0-9_-]*)(?:\s+(.*))?$/s);
+		if (cmdMatch) {
+			const cmdName = cmdMatch[1];
+			const cmdArgs = cmdMatch[2]?.trim() || "";
+			const agentId = startTab?.agentId ?? null;
+			let skill: { skillId: string; extensionId: string } | undefined;
+			try {
+				const skillResp = await fetch(
+					`/api/skills?sessionId=${encodeURIComponent(startSid)}`,
+				);
+				if (skillResp.ok) {
+					const data = (await skillResp.json()) as {
+						skills?: Array<{
+							id: string;
+							extensionId: string;
+							triggers?: Array<{ kind: string; command?: string }>;
+						}>;
+					};
+					const found = data.skills?.find((s) =>
+						s.triggers?.some(
+							(tr) => tr.kind === "slash" && tr.command === cmdName,
+						),
+					);
+					if (found)
+						skill = { skillId: found.id, extensionId: found.extensionId };
+				}
+			} catch {
+				// A transient skill-catalog failure should not hide builtin commands.
+			}
 
-      if (skill) {
-        try {
-          const r = await fetch('/api/skills/run', {
-            method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-              skillId: skill.skillId,
-              extensionId: skill.extensionId,
-              input: cmdArgs || undefined,
-              caller: { kind: 'user', sessionId: startSid, agentId: agentId ?? undefined },
-            }),
-          });
-          const result = await r.json() as { ok?: boolean; kind?: string; text?: string; error?: string };
-          if (!r.ok || result.ok === false) {
-            pushSys(`❌ /${cmdName}: ${result.error ?? `skill request failed (${r.status})`}`);
-            return;
-          }
-          if (result.kind !== 'prompt' || typeof result.text !== 'string') {
-            pushSys(`❌ /${cmdName}: skill returned no prompt`);
-            return;
-          }
-          wireText = result.text + (cmdArgs ? `\n\nUser input:\n${cmdArgs}` : '');
-        } catch (e) {
-          pushSys(`❌ /${cmdName}: ${t('store.command.networkError', { cmdName, message: (e as Error).message })}`);
-          return;
-        }
-      } else {
-        opts?.onAccepted?.();
-        const displayText = expandPillsForDisplay(trimmed);
-        get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
-          id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
-        }]);
-        const pendingId = newId();
-        get().patchMessages(startSid, sysAgent, (msgs) => [...msgs, {
-          id: pendingId, role: 'system', text: `⏳ /${cmdName} running...`, toolCalls: [], status: 'done', ts: Date.now(),
-        }]);
-        try {
-          const r = await fetch(`/api/commands/${encodeURIComponent(cmdName)}/execute`, {
-            method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ args: cmdArgs ? cmdArgs.split(/\s+/) : [], sessionId: startSid, requestingAgentId: agentId ?? undefined }),
-          });
-          const j = await r.json();
-          const result = j.result;
-          const sysText = result?.ok !== false
-            ? `✅ /${cmdName} → ${typeof result?.data === 'string' ? result.data : JSON.stringify(result?.data ?? result)}`
-            : `❌ /${cmdName}: ${result?.error ?? 'unknown error'}`;
-          get().patchMessages(startSid, sysAgent, (msgs) => msgs.map((m) => m.id === pendingId ? { ...m, text: sysText, ts: Date.now() } : m));
-        } catch (e) {
-          get().patchMessages(startSid, sysAgent, (msgs) => msgs.map((m) => m.id === pendingId ? { ...m, text: t('store.command.networkError', { cmdName, message: (e as Error).message }), ts: Date.now() } : m));
-        }
-        return;
-      }
-    }
+			if (skill) {
+				try {
+					const r = await fetch("/api/skills/run", {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							skillId: skill.skillId,
+							extensionId: skill.extensionId,
+							input: cmdArgs || undefined,
+							caller: {
+								kind: "user",
+								sessionId: startSid,
+								agentId: agentId ?? undefined,
+							},
+						}),
+					});
+					const result = (await r.json()) as {
+						ok?: boolean;
+						kind?: string;
+						text?: string;
+						error?: string;
+					};
+					if (!r.ok || result.ok === false) {
+						pushSys(
+							`❌ /${cmdName}: ${result.error ?? `skill request failed (${r.status})`}`,
+						);
+						return;
+					}
+					if (result.kind !== "prompt" || typeof result.text !== "string") {
+						pushSys(`❌ /${cmdName}: skill returned no prompt`);
+						return;
+					}
+					wireText =
+						result.text + (cmdArgs ? `\n\nUser input:\n${cmdArgs}` : "");
+				} catch (e) {
+					pushSys(
+						`❌ /${cmdName}: ${t("store.command.networkError", { cmdName, message: (e as Error).message })}`,
+					);
+					return;
+				}
+			} else {
+				opts?.onAccepted?.();
+				const displayText = expandPillsForDisplay(trimmed);
+				get().patchMessages(startSid, sysAgent, (msgs) => [
+					...msgs,
+					{
+						id: newId(),
+						role: "user",
+						text: displayText,
+						toolCalls: [],
+						status: "done",
+						ts: Date.now(),
+					},
+				]);
+				const pendingId = newId();
+				get().patchMessages(startSid, sysAgent, (msgs) => [
+					...msgs,
+					{
+						id: pendingId,
+						role: "system",
+						text: `⏳ /${cmdName} running...`,
+						toolCalls: [],
+						status: "done",
+						ts: Date.now(),
+					},
+				]);
+				try {
+					const r = await fetch(
+						`/api/commands/${encodeURIComponent(cmdName)}/execute`,
+						{
+							method: "POST",
+							headers: { "content-type": "application/json" },
+							body: JSON.stringify({
+								args: cmdArgs ? cmdArgs.split(/\s+/) : [],
+								sessionId: startSid,
+								requestingAgentId: agentId ?? undefined,
+							}),
+						},
+					);
+					const j = await r.json();
+					const result = j.result;
+					const sysText =
+						result?.ok !== false
+							? `✅ /${cmdName} → ${typeof result?.data === "string" ? result.data : JSON.stringify(result?.data ?? result)}`
+							: `❌ /${cmdName}: ${result?.error ?? "unknown error"}`;
+					get().patchMessages(startSid, sysAgent, (msgs) =>
+						msgs.map((m) =>
+							m.id === pendingId ? { ...m, text: sysText, ts: Date.now() } : m,
+						),
+					);
+				} catch (e) {
+					get().patchMessages(startSid, sysAgent, (msgs) =>
+						msgs.map((m) =>
+							m.id === pendingId
+								? {
+										...m,
+										text: t("store.command.networkError", {
+											cmdName,
+											message: (e as Error).message,
+										}),
+										ts: Date.now(),
+									}
+								: m,
+						),
+					);
+				}
+				return;
+			}
+		}
 
-    // Resolve the chat target — @mention overrides the tab's pinned agent.
-    // The composer inserts a trailing space after a mention, but `trimmed`
-    // removes it before this point. Accept either a separator or end-of-input
-    // so sending the mention itself does not silently fall back to the pinned
-    // agent.
-    const mentionMatch = trimmed.match(/^@([a-zA-Z][a-zA-Z0-9_-]{0,39})(?:\s+|$)/);
-    const mentionedAgent = mentionMatch?.[1];
-    const agentId = mentionedAgent ?? targetAgent;
-    if (!agentId) { pushSys(t('store.noAgentSelected')); return; }
+		// Resolve the chat target — @mention overrides the tab's pinned agent.
+		// The composer inserts a trailing space after a mention, but `trimmed`
+		// removes it before this point. Accept either a separator or end-of-input
+		// so sending the mention itself does not silently fall back to the pinned
+		// agent.
+		const mentionMatch = trimmed.match(
+			/^@([a-zA-Z][a-zA-Z0-9_-]{0,39})(?:\s+|$)/,
+		);
+		const mentionedAgent = mentionMatch?.[1];
+		const agentId = mentionedAgent ?? targetAgent;
+		if (!agentId) {
+			pushSys(t("store.noAgentSelected"));
+			return;
+		}
 
-    // `@agent` changes the routing target, so the visible chat slot must move
-    // with it before the optimistic user/assistant bubbles are written. Without
-    // this handoff, the request is sent to (and streamed into) `mentionedAgent`
-    // while `useActiveMessages()` keeps reading the tab's previous agent slot;
-    // the turn then looks stuck even though the backend accepted it.
-    if (mentionedAgent && mentionedAgent !== targetAgent && startTab?.agentId === targetAgent) {
-      useShellStore.getState().setTabAgent(startSid, mentionedAgent);
-    }
-    const activeAgent = agentId;
+		// `@agent` changes the routing target, so the visible chat slot must move
+		// with it before the optimistic user/assistant bubbles are written. Without
+		// this handoff, the request is sent to (and streamed into) `mentionedAgent`
+		// while `useActiveMessages()` keeps reading the tab's previous agent slot;
+		// the turn then looks stuck even though the backend accepted it.
+		if (
+			mentionedAgent &&
+			mentionedAgent !== targetAgent &&
+			startTab?.agentId === targetAgent
+		) {
+			useShellStore.getState().setTabAgent(startSid, mentionedAgent);
+		}
+		const activeAgent = agentId;
 
-    const patchAsst = (mut: (m: ChatMessage) => ChatMessage): void => {
-      get().patchMessages(startSid, activeAgent, (msgs) => msgs.map((m) => (m.id === asstMsg.id ? mut(m) : m)));
-    };
-    const patchSub = (emitterId: string, mut: (r: SubAgentRun) => SubAgentRun): void => {
-      get().patchMessages(startSid, activeAgent, (msgs) => msgs.map((m) => {
-        if (m.id !== asstMsg.id) return m;
-        const subAgents = { ...(m.subAgents ?? {}) };
-        const prev: SubAgentRun = subAgents[emitterId] ?? { emitterId, text: '', toolCalls: [], status: 'streaming', startedAt: Date.now() };
-        subAgents[emitterId] = mut(prev);
-        return { ...m, subAgents };
-      }));
-    };
-    const setStreaming = (val: boolean): void => get().setStreaming(startSid, activeAgent, val);
+		const patchAsst = (mut: (m: ChatMessage) => ChatMessage): void => {
+			get().patchMessages(startSid, activeAgent, (msgs) =>
+				msgs.map((m) => (m.id === asstMsg.id ? mut(m) : m)),
+			);
+		};
+		const patchSub = (
+			emitterId: string,
+			mut: (r: SubAgentRun) => SubAgentRun,
+		): void => {
+			get().patchMessages(startSid, activeAgent, (msgs) =>
+				msgs.map((m) => {
+					if (m.id !== asstMsg.id) return m;
+					const subAgents = { ...(m.subAgents ?? {}) };
+					const prev: SubAgentRun = subAgents[emitterId] ?? {
+						emitterId,
+						text: "",
+						toolCalls: [],
+						status: "streaming",
+						startedAt: Date.now(),
+					};
+					subAgents[emitterId] = mut(prev);
+					return { ...m, subAgents };
+				}),
+			);
+		};
+		const setStreaming = (val: boolean): void =>
+			get().setStreaming(startSid, activeAgent, val);
 
-    // Composer may fold big pastes into paste-pills; expand paste/file pills for
-    // display while keeping skill/command pills as tag chips in the transcript.
-    const displayText = expandPillsForDisplay(trimmed);
+		// Composer may fold big pastes into paste-pills; expand paste/file pills for
+		// display while keeping skill/command pills as tag chips in the transcript.
+		const displayText = expandPillsForDisplay(trimmed);
 
-    const displayAttachments = toChatAttachments(opts?.attachments);
+		const displayAttachments = toChatAttachments(opts?.attachments);
 
-    try {
-      const preparation = prepareChatSend({ sessionId: startSid });
-      if (preparation) await preparation;
-    }
-    catch (error) {
-      if (!opts?.existingUserMessageId) get().patchMessages(startSid, activeAgent, messages => [...messages, {
-        id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
-        ...(displayAttachments ? { attachments: displayAttachments } : {}),
-      }]);
-      pushSys(`Message was not sent: ${error instanceof Error ? error.message : 'host preparation failed'}`);
-      return;
-    }
+		try {
+			const preparation = prepareChatSend({ sessionId: startSid });
+			if (preparation) await preparation;
+		} catch (error) {
+			if (!opts?.existingUserMessageId)
+				get().patchMessages(startSid, activeAgent, (messages) => [
+					...messages,
+					{
+						id: newId(),
+						role: "user",
+						text: displayText,
+						toolCalls: [],
+						status: "done",
+						ts: Date.now(),
+						...(displayAttachments ? { attachments: displayAttachments } : {}),
+					},
+				]);
+			pushSys(
+				`Message was not sent: ${error instanceof Error ? error.message : "host preparation failed"}`,
+			);
+			return;
+		}
 
-    opts?.onAccepted?.();
+		opts?.onAccepted?.();
 
-    // ── Interrupt-send (steer) ──
-    if (opts?.handoff === 'steer') {
-      const steerUserMsg: ChatMessage = {
-        id: newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
-        ...(displayAttachments ? { attachments: displayAttachments } : {}),
-      };
-      get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, steerUserMsg]);
-      try {
-        const { emitForgeaXMessage } = await import('../session-bridge');
-        const candidate = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : undefined;
-        const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        markEmittedClientMsg(clientMsgId);
-        const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
-        const r = await emitForgeaXMessage(startSid, wireText, {
-          to: candidate,
-          payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(hasSummonSnapshot ? { summonAgentId } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
-          handoff: 'steer',
-        });
-        if (!r.ok) throw new Error(r.error ?? 'emit failed');
-      } catch (e) {
-        get().patchMessages(startSid, activeAgent, (msgs) => [...msgs, {
-          id: newId(), role: 'system', text: t('store.steer.sendFailed', { message: (e as Error).message }), toolCalls: [], status: 'done', ts: Date.now(),
-        }]);
-      }
-      return;
-    }
+		// ── Interrupt-send (steer) ──
+		if (opts?.handoff === "steer") {
+			const steerUserMsg: ChatMessage = {
+				id: newId(),
+				role: "user",
+				text: displayText,
+				toolCalls: [],
+				status: "done",
+				ts: Date.now(),
+				...(displayAttachments ? { attachments: displayAttachments } : {}),
+			};
+			get().patchMessages(startSid, activeAgent, (msgs) => [
+				...msgs,
+				steerUserMsg,
+			]);
+			try {
+				const { emitForgeaXMessage } = await import("../session-bridge");
+				const candidate =
+					typeof agentId === "string" && agentId.trim()
+						? agentId.trim()
+						: undefined;
+				const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+				markEmittedClientMsg(clientMsgId);
+				const { traceparent } = beginChatTurn(
+					activeAgent,
+					startSid,
+					useShellStore.getState().providerOverride ?? undefined,
+				);
+				const r = await emitForgeaXMessage(startSid, wireText, {
+					to: candidate,
+					payload: {
+						agentId,
+						clientMsgId,
+						traceparent,
+						replyLanguage,
+						...(hasSummonSnapshot ? { summonAgentId } : {}),
+						...(opts?.attachments?.length
+							? { attachments: opts.attachments }
+							: {}),
+					},
+					handoff: "steer",
+				});
+				if (!r.ok) throw new Error(r.error ?? "emit failed");
+			} catch (e) {
+				get().patchMessages(startSid, activeAgent, (msgs) => [
+					...msgs,
+					{
+						id: newId(),
+						role: "system",
+						text: t("store.steer.sendFailed", {
+							message: (e as Error).message,
+						}),
+						toolCalls: [],
+						status: "done",
+						ts: Date.now(),
+					},
+				]);
+			}
+			return;
+		}
 
-    const userMsg: ChatMessage = {
-      id: opts?.existingUserMessageId ?? newId(), role: 'user', text: displayText, toolCalls: [], status: 'done', ts: Date.now(),
-      ...(displayAttachments ? { attachments: displayAttachments } : {}),
-    };
-    const turnOverride = startTab?.providerOverride ?? null;
-    const asstMsg: ChatMessage = {
-      id: newId(), role: 'assistant', text: '', toolCalls: [], status: 'streaming', ts: Date.now(),
-      // The selected kernel is already known before transport starts. Include
-      // it in the optimistic shell so the immediate Forge card does not gain
-      // its provider badge only after the first upstream event arrives.
-      ...(turnOverride ? { providerId: turnOverride } : {}),
-    };
-    const old = _abortByTab.get(startSid);
-    if (old) {
-      old.controller.abort();
-      get().setStreaming(startSid, old.agentId, false);
-    }
-    const aborter = new AbortController();
-    const turnController: TurnController = { controller: aborter, agentId: activeAgent };
-    _abortByTab.set(startSid, turnController);
-    const signal = aborter.signal;
-    const ownsAborter = (): boolean => _abortByTab.get(startSid) === turnController;
-    const finishTurn = (): void => {
-      if (!ownsAborter()) return;
-      _abortByTab.delete(startSid);
-      setStreaming(false);
-    };
+		const userMsg: ChatMessage = {
+			id: opts?.existingUserMessageId ?? newId(),
+			role: "user",
+			text: displayText,
+			toolCalls: [],
+			status: "done",
+			ts: Date.now(),
+			...(displayAttachments ? { attachments: displayAttachments } : {}),
+		};
+		const turnOverride = startTab?.providerOverride ?? null;
+		const asstMsg: ChatMessage = {
+			id: newId(),
+			role: "assistant",
+			text: "",
+			toolCalls: [],
+			status: "streaming",
+			ts: Date.now(),
+			// The selected kernel is already known before transport starts. Include
+			// it in the optimistic shell so the immediate Forge card does not gain
+			// its provider badge only after the first upstream event arrives.
+			...(turnOverride ? { providerId: turnOverride } : {}),
+		};
+		const old = _abortByTab.get(startSid);
+		if (old) {
+			old.controller.abort();
+			get().setStreaming(startSid, old.agentId, false);
+		}
+		const aborter = new AbortController();
+		const turnController: TurnController = {
+			controller: aborter,
+			agentId: activeAgent,
+		};
+		_abortByTab.set(startSid, turnController);
+		const signal = aborter.signal;
+		const ownsAborter = (): boolean =>
+			_abortByTab.get(startSid) === turnController;
+		const finishTurn = (): void => {
+			if (!ownsAborter()) return;
+			_abortByTab.delete(startSid);
+			setStreaming(false);
+		};
 
-    // Optimistic push into the target agent's slot + auto-title.
-    if (startTab && !startTab.displayName) {
-      useShellStore.getState().renameTab(startSid, wireText.slice(0, 40).replace(/\s+/g, ' '));
-    }
-    get().patchMessages(startSid, activeAgent, (msgs) => {
-      const existingIndex = opts?.existingUserMessageId
-        ? msgs.findIndex((message) => message.id === opts.existingUserMessageId)
-        : -1;
-      if (existingIndex < 0) return [...msgs, userMsg, asstMsg];
-      const next = msgs.slice();
-      // Keep the enqueue timestamp and exact position; only refresh payload
-      // fields that may have been normalized during send preparation.
-      next[existingIndex] = { ...userMsg, ts: msgs[existingIndex].ts };
-      next.push(asstMsg);
-      return next;
-    });
-    clearAgentStreamSuppression(startSid, activeAgent);
-    setStreaming(true);
+		// Optimistic push into the target agent's slot + auto-title.
+		if (startTab && !startTab.displayName) {
+			useShellStore
+				.getState()
+				.renameTab(startSid, wireText.slice(0, 40).replace(/\s+/g, " "));
+		}
+		get().patchMessages(startSid, activeAgent, (msgs) => {
+			const existingIndex = opts?.existingUserMessageId
+				? msgs.findIndex((message) => message.id === opts.existingUserMessageId)
+				: -1;
+			if (existingIndex < 0) return [...msgs, userMsg, asstMsg];
+			const next = msgs.slice();
+			// Keep the enqueue timestamp and exact position; only refresh payload
+			// fields that may have been normalized during send preparation.
+			next[existingIndex] = { ...userMsg, ts: msgs[existingIndex].ts };
+			next.push(asstMsg);
+			return next;
+		});
+		clearAgentStreamSuppression(startSid, activeAgent);
+		setStreaming(true);
 
-    // Both native EventBus and CLI turns are echoed over the session stream.
-    // Tag the request before either transport starts so the initiating tab can
-    // keep its optimistic user bubble while other tabs still render the echo.
-    const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    markEmittedClientMsg(clientMsgId);
+		// Both native EventBus and CLI turns are echoed over the session stream.
+		// Tag the request before either transport starts so the initiating tab can
+		// keep its optimistic user bubble while other tabs still render the echo.
+		const clientMsgId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		markEmittedClientMsg(clientMsgId);
 
-    // R3 provider routing: null/'forgeax' → native EventBus; else cli bridge.
-    const isForgeaXNative = turnOverride === null || turnOverride === 'forgeax';
-    if (isForgeaXNative) {
-      try {
-        const { emitForgeaXMessage } = await import('../session-bridge');
-        const candidate = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : undefined;
-        const { traceparent } = beginChatTurn(activeAgent, startSid, useShellStore.getState().providerOverride ?? undefined);
-        const r = await emitForgeaXMessage(startSid, wireText, {
-          to: candidate,
-          payload: { agentId, clientMsgId, traceparent, replyLanguage, ...(hasSummonSnapshot ? { summonAgentId } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) },
-        });
-        if (!r.ok) throw new Error(r.error ?? 'emit failed');
-        if (r.msgId) {
-          const mid = r.msgId;
-          get().patchMessages(startSid, activeAgent, (msgs) => msgs.map((m) => (m.id === userMsg.id ? { ...m, msgId: mid } : m)));
-          get().patchConv(startSid, { checkpointMsgIds: { ...(get().bySid[startSid]?.checkpointMsgIds ?? {}), [mid]: true } });
-        }
-        patchAsst((m) => ({ ...m, providerId: m.providerId ?? 'forgeax' }));
-      } catch (err) {
-        patchAsst((m) => ({ ...m, status: 'error', errorMessage: `forgeax emit failed: ${(err as Error).message}` }));
-        finishTurn();
-      }
-      if (ownsAborter()) _abortByTab.delete(startSid);
-      return;
-    }
+		// R3 provider routing: null/'forgeax' → native EventBus; else cli bridge.
+		const isForgeaXNative = turnOverride === null || turnOverride === "forgeax";
+		if (isForgeaXNative) {
+			try {
+				const { emitForgeaXMessage } = await import("../session-bridge");
+				const candidate =
+					typeof agentId === "string" && agentId.trim()
+						? agentId.trim()
+						: undefined;
+				const { traceparent } = beginChatTurn(
+					activeAgent,
+					startSid,
+					useShellStore.getState().providerOverride ?? undefined,
+				);
+				const r = await emitForgeaXMessage(startSid, wireText, {
+					to: candidate,
+					payload: {
+						agentId,
+						clientMsgId,
+						traceparent,
+						replyLanguage,
+						...(hasSummonSnapshot ? { summonAgentId } : {}),
+						...(opts?.attachments?.length
+							? { attachments: opts.attachments }
+							: {}),
+					},
+				});
+				if (!r.ok) throw new Error(r.error ?? "emit failed");
+				if (r.msgId) {
+					const mid = r.msgId;
+					get().patchMessages(startSid, activeAgent, (msgs) =>
+						msgs.map((m) => (m.id === userMsg.id ? { ...m, msgId: mid } : m)),
+					);
+					get().patchConv(startSid, {
+						checkpointMsgIds: {
+							...(get().bySid[startSid]?.checkpointMsgIds ?? {}),
+							[mid]: true,
+						},
+					});
+				}
+				patchAsst((m) => ({ ...m, providerId: m.providerId ?? "forgeax" }));
+			} catch (err) {
+				patchAsst((m) => ({
+					...m,
+					status: "error",
+					errorMessage: `forgeax emit failed: ${(err as Error).message}`,
+				}));
+				finishTurn();
+			}
+			if (ownsAborter()) _abortByTab.delete(startSid);
+			return;
+		}
 
-    let res: Response;
-    // R1-b 对偶(多 tab 同步 §5.4):cli 桥会把 token 广播成 stream:llm,发起 turn 的
-    // 本 tab 已经在从 SSE 渲染同一份文本 —— 标记存续期,session-stream 丢 WS 那份。
-    markCliSseActive(startSid, activeAgent);
-    // 两条入口都要开链(2026-08-06 外审):原生路早就调 beginChatTurn,而在模型选择器里
-    // 显式选了 CLI 内核时走的是这条 —— 此前既不发 traceparent(服务端的 kernel.turn
-    // 无处可挂),也不起前端失速看门狗(卡住时没有 ui.stall)。真实会话因此 0 个 span。
-    let traceparent: string | undefined;
-    try {
-      ({ traceparent } = beginChatTurn(activeAgent, startSid, turnOverride ?? undefined));
-    } catch {
-      /* 遥测不可用时静默降级 —— 聊天必须照常发出去。 */
-    }
-    // 两个 helper 都是**同步**的:静态 import 之后不再有动态 import 的 await,收口就不会因为
-    // 一次微任务延迟落到同一 agent 的下一轮上(把新链误收、旧链永远泄漏)。
-    // 这只保证 helper 自身同步 —— 整轮当然还是异步的(请求、流式读取都在 await)。
-    // "只生效一次"完全依赖 trace API 自身的 firstTokenSeen / ended,不另造本地布尔 ——
-    // 两套状态迟早分叉,而这个 bug 的教训正是"开了不收、状态各记各的"。
-    const noteFirstToken = (): void => {
-      try { chatFirstToken(activeAgent); } catch { /* 观测绝不反噬聊天 */ }
-    };
-    const noteToolResult = (): void => {
-      try { chatToolResult(activeAgent); } catch { /* 观测绝不反噬聊天 */ }
-    };
-    // 三值,不是布尔:取消不是故障(标成 error 会让 trace 里全是假失败),但也**不能并进成功**
-    // —— 那等于亲手销毁取消信号,误触取消风暴在监控里就和健康流量长得一模一样。
-    const endTrace = (outcome: 'ok' | 'cancelled' | 'error', errMessage?: string): void => {
-      try { chatTurnEnd(activeAgent, outcome, errMessage); } catch { /* 观测绝不反噬聊天 */ }
-    };
-    // 主轮的错误/取消要带到唯一汇合点(finally)去判 ok,避免各出口判据分叉。
-    let streamError: string | undefined;
-    let streamCancelled = false;
-    try {
-      // The model picker persists its selection in this session agent's
-      // agent.json. Rented kernels cannot infer that selection from
-      // providerOverride alone: omitting it makes Codex/Claude fall back to
-      // their CLI-global model, so a visible Luna selection can silently run
-      // Sol. Resolve immediately before the request so the turn and the label
-      // share one source of truth.
-      let selectedModel = opts?.model?.trim() || undefined;
-      try {
-        const { getAgentModel } = await import('@forgeax/interface/lib/model-config');
-        if (!selectedModel) {
-          const state = await getAgentModel(startSid, activeAgent);
-          selectedModel = state.selected?.trim() || undefined;
-        }
-      } catch {
-        // Keep provider-native fallback when an old/unscaffolded session has no
-        // agent model record; failure to read optional routing must not block chat.
-      }
-      res = await fetch('/api/cli/chat', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: wireText, clientMsgId, agentId, threadId: startSid, sessionId: startSid, replyLanguage, ...(hasSummonSnapshot ? { summonAgentId } : {}), ...(traceparent ? { traceparent } : {}), ...(turnOverride ? { providerOverride: turnOverride } : {}), ...(selectedModel ? { model: selectedModel } : {}), ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}) }),
-        signal,
-      });
-    } catch (e) {
-      clearCliSseActive(startSid, activeAgent);
-      const aborted = (e as Error).name === 'AbortError' || signal.aborted;
-      if (aborted) {
-        patchAsst((m) => (m.status === 'streaming' ? { ...m, status: 'done' } : m));
-      } else {
-        patchAsst((m) => ({ ...m, status: 'error', errorMessage: `network error: ${(e as Error).message}` }));
-      }
-      endTrace(aborted ? 'cancelled' : 'error', aborted ? undefined : (e as Error).message);
-      finishTurn(); return;
-    }
-    if (!res.ok) {
-      clearCliSseActive(startSid, activeAgent);
-      let body: { error?: string; hint?: string } = {};
-      try { body = await res.json(); } catch { /* ignore */ }
-      const httpError = body.error ? `${res.status} ${body.error}${body.hint ? ` — ${body.hint}` : ''}` : `HTTP ${res.status}`;
-      patchAsst((m) => ({ ...m, status: 'error', errorMessage: httpError }));
-      endTrace('error', httpError);
-      finishTurn(); return;
-    }
-    if (!res.body) {
-      clearCliSseActive(startSid, activeAgent);
-      patchAsst((m) => ({ ...m, status: 'error', errorMessage: 'empty response body' }));
-      // 第 6 个终点(200 但无 body)。收口必须覆盖**每一个** return —— 漏一个就留下一条
-      // 永远 provisional 的链,失速看门狗每 30/60/90s 报一次假 no-first-token。
-      endTrace('error', 'empty response body');
-      finishTurn(); return;
-    }
+		let res: Response;
+		// R1-b 对偶(多 tab 同步 §5.4):cli 桥会把 token 广播成 stream:llm,发起 turn 的
+		// 本 tab 已经在从 SSE 渲染同一份文本 —— 标记存续期,session-stream 丢 WS 那份。
+		markCliSseActive(startSid, activeAgent);
+		// 两条入口都要开链(2026-08-06 外审):原生路早就调 beginChatTurn,而在模型选择器里
+		// 显式选了 CLI 内核时走的是这条 —— 此前既不发 traceparent(服务端的 kernel.turn
+		// 无处可挂),也不起前端失速看门狗(卡住时没有 ui.stall)。真实会话因此 0 个 span。
+		let traceparent: string | undefined;
+		try {
+			({ traceparent } = beginChatTurn(
+				activeAgent,
+				startSid,
+				turnOverride ?? undefined,
+			));
+		} catch {
+			/* 遥测不可用时静默降级 —— 聊天必须照常发出去。 */
+		}
+		// 两个 helper 都是**同步**的:静态 import 之后不再有动态 import 的 await,收口就不会因为
+		// 一次微任务延迟落到同一 agent 的下一轮上(把新链误收、旧链永远泄漏)。
+		// 这只保证 helper 自身同步 —— 整轮当然还是异步的(请求、流式读取都在 await)。
+		// "只生效一次"完全依赖 trace API 自身的 firstTokenSeen / ended,不另造本地布尔 ——
+		// 两套状态迟早分叉,而这个 bug 的教训正是"开了不收、状态各记各的"。
+		const noteFirstToken = (): void => {
+			try {
+				chatFirstToken(activeAgent);
+			} catch {
+				/* 观测绝不反噬聊天 */
+			}
+		};
+		const noteToolResult = (): void => {
+			try {
+				chatToolResult(activeAgent);
+			} catch {
+				/* 观测绝不反噬聊天 */
+			}
+		};
+		// 三值,不是布尔:取消不是故障(标成 error 会让 trace 里全是假失败),但也**不能并进成功**
+		// —— 那等于亲手销毁取消信号,误触取消风暴在监控里就和健康流量长得一模一样。
+		const endTrace = (
+			outcome: "ok" | "cancelled" | "error",
+			errMessage?: string,
+		): void => {
+			try {
+				chatTurnEnd(activeAgent, outcome, errMessage);
+			} catch {
+				/* 观测绝不反噬聊天 */
+			}
+		};
+		// 主轮的错误/取消要带到唯一汇合点(finally)去判 ok,避免各出口判据分叉。
+		let streamError: string | undefined;
+		let streamCancelled = false;
+		try {
+			// The model picker persists its selection in this session agent's
+			// agent.json. Rented kernels cannot infer that selection from
+			// providerOverride alone: omitting it makes Codex/Claude fall back to
+			// their CLI-global model, so a visible Luna selection can silently run
+			// Sol. Resolve immediately before the request so the turn and the label
+			// share one source of truth.
+			let selectedModel: string | undefined;
+			try {
+				const { getAgentModel } = await import("@forgeax/chat/runtime");
+				const state = await getAgentModel(startSid, activeAgent);
+				selectedModel = state.selected?.trim() || undefined;
+			} catch {
+				// Keep provider-native fallback when an old/unscaffolded session has no
+				// agent model record; failure to read optional routing must not block chat.
+			}
+			res = await fetch("/api/cli/chat", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					message: wireText,
+					clientMsgId,
+					agentId,
+					threadId: startSid,
+					sessionId: startSid,
+					replyLanguage,
+					...(hasSummonSnapshot ? { summonAgentId } : {}),
+					...(traceparent ? { traceparent } : {}),
+					...(turnOverride ? { providerOverride: turnOverride } : {}),
+					...(selectedModel ? { model: selectedModel } : {}),
+					...(opts?.attachments?.length
+						? { attachments: opts.attachments }
+						: {}),
+				}),
+				signal,
+			});
+		} catch (e) {
+			clearCliSseActive(startSid, activeAgent);
+			const aborted = (e as Error).name === "AbortError" || signal.aborted;
+			if (aborted) {
+				patchAsst((m) =>
+					m.status === "streaming" ? { ...m, status: "done" } : m,
+				);
+			} else {
+				patchAsst((m) => ({
+					...m,
+					status: "error",
+					errorMessage: `network error: ${(e as Error).message}`,
+				}));
+			}
+			endTrace(
+				aborted ? "cancelled" : "error",
+				aborted ? undefined : (e as Error).message,
+			);
+			finishTurn();
+			return;
+		}
+		if (!res.ok) {
+			clearCliSseActive(startSid, activeAgent);
+			let body: { error?: string; hint?: string } = {};
+			try {
+				body = await res.json();
+			} catch {
+				/* ignore */
+			}
+			const httpError = body.error
+				? `${res.status} ${body.error}${body.hint ? ` — ${body.hint}` : ""}`
+				: `HTTP ${res.status}`;
+			patchAsst((m) => ({ ...m, status: "error", errorMessage: httpError }));
+			endTrace("error", httpError);
+			finishTurn();
+			return;
+		}
+		if (!res.body) {
+			clearCliSseActive(startSid, activeAgent);
+			patchAsst((m) => ({
+				...m,
+				status: "error",
+				errorMessage: "empty response body",
+			}));
+			// 第 6 个终点(200 但无 body)。收口必须覆盖**每一个** return —— 漏一个就留下一条
+			// 永远 provisional 的链,失速看门狗每 30/60/90s 报一次假 no-first-token。
+			endTrace("error", "empty response body");
+			finishTurn();
+			return;
+		}
 
-    const isMain = (eid: unknown): boolean => !eid || eid === agentId || (agentId === 'forgeax' && eid === 'admin');
-    const liveEffects: MessageEffects = { applyMain: patchAsst, applySub: patchSub };
-    const contextMetaFor = (owner: string) => (meta: { contextUsage?: ContextUsage }) => {
-      const conv = get().bySid[startSid];
-      if (conv && meta.contextUsage) get().patchConv(startSid, {
-        contextByAgent: { ...conv.contextByAgent, [owner]: latestContextUsage(conv.contextByAgent[owner], meta.contextUsage) },
-      });
-    };
-    const mainAcc = new TurnAccumulator({ ...buildMainCallbacks(liveEffects), onMeta: contextMetaFor(agentId) }, agentId);
-    const subAccs = new Map<string, TurnAccumulator>();
-    const getSubAcc = (eid: string): TurnAccumulator => {
-      const existing = subAccs.get(eid);
-      if (existing) return existing;
-      const acc = new TurnAccumulator({ ...buildSubCallbacks(eid, liveEffects), onMeta: contextMetaFor(eid) }, eid);
-      subAccs.set(eid, acc);
-      return acc;
-    };
+		const isMain = (eid: unknown): boolean =>
+			!eid || eid === agentId || (agentId === "forgeax" && eid === "admin");
+		const liveEffects: MessageEffects = {
+			applyMain: patchAsst,
+			applySub: patchSub,
+		};
+		const mainAcc = new TurnAccumulator(
+			buildMainCallbacks(liveEffects),
+			agentId,
+		);
+		const subAccs = new Map<string, TurnAccumulator>();
+		const getSubAcc = (eid: string): TurnAccumulator => {
+			const existing = subAccs.get(eid);
+			if (existing) return existing;
+			const acc = new TurnAccumulator(buildSubCallbacks(eid, liveEffects), eid);
+			subAccs.set(eid, acc);
+			return acc;
+		};
 
-    let lastSeenProviderId: string | undefined;
-    let mainProviderIdCommitted = false;
-    const subProviderIdCommitted = new Set<string>();
+		let lastSeenProviderId: string | undefined;
+		let mainProviderIdCommitted = false;
+		const subProviderIdCommitted = new Set<string>();
 
-    const sseDeltaBuf = new Map<string, { callId: string; name: string; accumulated: string; mainEvent: boolean; emitterId: string | null }>();
-    let sseLastFlush = 0;
-    const SSE_DELTA_INTERVAL = 32;
-    const flushSseDeltaBuf = (): void => {
-      if (sseDeltaBuf.size === 0) return;
-      const batch = [...sseDeltaBuf.values()];
-      sseDeltaBuf.clear();
-      sseLastFlush = Date.now();
-      for (const pd of batch) {
-        const applyDelta = (tc: ToolCall): ToolCall => {
-          if (tc.callId !== pd.callId) return tc;
-          const prev = typeof tc.args === 'string' ? tc.args : '';
-          return { ...tc, args: prev + pd.accumulated, status: 'running' };
-        };
-        if (pd.mainEvent) {
-          patchAsst((m) => {
-            const existing = m.toolCalls.find((tc) => tc.callId === pd.callId);
-            if (existing) {
-              const toolCalls = m.toolCalls.map(applyDelta);
-              const segments = (m.segments ?? []).map((s) => s.kind === 'tool' && s.tool.callId === pd.callId ? { ...s, tool: applyDelta(s.tool) } : s);
-              return { ...m, toolCalls, segments };
-            }
-            const tc: ToolCall = { callId: pd.callId, name: pd.name, args: pd.accumulated, status: 'running' };
-            return { ...m, toolCalls: [...m.toolCalls, { ...tc, at: m.text.length }], segments: upsertToolSegment(m.segments ?? [], Date.now(), tc) };
-          });
-        } else if (pd.emitterId) {
-          patchSub(pd.emitterId, (r) => ({ ...r, toolCalls: r.toolCalls.map(applyDelta) }));
-        }
-      }
-    };
-    const sseTextBuf = new Map<string, {
-      mainEvent: boolean;
-      emitterId: string | null;
-      chunks: Array<{
-        kind: 'text' | 'thinking';
-        text: string;
-        visibility?: 'public_summary' | 'private_reasoning';
-      }>;
-      providerId?: string;
-    }>();
-    let sseTextLastFlush = 0;
-    const flushSseTextBuf = (): void => {
-      if (sseTextBuf.size === 0) return;
-      const batch = [...sseTextBuf.values()];
-      sseTextBuf.clear();
-      sseTextLastFlush = Date.now();
-      for (const b of batch) {
-        const ts = Date.now();
-        if (b.mainEvent) {
-          patchAsst((m) => {
-            let segments = m.segments ?? [];
-            let text = m.text;
-            let thinking = m.thinking ?? '';
-            for (const ch of b.chunks) {
-              if (ch.kind === 'text') text += ch.text; else thinking += ch.text;
-              segments = appendChatSegment(segments, ch.kind === 'thinking'
-                ? { kind: 'thinking', ts, text: ch.text, ...(ch.visibility ? { visibility: ch.visibility } : {}) }
-                : { kind: 'text', ts, text: ch.text });
-            }
-            return { ...m, text, thinking, segments, providerId: m.providerId ?? b.providerId };
-          });
-        } else if (b.emitterId) {
-          patchSub(b.emitterId, (r) => {
-            let text = r.text;
-            let thinking = r.thinking ?? '';
-            for (const ch of b.chunks) { if (ch.kind === 'text') text += ch.text; else thinking += ch.text; }
-            return { ...r, text, thinking, providerId: r.providerId ?? b.providerId };
-          });
-        }
-      }
-    };
-    const bufText = (
-      mainEvent: boolean,
-      emitterId: string | null,
-      kind: 'text' | 'thinking',
-      text: string,
-      providerId?: string,
-      visibility?: 'public_summary' | 'private_reasoning',
-    ): void => {
-      const key = emitterId ?? '__main__';
-      let b = sseTextBuf.get(key);
-      if (!b) { b = { mainEvent, emitterId, chunks: [], providerId }; sseTextBuf.set(key, b); }
-      b.chunks.push({ kind, text, ...(kind === 'thinking' && visibility ? { visibility } : {}) });
-      if (providerId && !b.providerId) b.providerId = providerId;
-    };
+		const sseDeltaBuf = new Map<
+			string,
+			{
+				callId: string;
+				name: string;
+				accumulated: string;
+				mainEvent: boolean;
+				emitterId: string | null;
+			}
+		>();
+		let sseLastFlush = 0;
+		const SSE_DELTA_INTERVAL = 32;
+		const flushSseDeltaBuf = (): void => {
+			if (sseDeltaBuf.size === 0) return;
+			const batch = [...sseDeltaBuf.values()];
+			sseDeltaBuf.clear();
+			sseLastFlush = Date.now();
+			for (const pd of batch) {
+				const applyDelta = (tc: ToolCall): ToolCall => {
+					if (tc.callId !== pd.callId) return tc;
+					const prev = typeof tc.args === "string" ? tc.args : "";
+					return { ...tc, args: prev + pd.accumulated, status: "running" };
+				};
+				if (pd.mainEvent) {
+					patchAsst((m) => {
+						const existing = m.toolCalls.find((tc) => tc.callId === pd.callId);
+						if (existing) {
+							const toolCalls = m.toolCalls.map(applyDelta);
+							const segments = (m.segments ?? []).map((s) =>
+								s.kind === "tool" && s.tool.callId === pd.callId
+									? { ...s, tool: applyDelta(s.tool) }
+									: s,
+							);
+							return { ...m, toolCalls, segments };
+						}
+						const tc: ToolCall = {
+							callId: pd.callId,
+							name: pd.name,
+							args: pd.accumulated,
+							status: "running",
+						};
+						return {
+							...m,
+							toolCalls: [...m.toolCalls, { ...tc, at: m.text.length }],
+							segments: upsertToolSegment(m.segments ?? [], Date.now(), tc),
+						};
+					});
+				} else if (pd.emitterId) {
+					patchSub(pd.emitterId, (r) => ({
+						...r,
+						toolCalls: r.toolCalls.map(applyDelta),
+					}));
+				}
+			}
+		};
+		const sseTextBuf = new Map<
+			string,
+			{
+				mainEvent: boolean;
+				emitterId: string | null;
+				chunks: Array<{
+					kind: "text" | "thinking";
+					text: string;
+					visibility?: "public_summary" | "private_reasoning";
+				}>;
+				providerId?: string;
+			}
+		>();
+		let sseTextLastFlush = 0;
+		const flushSseTextBuf = (): void => {
+			if (sseTextBuf.size === 0) return;
+			const batch = [...sseTextBuf.values()];
+			sseTextBuf.clear();
+			sseTextLastFlush = Date.now();
+			for (const b of batch) {
+				const ts = Date.now();
+				if (b.mainEvent) {
+					patchAsst((m) => {
+						let segments = m.segments ?? [];
+						let text = m.text;
+						let thinking = m.thinking ?? "";
+						for (const ch of b.chunks) {
+							if (ch.kind === "text") text += ch.text;
+							else thinking += ch.text;
+							segments = appendChatSegment(
+								segments,
+								ch.kind === "thinking"
+									? {
+											kind: "thinking",
+											ts,
+											text: ch.text,
+											...(ch.visibility ? { visibility: ch.visibility } : {}),
+										}
+									: { kind: "text", ts, text: ch.text },
+							);
+						}
+						return {
+							...m,
+							text,
+							thinking,
+							segments,
+							providerId: m.providerId ?? b.providerId,
+						};
+					});
+				} else if (b.emitterId) {
+					patchSub(b.emitterId, (r) => {
+						let text = r.text;
+						let thinking = r.thinking ?? "";
+						for (const ch of b.chunks) {
+							if (ch.kind === "text") text += ch.text;
+							else thinking += ch.text;
+						}
+						return {
+							...r,
+							text,
+							thinking,
+							providerId: r.providerId ?? b.providerId,
+						};
+					});
+				}
+			}
+		};
+		const bufText = (
+			mainEvent: boolean,
+			emitterId: string | null,
+			kind: "text" | "thinking",
+			text: string,
+			providerId?: string,
+			visibility?: "public_summary" | "private_reasoning",
+		): void => {
+			const key = emitterId ?? "__main__";
+			let b = sseTextBuf.get(key);
+			if (!b) {
+				b = { mainEvent, emitterId, chunks: [], providerId };
+				sseTextBuf.set(key, b);
+			}
+			b.chunks.push({
+				kind,
+				text,
+				...(kind === "thinking" && visibility ? { visibility } : {}),
+			});
+			if (providerId && !b.providerId) b.providerId = providerId;
+		};
 
-    try {
-      for await (const frame of parseSse(res.body)) {
-        if (!frame.data) continue;
-        if (frame.event !== 'agent-start' && frame.event !== 'stored-event' && frame.event !== 'token' && frame.event !== 'thinking' && frame.event !== 'tool-call' && frame.event !== 'tool-call-delta' && frame.event !== 'tool-result' && frame.event !== 'done' && frame.event !== 'error') continue;
-        let payload: Record<string, unknown>;
-        try { payload = JSON.parse(frame.data); } catch { continue; }
-        const emitterId = payload.emitterId as string | undefined;
-        const providerId = payload.providerId as string | undefined;
-        if (providerId) {
-          if (isMain(emitterId)) {
-            lastSeenProviderId = providerId;
-            if (!mainProviderIdCommitted) { mainProviderIdCommitted = true; patchAsst((m) => (m.providerId ? m : { ...m, providerId })); }
-          } else if (emitterId && !subProviderIdCommitted.has(emitterId)) {
-            subProviderIdCommitted.add(emitterId);
-            patchSub(emitterId, (r) => (r.providerId ? r : { ...r, providerId }));
-          }
-        }
-        const sentRunId = typeof payload.runId === 'string' ? payload.runId : null;
-        if (sentRunId && get().bySid[startSid]?.runId !== sentRunId) get().patchConv(startSid, { runId: sentRunId });
-        if (frame.event === 'agent-start') continue;
-        if (frame.event === 'token' || frame.event === 'thinking' || frame.event === 'tool-call' || frame.event === 'tool-call-delta' || frame.event === 'tool-result' || frame.event === 'done' || frame.event === 'error') {
-          const mainEvent = isMain(emitterId);
-          const nowTs = Date.now();
-          if (frame.event !== 'token' && frame.event !== 'thinking') flushSseTextBuf();
-          if (frame.event === 'token') {
-            const text = String(payload.text ?? '');
-            // 只认**主 agent** 的字:子 agent 先出字不证明主轮已响应,拿它撤看门狗
-            // 会把主轮真卡死掩盖掉。chatFirstToken 内部幂等,重复调用无害。
-            if (text) { if (mainEvent) noteFirstToken(); bufText(mainEvent, emitterId ?? null, 'text', text, providerId); if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL) flushSseTextBuf(); }
-          } else if (frame.event === 'thinking') {
-            const text = String(payload.text ?? '');
-            const visibility = payload.visibility === 'public_summary' || payload.visibility === 'private_reasoning'
-              ? payload.visibility
-              : undefined;
-            if (text) { if (mainEvent) noteFirstToken(); bufText(mainEvent, emitterId ?? null, 'thinking', text, providerId, visibility); if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL) flushSseTextBuf(); }
-          } else if (frame.event === 'tool-call') {
-            const callId = String(payload.callId ?? '');
-            if (callId) {
-              const normalized = normalizeToolCall(String(payload.name ?? 'tool'), payload.args ?? {});
-              const tc: ToolCall = {
-                callId,
-                name: normalized.name,
-                args: normalized.args,
-                status: 'running',
-                // Legacy CLI AskUserQuestion uses the permission side-channel.
-                // Native kernel turns mark structured ask_user explicitly with
-                // permissionPrompt:false and must render AskUserCard instead.
-                ...(normalized.name === 'ask_user' && payload.permissionPrompt !== false ? { permissionPrompt: true } : {}),
-              };
-              if (mainEvent) patchAsst((m) => {
-                // A streaming CLI emits argument deltas before the final
-                // tool-call event. Merge that final event into the existing
-                // call instead of appending a second call with the same id.
-                // This also prevents duplicate AskUser cards and duplicate
-                // process entries on fast provider paths.
-                const existing = m.toolCalls.find((tool) => tool.callId === callId);
-                const merged = existing
-                  ? { ...existing, ...tc, at: existing.at ?? m.text.length }
-                  : { ...tc, at: m.text.length };
-                return {
-                  ...m,
-                  toolCalls: existing
-                    ? m.toolCalls.map((tool) => tool.callId === callId ? merged : tool)
-                    : [...m.toolCalls, merged],
-                  segments: upsertToolSegment(m.segments ?? [], nowTs, merged),
-                };
-              });
-              else if (emitterId) patchSub(emitterId, (r) => ({ ...r, toolCalls: [...r.toolCalls, tc] }));
-            }
-          } else if (frame.event === 'tool-call-delta') {
-            const callId = String(payload.callId ?? '');
-            const delta = typeof payload.argumentsDelta === 'string' ? payload.argumentsDelta : '';
-            if (callId && delta) {
-              const prev = sseDeltaBuf.get(callId);
-              if (prev) prev.accumulated += delta;
-              else sseDeltaBuf.set(callId, { callId, name: normalizeToolCall(String(payload.name ?? 'tool'), {}).name, accumulated: delta, mainEvent, emitterId: emitterId ?? null });
-              if (Date.now() - sseLastFlush >= SSE_DELTA_INTERVAL) flushSseDeltaBuf();
-            }
-          } else if (frame.event === 'tool-result') {
-            flushSseDeltaBuf();
-            if (mainEvent) noteToolResult();
-            const callId = String(payload.callId ?? '');
-            const ok = payload.ok !== false;
-            // 经我们代理的第三方 MCP 工具,结果是 `{text, structuredContent}` 形状
-            // (structuredContent 装真业务数据,编排层刻意保留不剥)。只认字符串会让这类
-            // 工具卡的正文一直是空的 —— 修了编排层不修显示契约,等于把"丢结构"换成"卡片全空"。
-            const rawResult: unknown = payload.result;
-            const result = typeof rawResult === 'string'
-              ? rawResult
-              : typeof (rawResult as { text?: unknown } | null)?.text === 'string'
-                ? (rawResult as { text: string }).text
-                : undefined;
-            const error = typeof payload.error === 'string' ? payload.error : undefined;
-            const apply = (tc: ToolCall): ToolCall => tc.callId !== callId ? tc : { ...tc, status: ok ? 'done' : 'error', result, error };
-            if (mainEvent) patchAsst((m) => ({ ...m, toolCalls: m.toolCalls.map(apply), segments: (m.segments ?? []).map((s) => s.kind === 'tool' && s.tool.callId === callId ? { ...s, tool: apply(s.tool) } : s) }));
-            else if (emitterId) patchSub(emitterId, (r) => ({ ...r, toolCalls: r.toolCalls.map(apply) }));
-          } else if (frame.event === 'error') {
-            flushSseDeltaBuf();
-            const msg = String(payload.message ?? payload.error ?? 'stream error');
-            // 只有主轮的错误决定 trace 的 ok —— 子 agent 失败不代表这一轮失败。
-            if (mainEvent) { streamError = msg; patchAsst((m) => ({ ...m, status: 'error', errorMessage: msg })); }
-            else if (emitterId) patchSub(emitterId, (r) => ({ ...r, status: 'error', errorMessage: msg } as SubAgentRun));
-          } else if (frame.event === 'done') {
-            flushSseDeltaBuf();
-          }
-          continue;
-        }
-        const stored = payload as unknown as StoredEvent;
-        const eid = stored.emitterId ?? '';
-        const acc = isMain(eid) ? mainAcc : getSubAcc(eid);
-        acc.feed(stored);
-      }
-    } catch (e) {
-      // 这里只**记状态**,不收口 —— 收口统一放在下面的 finally,catch 与正常退出
-      // 共用同一套判据。两处各判各的迟早分叉,那正是本次事故的形状。
-      if ((e as Error).name === 'AbortError' || signal.aborted) {
-        streamCancelled = true;
-        patchAsst((m) => ({ ...m, status: 'done', providerId: m.providerId ?? lastSeenProviderId ?? turnOverride ?? undefined }));
-      } else {
-        streamError = `stream error: ${(e as Error).message}`;
-        patchAsst((m) => ({ ...m, status: 'error', errorMessage: streamError }));
-      }
-    } finally {
-      clearCliSseActive(startSid, activeAgent);
-      flushSseTextBuf();
-      flushSseDeltaBuf();
-      mainAcc.flush();
-      for (const acc of subAccs.values()) acc.flush();
-      patchAsst((m) => (m.status === 'streaming' ? { ...m, status: 'done' } : m));
-      for (const eid of subAccs.keys()) patchSub(eid, (r) => (r.status === 'streaming' ? { ...r, status: 'done' } : r));
-      // 所有流路径的唯一汇合点:正常读完、流内 error、抛异常、被取消都从这里过。
-      // 幂等由 chatTurnEnd 自己保证,所以早到的收口(网络/HTTP 终点)不会被覆盖。
-      // 判据顺序:**取消优先于流内错误**。取消触发的 teardown 常常顺带甩出一条 error 帧,
-      // 或一个非 AbortError 的异常(不同运行时可能是 TypeError)—— 让 error 赢,用户主动停
-      // 就会被记成故障。取消是一个独立结局,既不是失败也不是成功。
-      const cancelled = streamCancelled || signal.aborted;
-      endTrace(cancelled ? 'cancelled' : streamError !== undefined ? 'error' : 'ok', cancelled ? undefined : streamError);
-      finishTurn();
-    }
-  },
+		try {
+			for await (const frame of parseSse(res.body)) {
+				if (!frame.data) continue;
+				if (
+					frame.event !== "agent-start" &&
+					frame.event !== "stored-event" &&
+					frame.event !== "token" &&
+					frame.event !== "thinking" &&
+					frame.event !== "tool-call" &&
+					frame.event !== "tool-call-delta" &&
+					frame.event !== "tool-result" &&
+					frame.event !== "done" &&
+					frame.event !== "error"
+				)
+					continue;
+				let payload: Record<string, unknown>;
+				try {
+					payload = JSON.parse(frame.data);
+				} catch {
+					continue;
+				}
+				const emitterId = payload.emitterId as string | undefined;
+				const providerId = payload.providerId as string | undefined;
+				if (providerId) {
+					if (isMain(emitterId)) {
+						lastSeenProviderId = providerId;
+						if (!mainProviderIdCommitted) {
+							mainProviderIdCommitted = true;
+							patchAsst((m) => (m.providerId ? m : { ...m, providerId }));
+						}
+					} else if (emitterId && !subProviderIdCommitted.has(emitterId)) {
+						subProviderIdCommitted.add(emitterId);
+						patchSub(emitterId, (r) =>
+							r.providerId ? r : { ...r, providerId },
+						);
+					}
+				}
+				const sentRunId =
+					typeof payload.runId === "string" ? payload.runId : null;
+				if (sentRunId && get().bySid[startSid]?.runId !== sentRunId)
+					get().patchConv(startSid, { runId: sentRunId });
+				if (frame.event === "agent-start") continue;
+				if (
+					frame.event === "token" ||
+					frame.event === "thinking" ||
+					frame.event === "tool-call" ||
+					frame.event === "tool-call-delta" ||
+					frame.event === "tool-result" ||
+					frame.event === "done" ||
+					frame.event === "error"
+				) {
+					const mainEvent = isMain(emitterId);
+					const nowTs = Date.now();
+					if (frame.event !== "token" && frame.event !== "thinking")
+						flushSseTextBuf();
+					if (frame.event === "token") {
+						const text = String(payload.text ?? "");
+						// 只认**主 agent** 的字:子 agent 先出字不证明主轮已响应,拿它撤看门狗
+						// 会把主轮真卡死掩盖掉。chatFirstToken 内部幂等,重复调用无害。
+						if (text) {
+							if (mainEvent) noteFirstToken();
+							bufText(mainEvent, emitterId ?? null, "text", text, providerId);
+							if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL)
+								flushSseTextBuf();
+						}
+					} else if (frame.event === "thinking") {
+						const text = String(payload.text ?? "");
+						const visibility =
+							payload.visibility === "public_summary" ||
+							payload.visibility === "private_reasoning"
+								? payload.visibility
+								: undefined;
+						if (text) {
+							if (mainEvent) noteFirstToken();
+							bufText(
+								mainEvent,
+								emitterId ?? null,
+								"thinking",
+								text,
+								providerId,
+								visibility,
+							);
+							if (nowTs - sseTextLastFlush >= SSE_DELTA_INTERVAL)
+								flushSseTextBuf();
+						}
+					} else if (frame.event === "tool-call") {
+						const callId = String(payload.callId ?? "");
+						if (callId) {
+							const normalized = normalizeToolCall(
+								String(payload.name ?? "tool"),
+								payload.args ?? {},
+							);
+							const tc: ToolCall = {
+								callId,
+								name: normalized.name,
+								args: normalized.args,
+								status: "running",
+								// Legacy CLI AskUserQuestion uses the permission side-channel.
+								// Native kernel turns mark structured ask_user explicitly with
+								// permissionPrompt:false and must render AskUserCard instead.
+								...(normalized.name === "ask_user" &&
+								payload.permissionPrompt !== false
+									? { permissionPrompt: true }
+									: {}),
+							};
+							if (mainEvent)
+								patchAsst((m) => {
+									// A streaming CLI emits argument deltas before the final
+									// tool-call event. Merge that final event into the existing
+									// call instead of appending a second call with the same id.
+									// This also prevents duplicate AskUser cards and duplicate
+									// process entries on fast provider paths.
+									const existing = m.toolCalls.find(
+										(tool) => tool.callId === callId,
+									);
+									const merged = existing
+										? { ...existing, ...tc, at: existing.at ?? m.text.length }
+										: { ...tc, at: m.text.length };
+									return {
+										...m,
+										toolCalls: existing
+											? m.toolCalls.map((tool) =>
+													tool.callId === callId ? merged : tool,
+												)
+											: [...m.toolCalls, merged],
+										segments: upsertToolSegment(
+											m.segments ?? [],
+											nowTs,
+											merged,
+										),
+									};
+								});
+							else if (emitterId)
+								patchSub(emitterId, (r) => ({
+									...r,
+									toolCalls: [...r.toolCalls, tc],
+								}));
+						}
+					} else if (frame.event === "tool-call-delta") {
+						const callId = String(payload.callId ?? "");
+						const delta =
+							typeof payload.argumentsDelta === "string"
+								? payload.argumentsDelta
+								: "";
+						if (callId && delta) {
+							const prev = sseDeltaBuf.get(callId);
+							if (prev) prev.accumulated += delta;
+							else
+								sseDeltaBuf.set(callId, {
+									callId,
+									name: normalizeToolCall(String(payload.name ?? "tool"), {})
+										.name,
+									accumulated: delta,
+									mainEvent,
+									emitterId: emitterId ?? null,
+								});
+							if (Date.now() - sseLastFlush >= SSE_DELTA_INTERVAL)
+								flushSseDeltaBuf();
+						}
+					} else if (frame.event === "tool-result") {
+						flushSseDeltaBuf();
+						if (mainEvent) noteToolResult();
+						const callId = String(payload.callId ?? "");
+						const ok = payload.ok !== false;
+						// 经我们代理的第三方 MCP 工具,结果是 `{text, structuredContent}` 形状
+						// (structuredContent 装真业务数据,编排层刻意保留不剥)。只认字符串会让这类
+						// 工具卡的正文一直是空的 —— 修了编排层不修显示契约,等于把"丢结构"换成"卡片全空"。
+						const rawResult: unknown = payload.result;
+						const result =
+							typeof rawResult === "string"
+								? rawResult
+								: typeof (rawResult as { text?: unknown } | null)?.text ===
+										"string"
+									? (rawResult as { text: string }).text
+									: undefined;
+						const error =
+							typeof payload.error === "string" ? payload.error : undefined;
+						const apply = (tc: ToolCall): ToolCall =>
+							tc.callId !== callId
+								? tc
+								: { ...tc, status: ok ? "done" : "error", result, error };
+						if (mainEvent)
+							patchAsst((m) => ({
+								...m,
+								toolCalls: m.toolCalls.map(apply),
+								segments: (m.segments ?? []).map((s) =>
+									s.kind === "tool" && s.tool.callId === callId
+										? { ...s, tool: apply(s.tool) }
+										: s,
+								),
+							}));
+						else if (emitterId)
+							patchSub(emitterId, (r) => ({
+								...r,
+								toolCalls: r.toolCalls.map(apply),
+							}));
+					} else if (frame.event === "error") {
+						flushSseDeltaBuf();
+						const msg = String(
+							payload.message ?? payload.error ?? "stream error",
+						);
+						// 只有主轮的错误决定 trace 的 ok —— 子 agent 失败不代表这一轮失败。
+						if (mainEvent) {
+							streamError = msg;
+							patchAsst((m) => ({ ...m, status: "error", errorMessage: msg }));
+						} else if (emitterId)
+							patchSub(
+								emitterId,
+								(r) =>
+									({ ...r, status: "error", errorMessage: msg }) as SubAgentRun,
+							);
+					} else if (frame.event === "done") {
+						flushSseDeltaBuf();
+					}
+					continue;
+				}
+				const stored = payload as unknown as StoredEvent;
+				const eid = stored.emitterId ?? "";
+				const acc = isMain(eid) ? mainAcc : getSubAcc(eid);
+				acc.feed(stored);
+			}
+		} catch (e) {
+			// 这里只**记状态**,不收口 —— 收口统一放在下面的 finally,catch 与正常退出
+			// 共用同一套判据。两处各判各的迟早分叉,那正是本次事故的形状。
+			if ((e as Error).name === "AbortError" || signal.aborted) {
+				streamCancelled = true;
+				patchAsst((m) => ({
+					...m,
+					status: "done",
+					providerId:
+						m.providerId ?? lastSeenProviderId ?? turnOverride ?? undefined,
+				}));
+			} else {
+				streamError = `stream error: ${(e as Error).message}`;
+				patchAsst((m) => ({
+					...m,
+					status: "error",
+					errorMessage: streamError,
+				}));
+			}
+		} finally {
+			clearCliSseActive(startSid, activeAgent);
+			flushSseTextBuf();
+			flushSseDeltaBuf();
+			mainAcc.flush();
+			for (const acc of subAccs.values()) acc.flush();
+			patchAsst((m) =>
+				m.status === "streaming" ? { ...m, status: "done" } : m,
+			);
+			for (const eid of subAccs.keys())
+				patchSub(eid, (r) =>
+					r.status === "streaming" ? { ...r, status: "done" } : r,
+				);
+			// 所有流路径的唯一汇合点:正常读完、流内 error、抛异常、被取消都从这里过。
+			// 幂等由 chatTurnEnd 自己保证,所以早到的收口(网络/HTTP 终点)不会被覆盖。
+			// 判据顺序:**取消优先于流内错误**。取消触发的 teardown 常常顺带甩出一条 error 帧,
+			// 或一个非 AbortError 的异常(不同运行时可能是 TypeError)—— 让 error 赢,用户主动停
+			// 就会被记成故障。取消是一个独立结局,既不是失败也不是成功。
+			const cancelled = streamCancelled || signal.aborted;
+			endTrace(
+				cancelled ? "cancelled" : streamError !== undefined ? "error" : "ok",
+				cancelled ? undefined : streamError,
+			);
+			finishTurn();
+		}
+	},
 
-  // ── checkpoint rewind ──
-  loadCheckpoints: async (sid) => {
-    if (!sid) return;
-    try {
-      const { fetchCheckpoints } = await import('@forgeax/interface/lib/checkpoint-api');
-      const { checkpoints, pending } = await fetchCheckpoints(sid);
-      const checkpointMsgIds: Record<string, boolean> = {};
-      for (const c of checkpoints) checkpointMsgIds[c.msgId] = c.hasCode;
-      get().patchConv(sid, {
-        checkpointMsgIds,
-        pendingRewind: pending
-          ? { boundaryId: pending.boundaryId, targetMsgId: pending.targetMsgId, mode: pending.mode, keptDirty: pending.keptDirty, overwrite: pending.overwrite ? { files: pending.overwrite.files } : null }
-          : null,
-      });
-    } catch (e) {
-      console.warn('[chat.loadCheckpoints] failed', (e as Error).message);
-    }
-  },
-  performRewind: async (sid, msgId, mode) => {
-    const { rewindTo } = await import('@forgeax/interface/lib/checkpoint-api');
-    await rewindTo(sid, msgId, mode);
-  },
-  performRewindCancel: async (sid) => {
-    const boundaryId = get().bySid[sid]?.pendingRewind?.boundaryId;
-    if (!boundaryId) { get().patchConv(sid, { pendingRewind: null }); return; }
-    const { rewindCancel } = await import('@forgeax/interface/lib/checkpoint-api');
-    try {
-      await rewindCancel(sid, boundaryId);
-    } catch (e) {
-      const msg = (e as Error)?.message ?? '';
-      if (/\b409\b/.test(msg) || /not pending|finalized|cancelled/i.test(msg)) {
-        get().patchConv(sid, { pendingRewind: null });
-        void get().loadCheckpoints(sid);
-        return;
-      }
-      throw e;
-    }
-  },
-  performOverwriteDirty: async (sid) => {
-    const conv = get().bySid[sid];
-    const boundaryId = conv?.rewindDirtyNotice?.boundaryId ?? conv?.pendingRewind?.boundaryId;
-    if (!boundaryId) return;
-    const { rewindOverwriteDirty } = await import('@forgeax/interface/lib/checkpoint-api');
-    await rewindOverwriteDirty(sid, boundaryId);
-  },
-  performUndoOverwrite: async (sid) => {
-    const conv = get().bySid[sid];
-    const boundaryId = conv?.rewindDirtyNotice?.boundaryId ?? conv?.pendingRewind?.boundaryId;
-    if (!boundaryId) return;
-    const { rewindUndoOverwrite } = await import('@forgeax/interface/lib/checkpoint-api');
-    await rewindUndoOverwrite(sid, boundaryId);
-  },
-  applyRewindEvent: (sid, kind, payload) => {
-    const conv = get().bySid[sid];
-    if (!conv) return;
-    const agentId = useShellStore.getState().tabs.find((tb) => tb.sid === sid)?.agentId ?? null;
-    if (kind === 'done') {
-      const msgId = String(payload.msgId ?? '');
-      if (msgId && agentId) {
-        const cur = conv.messagesByAgent[agentId];
-        if (Array.isArray(cur) && cur.length > 0 && !cur.some((m) => m.msgId === msgId)) return;
-      }
-      const mode = (payload.mode === 'code' || payload.mode === 'conversation' ? payload.mode : 'both') as 'both' | 'conversation' | 'code';
-      const boundaryId = String(payload.boundaryId ?? '');
-      const keptDirty = Array.isArray(payload.keptDirty) ? (payload.keptDirty as string[]) : [];
-      get().patchConv(sid, {
-        pendingRewind: { boundaryId, targetMsgId: msgId, mode, keptDirty, overwrite: null },
-        rewindDirtyNotice: keptDirty.length > 0 ? { boundaryId, keptDirty, overwrite: null } : null,
-      });
-    } else if (kind === 'cancelled') {
-      const boundaryId = String(payload.boundaryId ?? '');
-      const keptDirty = Array.isArray(payload.keptDirty) ? (payload.keptDirty as string[]) : [];
-      get().patchConv(sid, { pendingRewind: null, rewindDirtyNotice: keptDirty.length > 0 ? { boundaryId, keptDirty, overwrite: null } : null });
-    } else if (kind === 'finalized') {
-      const pr = conv.pendingRewind;
-      const targetMsgId = String(payload.targetMsgId ?? pr?.targetMsgId ?? '');
-      const pm = payload.mode;
-      const finMode: 'both' | 'conversation' | 'code' = pm === 'code' || pm === 'conversation' || pm === 'both' ? pm : (pr?.mode ?? 'both');
-      get().patchConv(sid, { pendingRewind: null, rewindDirtyNotice: null });
-      if (targetMsgId && finMode !== 'code' && agentId) {
-        get().patchMessages(sid, agentId, (msgs) => {
-          const targetIdx = msgs.findIndex((m) => m.msgId === targetMsgId);
-          if (targetIdx < 0) return msgs;
-          let lastUserIdx = -1;
-          for (let i = msgs.length - 1; i > targetIdx; i--) { if (msgs[i].role === 'user') { lastUserIdx = i; break; } }
-          const cutEnd = lastUserIdx > targetIdx ? lastUserIdx : msgs.length;
-          return [...msgs.slice(0, targetIdx), ...msgs.slice(cutEnd)];
-        });
-      }
-    } else if (kind === 'overwrite') {
-      const files = Array.isArray(payload.files) ? (payload.files as string[]) : [];
-      const boundaryId = String(payload.boundaryId ?? '');
-      get().patchConv(sid, {
-        rewindDirtyNotice: { boundaryId, keptDirty: [], overwrite: { files } },
-        ...(conv.pendingRewind ? { pendingRewind: { ...conv.pendingRewind, keptDirty: [], overwrite: { files } } } : {}),
-      });
-    } else if (kind === 'overwrite-undone') {
-      const files = Array.isArray(payload.files) ? (payload.files as string[]) : [];
-      const boundaryId = String(payload.boundaryId ?? '');
-      get().patchConv(sid, {
-        rewindDirtyNotice: { boundaryId, keptDirty: files, overwrite: null },
-        ...(conv.pendingRewind ? { pendingRewind: { ...conv.pendingRewind, keptDirty: files, overwrite: null } } : {}),
-      });
-    }
-  },
+	// ── checkpoint rewind ──
+	loadCheckpoints: async (sid) => {
+		if (!sid) return;
+		try {
+			const { fetchCheckpoints } = await import("@forgeax/chat/runtime");
+			const { checkpoints, pending } = await fetchCheckpoints(sid);
+			const checkpointMsgIds: Record<string, boolean> = {};
+			for (const c of checkpoints) checkpointMsgIds[c.msgId] = c.hasCode;
+			get().patchConv(sid, {
+				checkpointMsgIds,
+				pendingRewind: pending
+					? {
+							boundaryId: pending.boundaryId,
+							targetMsgId: pending.targetMsgId,
+							mode: pending.mode,
+							keptDirty: pending.keptDirty,
+							overwrite: pending.overwrite
+								? { files: pending.overwrite.files }
+								: null,
+						}
+					: null,
+			});
+		} catch (e) {
+			console.warn("[chat.loadCheckpoints] failed", (e as Error).message);
+		}
+	},
+	performRewind: async (sid, msgId, mode) => {
+		const { rewindTo } = await import("@forgeax/chat/runtime");
+		await rewindTo(sid, msgId, mode);
+	},
+	performRewindCancel: async (sid) => {
+		const boundaryId = get().bySid[sid]?.pendingRewind?.boundaryId;
+		if (!boundaryId) {
+			get().patchConv(sid, { pendingRewind: null });
+			return;
+		}
+		const { rewindCancel } = await import("@forgeax/chat/runtime");
+		try {
+			await rewindCancel(sid, boundaryId);
+		} catch (e) {
+			const msg = (e as Error)?.message ?? "";
+			if (/\b409\b/.test(msg) || /not pending|finalized|cancelled/i.test(msg)) {
+				get().patchConv(sid, { pendingRewind: null });
+				void get().loadCheckpoints(sid);
+				return;
+			}
+			throw e;
+		}
+	},
+	performOverwriteDirty: async (sid) => {
+		const conv = get().bySid[sid];
+		const boundaryId =
+			conv?.rewindDirtyNotice?.boundaryId ?? conv?.pendingRewind?.boundaryId;
+		if (!boundaryId) return;
+		const { rewindOverwriteDirty } = await import("@forgeax/chat/runtime");
+		await rewindOverwriteDirty(sid, boundaryId);
+	},
+	performUndoOverwrite: async (sid) => {
+		const conv = get().bySid[sid];
+		const boundaryId =
+			conv?.rewindDirtyNotice?.boundaryId ?? conv?.pendingRewind?.boundaryId;
+		if (!boundaryId) return;
+		const { rewindUndoOverwrite } = await import("@forgeax/chat/runtime");
+		await rewindUndoOverwrite(sid, boundaryId);
+	},
+	applyRewindEvent: (sid, kind, payload) => {
+		const conv = get().bySid[sid];
+		if (!conv) return;
+		const agentId =
+			useShellStore.getState().tabs.find((tb) => tb.sid === sid)?.agentId ??
+			null;
+		if (kind === "done") {
+			const msgId = String(payload.msgId ?? "");
+			if (msgId && agentId) {
+				const cur = conv.messagesByAgent[agentId];
+				if (
+					Array.isArray(cur) &&
+					cur.length > 0 &&
+					!cur.some((m) => m.msgId === msgId)
+				)
+					return;
+			}
+			const mode = (
+				payload.mode === "code" || payload.mode === "conversation"
+					? payload.mode
+					: "both"
+			) as "both" | "conversation" | "code";
+			const boundaryId = String(payload.boundaryId ?? "");
+			const keptDirty = Array.isArray(payload.keptDirty)
+				? (payload.keptDirty as string[])
+				: [];
+			get().patchConv(sid, {
+				pendingRewind: {
+					boundaryId,
+					targetMsgId: msgId,
+					mode,
+					keptDirty,
+					overwrite: null,
+				},
+				rewindDirtyNotice:
+					keptDirty.length > 0
+						? { boundaryId, keptDirty, overwrite: null }
+						: null,
+			});
+		} else if (kind === "cancelled") {
+			const boundaryId = String(payload.boundaryId ?? "");
+			const keptDirty = Array.isArray(payload.keptDirty)
+				? (payload.keptDirty as string[])
+				: [];
+			get().patchConv(sid, {
+				pendingRewind: null,
+				rewindDirtyNotice:
+					keptDirty.length > 0
+						? { boundaryId, keptDirty, overwrite: null }
+						: null,
+			});
+		} else if (kind === "finalized") {
+			const pr = conv.pendingRewind;
+			const targetMsgId = String(payload.targetMsgId ?? pr?.targetMsgId ?? "");
+			const pm = payload.mode;
+			const finMode: "both" | "conversation" | "code" =
+				pm === "code" || pm === "conversation" || pm === "both"
+					? pm
+					: (pr?.mode ?? "both");
+			get().patchConv(sid, { pendingRewind: null, rewindDirtyNotice: null });
+			if (targetMsgId && finMode !== "code" && agentId) {
+				get().patchMessages(sid, agentId, (msgs) => {
+					const targetIdx = msgs.findIndex((m) => m.msgId === targetMsgId);
+					if (targetIdx < 0) return msgs;
+					let lastUserIdx = -1;
+					for (let i = msgs.length - 1; i > targetIdx; i--) {
+						if (msgs[i].role === "user") {
+							lastUserIdx = i;
+							break;
+						}
+					}
+					const cutEnd = lastUserIdx > targetIdx ? lastUserIdx : msgs.length;
+					return [...msgs.slice(0, targetIdx), ...msgs.slice(cutEnd)];
+				});
+			}
+		} else if (kind === "overwrite") {
+			const files = Array.isArray(payload.files)
+				? (payload.files as string[])
+				: [];
+			const boundaryId = String(payload.boundaryId ?? "");
+			get().patchConv(sid, {
+				rewindDirtyNotice: { boundaryId, keptDirty: [], overwrite: { files } },
+				...(conv.pendingRewind
+					? {
+							pendingRewind: {
+								...conv.pendingRewind,
+								keptDirty: [],
+								overwrite: { files },
+							},
+						}
+					: {}),
+			});
+		} else if (kind === "overwrite-undone") {
+			const files = Array.isArray(payload.files)
+				? (payload.files as string[])
+				: [];
+			const boundaryId = String(payload.boundaryId ?? "");
+			get().patchConv(sid, {
+				rewindDirtyNotice: { boundaryId, keptDirty: files, overwrite: null },
+				...(conv.pendingRewind
+					? {
+							pendingRewind: {
+								...conv.pendingRewind,
+								keptDirty: files,
+								overwrite: null,
+							},
+						}
+					: {}),
+			});
+		}
+	},
 }));
 
 // ── convenience selector hooks (resolve the active (sid, agentId) target) ────
@@ -2017,52 +2957,63 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 // agent is active) with this store's per-(sid,agentId) buckets.
 
 function useActiveSid(): string | null {
-  return useShellStore((s) => s.activeSid);
+	return useShellStore((s) => s.activeSid);
 }
 function useActiveAgentId(): string | null {
-  return useShellStore((s) => (s.activeSid ? s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null : null));
+	return useShellStore((s) =>
+		s.activeSid
+			? (s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null)
+			: null,
+	);
 }
 
 /** The visible message thread for the active (sid, agentId). */
 export function useActiveMessages(): ChatMessage[] {
-  const sid = useActiveSid();
-  const agentId = useActiveAgentId();
-  return useChatStore((s) => (sid && agentId ? (s.bySid[sid]?.messagesByAgent[agentId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES));
+	const sid = useActiveSid();
+	const agentId = useActiveAgentId();
+	return useChatStore((s) =>
+		sid && agentId
+			? (s.bySid[sid]?.messagesByAgent[agentId] ?? EMPTY_MESSAGES)
+			: EMPTY_MESSAGES,
+	);
 }
 /** Streaming flag for the active (sid, agentId).
  *  OR interface busyByAgentBySid —— boot 时 `_syncActiveAgentRunning` 从 list_agents.running
  *  写入,避免刷新后错过 turnStart/snapshot 时 Send 误亮。 */
 export function useActiveStreaming(): boolean {
-  const sid = useActiveSid();
-  const agentId = useActiveAgentId();
-  const chatBusy = useChatStore((s) =>
-    sid && agentId ? Boolean(s.bySid[sid]?.streamingByAgent[agentId]
-      || s.bySid[sid]?.messagesByAgent[agentId]?.slice().reverse().find(message => message.role === 'assistant')?.status === 'streaming') : false);
-  const shellBusy = useShellStore((s) =>
-    sid && agentId ? Boolean(s.busyByAgentBySid[sid]?.[agentId]) : false);
-  return Boolean(chatBusy || shellBusy);
-}
-export function useActiveContextUsage(): ContextUsage | undefined {
-  const sid = useActiveSid();
-  const agentId = useActiveAgentId();
-  return useChatStore((s) => sid && agentId ? s.bySid[sid]?.contextByAgent[agentId] : undefined);
+	const sid = useActiveSid();
+	const agentId = useActiveAgentId();
+	const chatBusy = useChatStore((s) =>
+		sid && agentId ? Boolean(s.bySid[sid]?.streamingByAgent[agentId]) : false,
+	);
+	const shellBusy = useShellStore((s) =>
+		sid && agentId ? Boolean(s.busyByAgentBySid[sid]?.[agentId]) : false,
+	);
+	return Boolean(chatBusy || shellBusy);
 }
 export function useActiveContextPct(): number {
-  const sid = useActiveSid();
-  const agentId = useActiveAgentId();
-  return useChatStore((s) => (sid && agentId ? s.bySid[sid]?.contextByAgent[agentId]?.pct ?? 0 : 0));
+	const sid = useActiveSid();
+	return useChatStore((s) => (sid ? (s.bySid[sid]?.contextPct ?? 0) : 0));
 }
 export function useActivePendingRewind(): PendingRewind | null {
-  const sid = useActiveSid();
-  return useChatStore((s) => (sid ? s.bySid[sid]?.pendingRewind ?? null : null));
+	const sid = useActiveSid();
+	return useChatStore((s) =>
+		sid ? (s.bySid[sid]?.pendingRewind ?? null) : null,
+	);
 }
 export function useActiveRewindDirtyNotice(): RewindDirtyNotice | null {
-  const sid = useActiveSid();
-  return useChatStore((s) => (sid ? s.bySid[sid]?.rewindDirtyNotice ?? null : null));
+	const sid = useActiveSid();
+	return useChatStore((s) =>
+		sid ? (s.bySid[sid]?.rewindDirtyNotice ?? null) : null,
+	);
 }
-export function useActiveCheckpointMsgIds(): Record<string, boolean> | undefined {
-  const sid = useActiveSid();
-  return useChatStore((s) => (sid ? s.bySid[sid]?.checkpointMsgIds : undefined));
+export function useActiveCheckpointMsgIds():
+	| Record<string, boolean>
+	| undefined {
+	const sid = useActiveSid();
+	return useChatStore((s) =>
+		sid ? s.bySid[sid]?.checkpointMsgIds : undefined,
+	);
 }
 const EMPTY_STREAMING: Record<string, boolean> = {};
 let mergedChatFlagsRef: Record<string, boolean> = EMPTY_STREAMING;
@@ -2070,45 +3021,50 @@ let mergedShellFlagsRef: Record<string, boolean> = EMPTY_STREAMING;
 let mergedStreamingFlags: Record<string, boolean> = EMPTY_STREAMING;
 
 function mergeStreamingByAgent(
-  chatFlags: Record<string, boolean>,
-  shellFlags: Record<string, boolean>,
+	chatFlags: Record<string, boolean>,
+	shellFlags: Record<string, boolean>,
 ): Record<string, boolean> {
-  if (chatFlags === mergedChatFlagsRef && shellFlags === mergedShellFlagsRef) {
-    return mergedStreamingFlags;
-  }
-  mergedChatFlagsRef = chatFlags;
-  mergedShellFlagsRef = shellFlags;
-  const keys = new Set([...Object.keys(chatFlags), ...Object.keys(shellFlags)]);
-  if (keys.size === 0) {
-    mergedStreamingFlags = EMPTY_STREAMING;
-    return mergedStreamingFlags;
-  }
-  const out: Record<string, boolean> = {};
-  for (const k of keys) {
-    if (chatFlags[k] || shellFlags[k]) out[k] = true;
-  }
-  mergedStreamingFlags = out;
-  return mergedStreamingFlags;
+	if (chatFlags === mergedChatFlagsRef && shellFlags === mergedShellFlagsRef) {
+		return mergedStreamingFlags;
+	}
+	mergedChatFlagsRef = chatFlags;
+	mergedShellFlagsRef = shellFlags;
+	const keys = new Set([...Object.keys(chatFlags), ...Object.keys(shellFlags)]);
+	if (keys.size === 0) {
+		mergedStreamingFlags = EMPTY_STREAMING;
+		return mergedStreamingFlags;
+	}
+	const out: Record<string, boolean> = {};
+	for (const k of keys) {
+		if (chatFlags[k] || shellFlags[k]) out[k] = true;
+	}
+	mergedStreamingFlags = out;
+	return mergedStreamingFlags;
 }
 
 /** Per-agent streaming flags for the active session (ChatAgentCapsule). */
 export function useActiveStreamingByAgent(): Record<string, boolean> {
-  const sid = useActiveSid();
-  const chatFlags = useChatStore((s) => (sid ? s.bySid[sid]?.streamingByAgent ?? EMPTY_STREAMING : EMPTY_STREAMING));
-  const shellFlags = useShellStore((s) => (sid ? s.busyByAgentBySid[sid] ?? EMPTY_STREAMING : EMPTY_STREAMING));
-  return mergeStreamingByAgent(chatFlags, shellFlags);
+	const sid = useActiveSid();
+	const chatFlags = useChatStore((s) =>
+		sid ? (s.bySid[sid]?.streamingByAgent ?? EMPTY_STREAMING) : EMPTY_STREAMING,
+	);
+	const shellFlags = useShellStore((s) =>
+		sid ? (s.busyByAgentBySid[sid] ?? EMPTY_STREAMING) : EMPTY_STREAMING,
+	);
+	return mergeStreamingByAgent(chatFlags, shellFlags);
 }
 
 // ── user_input dedupe (sendMessage emits → session-stream skips the echo) ────
 const _emittedClientMsgIds: string[] = [];
 const _EMITTED_LRU_MAX = 64;
 export function markEmittedClientMsg(clientMsgId: string): void {
-  _emittedClientMsgIds.push(clientMsgId);
-  if (_emittedClientMsgIds.length > _EMITTED_LRU_MAX) _emittedClientMsgIds.shift();
+	_emittedClientMsgIds.push(clientMsgId);
+	if (_emittedClientMsgIds.length > _EMITTED_LRU_MAX)
+		_emittedClientMsgIds.shift();
 }
 export function isOwnUserInput(clientMsgId: string | undefined): boolean {
-  if (!clientMsgId) return false;
-  return _emittedClientMsgIds.includes(clientMsgId);
+	if (!clientMsgId) return false;
+	return _emittedClientMsgIds.includes(clientMsgId);
 }
 
 // ── Stop/abort stream suppression ──────────────────────────────────────────
@@ -2117,16 +3073,19 @@ export function isOwnUserInput(clientMsgId: string | undefined): boolean {
 // Cleared on the next user sendMessage for that agent.
 const _streamSuppressByAgent = new Set<string>();
 function streamSuppressKey(sid: string, agentId: string): string {
-  return `${sid}::${agentId}`;
+	return `${sid}::${agentId}`;
 }
 export function suppressAgentStream(sid: string, agentId: string): void {
-  _streamSuppressByAgent.add(streamSuppressKey(sid, agentId));
+	_streamSuppressByAgent.add(streamSuppressKey(sid, agentId));
 }
-export function clearAgentStreamSuppression(sid: string, agentId: string): void {
-  _streamSuppressByAgent.delete(streamSuppressKey(sid, agentId));
+export function clearAgentStreamSuppression(
+	sid: string,
+	agentId: string,
+): void {
+	_streamSuppressByAgent.delete(streamSuppressKey(sid, agentId));
 }
 export function isAgentStreamSuppressed(sid: string, agentId: string): boolean {
-  return _streamSuppressByAgent.has(streamSuppressKey(sid, agentId));
+	return _streamSuppressByAgent.has(streamSuppressKey(sid, agentId));
 }
 
 // ── cli-SSE turn dedupe (sendMessage cli 路径 → session-stream 丢 WS 副本) ────
@@ -2135,51 +3094,63 @@ export function isAgentStreamSuppressed(sid: string, agentId: string): boolean {
 // session-stream 对该 (sid, agent) 丢弃 WS 的 text/thinking 与收口 reconcile。
 const _cliSseTurns = new Map<string, number>();
 export function markCliSseActive(sid: string, agentId: string): void {
-  const key = `${sid}::${agentId}`;
-  _cliSseTurns.set(key, (_cliSseTurns.get(key) ?? 0) + 1);
+	const key = `${sid}::${agentId}`;
+	_cliSseTurns.set(key, (_cliSseTurns.get(key) ?? 0) + 1);
 }
 export function clearCliSseActive(sid: string, agentId: string): void {
-  const key = `${sid}::${agentId}`;
-  const remaining = (_cliSseTurns.get(key) ?? 0) - 1;
-  if (remaining > 0) _cliSseTurns.set(key, remaining);
-  else _cliSseTurns.delete(key);
+	const key = `${sid}::${agentId}`;
+	const remaining = (_cliSseTurns.get(key) ?? 0) - 1;
+	if (remaining > 0) _cliSseTurns.set(key, remaining);
+	else _cliSseTurns.delete(key);
 }
 export function isCliSseTurnActive(sid: string, agentId: string): boolean {
-  return (_cliSseTurns.get(`${sid}::${agentId}`) ?? 0) > 0;
+	return (_cliSseTurns.get(`${sid}::${agentId}`) ?? 0) > 0;
 }
 
 // ── registry GC: when Interface drops a session tab, tear down chat-side state ──
 let _prevSids: string[] = [];
 useShellStore.subscribe((s) => {
-  const sids = s.tabs.map((tb) => tb.sid);
-  if (sids.length === _prevSids.length && sids.every((x, i) => x === _prevSids[i])) return;
-  const removed = _prevSids.filter((sid) => !sids.includes(sid));
-  _prevSids = sids;
-  if (removed.length === 0) return;
-  for (const sid of removed) {
-    const c = _abortByTab.get(sid);
-    if (c) c.controller.abort();
-    closeThreadHistoryTails(sid);
-    useChatStore.setState((cs) => {
-      if (!(sid in cs.bySid)) {
-        const queuedMessages = Object.fromEntries(Object.entries(cs.queuedMessages).filter(([k]) => k.split('::')[0] !== sid));
-        return { queuedMessages };
-      }
-      const { [sid]: _drop, ...bySid } = cs.bySid;
-      const queuedMessages = Object.fromEntries(Object.entries(cs.queuedMessages).filter(([k]) => k.split('::')[0] !== sid));
-      return { bySid, queuedMessages };
-    });
-  }
+	const sids = s.tabs.map((tb) => tb.sid);
+	if (
+		sids.length === _prevSids.length &&
+		sids.every((x, i) => x === _prevSids[i])
+	)
+		return;
+	const removed = _prevSids.filter((sid) => !sids.includes(sid));
+	_prevSids = sids;
+	if (removed.length === 0) return;
+	for (const sid of removed) {
+		const c = _abortByTab.get(sid);
+		if (c) c.controller.abort();
+		closeThreadHistoryTails(sid);
+		useChatStore.setState((cs) => {
+			if (!(sid in cs.bySid)) {
+				const queuedMessages = Object.fromEntries(
+					Object.entries(cs.queuedMessages).filter(
+						([k]) => k.split("::")[0] !== sid,
+					),
+				);
+				return { queuedMessages };
+			}
+			const { [sid]: _drop, ...bySid } = cs.bySid;
+			const queuedMessages = Object.fromEntries(
+				Object.entries(cs.queuedMessages).filter(
+					([k]) => k.split("::")[0] !== sid,
+				),
+			);
+			return { bySid, queuedMessages };
+		});
+	}
 });
 
 /** Internal accessors shared with the (soon-to-move) session-stream + sendMessage
  *  modules in this package. Not part of the public surface. */
 export const _chatInternals = {
-  abortByTab: _abortByTab,
-  trackTail,
-  untrackTail,
-  closeThreadHistoryTails,
-  newId,
-  consumeAguiEvents,
-  fetchSessionEventsNdjson,
+	abortByTab: _abortByTab,
+	trackTail,
+	untrackTail,
+	closeThreadHistoryTails,
+	newId,
+	consumeAguiEvents,
+	fetchSessionEventsNdjson,
 };

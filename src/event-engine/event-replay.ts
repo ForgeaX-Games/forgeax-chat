@@ -1,3 +1,5 @@
+import { TurnAccumulator } from "./turn-accumulator";
+import type { CompletedTurn, StoredEvent, ToolCallMessage } from "./types";
 /**
  * Event replay — parse JSONL event streams and rebuild CompletedTurn[]
  * by feeding events through the shared TurnAccumulator.
@@ -10,26 +12,25 @@
  * stream multi-thousand-event compacted history into the client.
  */
 
-import type { StoredEvent, CompletedTurn, ToolCallMessage } from "./types";
-import { TurnAccumulator } from "./turn-accumulator";
-
 export interface ReplayResult {
-  turns: CompletedTurn[];
-  sessionId: string | null;
-  contextPct: number;
+	turns: CompletedTurn[];
+	sessionId: string | null;
+	contextPct: number;
 }
 
 export function parseEventLines(raw: string): StoredEvent[] {
-  const events: StoredEvent[] = [];
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const rec = JSON.parse(trimmed) as StoredEvent;
-      if (typeof rec.type === "string") events.push(rec);
-    } catch { /* skip malformed */ }
-  }
-  return events;
+	const events: StoredEvent[] = [];
+	for (const line of raw.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			const rec = JSON.parse(trimmed) as StoredEvent;
+			if (typeof rec.type === "string") events.push(rec);
+		} catch {
+			/* skip malformed */
+		}
+	}
+	return events;
 }
 
 /**
@@ -38,10 +39,10 @@ export function parseEventLines(raw: string): StoredEvent[] {
  * malformed turns.
  */
 export function trimToTurnBoundary(events: StoredEvent[]): StoredEvent[] {
-  const firstBoundary = events.findIndex(
-    e => e.type === "hook:turnStart" || e.type === "user_input",
-  );
-  return firstBoundary > 0 ? events.slice(firstBoundary) : events;
+	const firstBoundary = events.findIndex(
+		(e) => e.type === "hook:turnStart" || e.type === "user_input",
+	);
+	return firstBoundary > 0 ? events.slice(firstBoundary) : events;
 }
 
 /**
@@ -57,43 +58,53 @@ export function trimToTurnBoundary(events: StoredEvent[]): StoredEvent[] {
  * If no compact_boundary is present, returns events unchanged.
  */
 export function trimToCompactBoundary(events: StoredEvent[]): StoredEvent[] {
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i]!.type === "compact_boundary") {
-      return events.slice(i);
-    }
-  }
-  return events;
+	for (let i = events.length - 1; i >= 0; i--) {
+		if (events[i]?.type === "compact_boundary") {
+			return events.slice(i);
+		}
+	}
+	return events;
 }
 
-export function replayEvents(events: StoredEvent[], viewerId?: string): ReplayResult {
-  const turns: CompletedTurn[] = [];
-  let sessionId: string | null = null;
-  let contextPct = 0;
+export function replayEvents(
+	events: StoredEvent[],
+	viewerId?: string,
+): ReplayResult {
+	const turns: CompletedTurn[] = [];
+	let sessionId: string | null = null;
+	let contextPct = 0;
 
-  const acc = new TurnAccumulator({
-    onTurn: (turn) => turns.push(turn),
-    onUpdateMessage: (callId, merged) => {
-      for (let i = turns.length - 1; i >= 0; i--) {
-        const msgs = turns[i]!.messages;
-        for (let j = msgs.length - 1; j >= 0; j--) {
-          const m = msgs[j]!;
-          if (m.kind === "tool_call" && (m as ToolCallMessage).id === callId) {
-            msgs[j] = { ...m, ...merged };
-            return;
-          }
-        }
-      }
-    },
-    onMeta: (m) => {
-      if (m.session) sessionId = m.session;
-      // Native zero is authoritative after compaction; an empty legacy usage
-      // report does not erase the last known occupancy.
-      if (m.contextPct !== undefined && (m.contextPct > 0 || m.contextUsage?.source === 'runtime')) contextPct = m.contextPct;
-    },
-  }, viewerId);
+	const acc = new TurnAccumulator(
+		{
+			onTurn: (turn) => turns.push(turn),
+			onUpdateMessage: (callId, merged) => {
+				for (let i = turns.length - 1; i >= 0; i--) {
+					const msgs = turns[i]?.messages;
+					for (let j = msgs.length - 1; j >= 0; j--) {
+						const m = msgs[j]!;
+						if (
+							m.kind === "tool_call" &&
+							(m as ToolCallMessage).id === callId
+						) {
+							msgs[j] = { ...m, ...merged };
+							return;
+						}
+					}
+				}
+			},
+			onMeta: (m) => {
+				if (m.session) sessionId = m.session;
+				// Match the live stream and store replay paths: zero/invalid usage must
+				// not erase the last positive context percentage.
+				if (m.contextPct !== undefined && m.contextPct > 0)
+					contextPct = m.contextPct;
+			},
+		},
+		viewerId,
+	);
 
-  for (const rec of events) acc.feed(rec);
-  acc.flush();
+	for (const rec of events) acc.feed(rec);
+	acc.flush();
 
-  return { turns, sessionId, contextPct };
+	return { turns, sessionId, contextPct };
 }

@@ -1,0 +1,326 @@
+.mp-root {
+	position: relative;
+	display: inline-flex;
+}
+.mp-root.mp-inline {
+	display: block;
+	width: 100%;
+}
+
+.mp-trigger {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 8px;
+	font-family: var(--font-mono);
+	font-size: 12px;
+	color: var(--text-primary);
+	background: var(--bg-2);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	cursor: pointer;
+	transition:
+		border-color 120ms,
+		background 120ms;
+}
+.mp-trigger:hover:not(:disabled) {
+	border-color: var(--primary);
+}
+.mp-trigger.is-open {
+	border-color: var(--primary);
+}
+.mp-trigger:disabled {
+	cursor: not-allowed;
+	opacity: 0.6;
+}
+
+.mp-trigger.mp-pill {
+	padding: 3px 8px;
+	border-radius: 999px;
+	font-size: 11.5px;
+}
+.mp-trigger.mp-button {
+	min-width: 140px;
+}
+
+.mp-trigger-label {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.mp-menu {
+	position: absolute;
+	bottom: calc(100% + 4px);
+	top: auto;
+	left: 0;
+	z-index: 30;
+	min-width: 320px;
+	max-width: 480px;
+	max-height: 420px;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	background: var(--bg-1);
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.mp-menu-inline {
+	position: static;
+	max-height: 360px;
+	width: 100%;
+}
+
+/* Inside a Radix Popover the content is portaled + positioned by the popper,
+   so the menu itself drops its own absolute positioning and keeps only its
+   box styling (bg / border / scroll). */
+.mp-menu--popover {
+	position: static;
+	bottom: auto;
+	left: auto;
+}
+
+.mp-search {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg-2);
+	position: sticky;
+	top: 0;
+	z-index: 2;
+}
+.mp-search > svg {
+	color: var(--text-dim);
+	flex-shrink: 0;
+}
+.mp-search > input {
+	flex: 1;
+	background: transparent;
+	border: 0;
+	outline: 0;
+	color: var(--text-primary);
+	font-family: var(--font-mono);
+	font-size: 12px;
+	padding: 2px 0;
+}
+.mp-search > input::placeholder {
+	color: var(--text-dim);
+}
+.mp-refresh {
+	background: transparent;
+	border: 0;
+	color: var(--text-dim);
+	cursor: pointer;
+	font-size: 13px;
+	padding: 0 4px;
+}
+.mp-refresh:hover {
+	color: var(--text-primary);
+}
+
+.mp-group {
+	padding: 4px 8px;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--text-dim);
+	background: var(--bg-2);
+	position: sticky;
+	top: 28px;
+	z-index: 1;
+}
+
+.mp-row {
+	display: flex;
+	align-items: center;
+}
+.mp-row .mp-item {
+	min-width: 0;
+	flex: 1;
+}
+.mp-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	padding: 6px 10px;
+	background: transparent;
+	border: 0;
+	border-top: 1px solid transparent;
+	border-bottom: 1px solid transparent;
+	font-family: var(--font-mono);
+	font-size: 12px;
+	color: var(--text-primary);
+	cursor: pointer;
+	text-align: left;
+}
+.mp-item.is-focused {
+	background: var(--bg-2);
+}
+.mp-item.is-current {
+	background: rgba(98, 142, 255, 0.08);
+}
+.mp-item.is-current.is-focused {
+	background: rgba(98, 142, 255, 0.16);
+}
+
+.mp-check {
+	display: inline-flex;
+	align-items: center;
+}
+.mp-check input {
+	cursor: pointer;
+}
+
+.mp-id {
+	flex-shrink: 0;
+}
+.mp-sep {
+	color: var(--text-dim);
+	margin: 0 2px;
+}
+.mp-ctx {
+	color: var(--text-dim);
+}
+.mp-reasoning,
+.mp-modality,
+.mp-live,
+.mp-driver {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 5px;
+	font-size: 10px;
+	border-radius: 4px;
+	background: var(--bg-2);
+	color: var(--text-dim);
+	border: 1px solid var(--border);
+}
+.mp-modality.r-image {
+	color: #ec9c30;
+}
+.mp-modality.r-audio {
+	color: #4ec3c8;
+}
+.mp-modalities {
+	display: inline-flex;
+	gap: 2px;
+	margin-left: 2px;
+}
+
+.mp-live {
+	background: rgba(98, 142, 255, 0.08);
+	color: #5b8bff;
+	border-color: rgba(98, 142, 255, 0.32);
+}
+.mp-driver {
+	background: rgba(212, 255, 72, 0.08);
+	color: var(--primary);
+	border-color: rgba(212, 255, 72, 0.32);
+}
+
+.mp-tail {
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+.mp-arrow {
+	color: var(--primary);
+}
+.mp-spin {
+	animation: mp-spin 1s linear infinite;
+}
+@keyframes mp-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.mp-err {
+	padding: 6px 10px;
+	font-size: 11px;
+	color: var(--accent-error, #ef4444);
+}
+.mp-loading,
+.mp-empty {
+	padding: 8px 10px;
+	font-size: 11px;
+	color: var(--text-dim);
+}
+
+.mp-foot {
+	padding: 5px 10px;
+	border-top: 1px solid var(--border);
+	background: var(--bg-2);
+	font-size: 10px;
+	color: var(--text-dim);
+	font-family: var(--font-mono);
+	position: sticky;
+	bottom: 0;
+}
+
+.mp-id.is-hidden-model {
+	color: var(--text-dim);
+	text-decoration: line-through;
+}
+.mp-hidden-tag {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 5px;
+	font-size: 10px;
+	border-radius: 4px;
+	background: rgba(150, 80, 80, 0.12);
+	color: #d28282;
+	border: 1px solid rgba(210, 130, 130, 0.32);
+}
+.mp-eye {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	color: var(--text-dim);
+	cursor: pointer;
+	padding: 0;
+}
+.mp-eye:hover:not(:disabled) {
+	background: var(--bg-2);
+	border-color: var(--border);
+	color: var(--text-primary);
+}
+.mp-eye:disabled {
+	cursor: not-allowed;
+	color: var(--color-icon-disabled);
+}
+
+/* 内核目录不可用空态(回退链 source='none'):突出但不刺眼,detail 换行展示原因 */
+.mp-unavailable {
+	color: var(--text-primary);
+}
+.mp-unavailable-detail {
+	margin-top: 4px;
+	font-size: 10px;
+	color: var(--text-dim);
+	word-break: break-all;
+	max-width: 320px;
+}
+/* 非实时来源徽章(cached = last-known 盘缓存;preset = 内核预置静态表) */
+.mp-stale {
+	margin-left: 6px;
+	padding: 0 4px;
+	font-size: 9px;
+	border: 1px solid var(--border);
+	border-radius: 3px;
+	color: var(--text-dim);
+	text-transform: uppercase;
+	letter-spacing: 0.4px;
+}

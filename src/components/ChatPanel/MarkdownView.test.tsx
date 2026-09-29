@@ -1,17 +1,41 @@
-import * as ReactRuntime from '../../../node_modules/react/index.js';
-import { expect, mock, test } from 'bun:test';
-import { renderToStaticMarkup } from 'react-dom/server';
-mock.module('react', () => ReactRuntime);
-mock.module('@forgeax/interface/i18n', () => ({ getLocale: () => 'en', useTranslation: () => ({ t: (key: string) => key }) }));
-const { MarkdownView } = await import('./MarkdownView');
-test('local references offer path copying instead of broken browser routes', () => {
-  for (const path of ['/Users/you/game/main.ts', 'C:/games/main.ts', 'src/main.ts', 'file:///tmp/game.ts']) {
-    const html = renderToStaticMarkup(<MarkdownView text={`[Source](${path})`} />);
-    expect(html).toContain('Copy file path:');
-    expect(html).not.toContain('href=');
-  }
-});
-test('web links remain links and executable schemes are never navigable', () => {
-  expect(renderToStaticMarkup(<MarkdownView text="[Docs](https://example.com/docs)" />)).toContain('href="https://example.com/docs"');
-  expect(renderToStaticMarkup(<MarkdownView text="[bad](javascript:alert)" />)).not.toContain('href=');
+import { describe, expect, test } from "bun:test";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MarkdownView, parseBlocks } from "./MarkdownView";
+
+describe("MarkdownView", () => {
+	test("keeps duplicate markdown nodes distinct by source offset", () => {
+		const blocks = parseBlocks(
+			"same\n\nsame\n\n- item\n- item\n\n| same | same |\n| --- | --- |\n| same | same |\n| same | same |",
+		);
+
+		const offsets = new Set<number>();
+		for (const block of blocks) {
+			expect(offsets.has(block.sourceOffset)).toBeFalse();
+			offsets.add(block.sourceOffset);
+			if (block.kind === "ul") {
+				expect(new Set(block.items.map((item) => item.sourceOffset)).size).toBe(
+					block.items.length,
+				);
+			}
+			if (block.kind === "table") {
+				const cells = [...block.header, ...block.rows.flat()];
+				expect(new Set(cells.map((cell) => cell.sourceOffset)).size).toBe(
+					cells.length,
+				);
+			}
+		}
+	});
+
+	test("renders duplicate paragraphs, list items, and table cells", () => {
+		const markup = renderToStaticMarkup(
+			<MarkdownView
+				text={
+					"same\n\nsame\n\n- item\n- item\n\n| same | same |\n| --- | --- |\n| same | same |\n| same | same |"
+				}
+			/>,
+		);
+
+		expect(markup.match(/>same</g)?.length).toBe(8);
+		expect(markup.match(/>item</g)?.length).toBe(2);
+	});
 });

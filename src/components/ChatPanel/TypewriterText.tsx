@@ -10,19 +10,21 @@
 //
 // LLM token 速度本身就有打字机感（~30-60 tok/s），不需要额外 RAF reveal 节流。
 
-import { MarkdownView } from './MarkdownView';
+import { MarkdownView } from "./MarkdownView";
 
 interface Props {
-  text: string;
-  animated: boolean;
+	text: string;
+	animated: boolean;
 }
 
 export function TypewriterText({ text, animated }: Props) {
-  if (!animated) return <MarkdownView text={text} />;
-  return (
-    <div className="md md-typewriter">
-      <MarkdownView text={text} />
-      <span className="md-cursor" aria-hidden="true">▍</span>
-    </div>
-  );
+	if (!animated) return <MarkdownView text={text} />;
+	return (
+		<div className="md md-typewriter">
+			<MarkdownView text={text} />
+			<span className="md-cursor" aria-hidden="true">
+				▍
+			</span>
+		</div>
+	);
 }

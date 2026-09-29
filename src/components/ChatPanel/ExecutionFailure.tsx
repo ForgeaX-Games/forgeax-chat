@@ -1,20 +1,26 @@
-import { AlertCircle, CirclePause, ArrowRight } from 'lucide-react';
-import { useTranslation } from '@forgeax/interface/i18n';
-import { executionFailureKind, executionFailureMessages, type FailureContinuation } from './execution-failure';
-import './ExecutionFailure.css';
+import { useTranslation } from "@forgeax/chat/runtime";
+import { AlertCircle } from "lucide-react";
+import {
+	executionFailureKind,
+	executionFailureMessages,
+} from "./execution-failure";
+import "./ExecutionFailure.css";
 
-export function ExecutionFailure({ error, continuation }: { error: string; continuation?: FailureContinuation }) {
-  const { i18n } = useTranslation();
-  const copy = executionFailureMessages(i18n?.language);
-  const kind = executionFailureKind(error);
-  const summary = kind === 'steered' ? copy[continuation === 'working' ? 'steeredWorking' : continuation === 'resumed' ? 'steeredResumed' : 'steered'] : copy[kind === 'interrupted' ? 'interrupted' : continuation ?? kind];
-  return (
-    <section className="kc-error kc-execution-failure" aria-label={summary} data-failure-kind={kind}>
-      <details>
-        <summary className="kc-failure-summary">{kind === 'steered' ? <ArrowRight size={14} aria-hidden="true" /> : kind === 'interrupted' ? <CirclePause size={14} aria-hidden="true" /> : <AlertCircle size={14} aria-hidden="true" />}<span>{summary}</span><span className="kc-failure-details-label">{copy.details}</span></summary>
-        <p>{kind === 'steered' ? copy.steeredHelp : kind === 'interrupted' ? copy.interruptedHelp : continuation ? copy.continuationHelp : kind === 'validation' ? copy.validationHelp : copy.help}</p>
-        <pre>{error}</pre>
-      </details>
-    </section>
-  );
+export function ExecutionFailure({ error }: { error: string }) {
+	const { i18n } = useTranslation();
+	const copy = executionFailureMessages(i18n?.language);
+	const kind = executionFailureKind(error);
+	return (
+		<section className="kc-error kc-execution-failure" aria-label={copy[kind]}>
+			<div className="kc-failure-summary">
+				<AlertCircle size={16} aria-hidden="true" />
+				<strong>{copy[kind]}</strong>
+			</div>
+			<p>{kind === "validation" ? copy.validationHelp : copy.help}</p>
+			<details>
+				<summary>{copy.details}</summary>
+				<pre>{error}</pre>
+			</details>
+		</section>
+	);
 }

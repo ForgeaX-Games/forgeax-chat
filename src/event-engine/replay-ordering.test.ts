@@ -1,3 +1,9 @@
+import { describe, expect, it } from "bun:test";
+import type { ChatMessage } from "@forgeax/chat/runtime";
+import { buildMainCallbacks, makeInMemEffects } from "./message-builder";
+import { TurnAccumulator } from "./turn-accumulator";
+import type { StoredEvent } from "./types";
+
 /**
  * Regression test for the chat-history restore ordering bug.
  *
@@ -21,197 +27,348 @@
  * bridge) and asserts the restored order matches live.
  */
 
-import { describe, it, expect } from 'bun:test';
-import { TurnAccumulator } from './turn-accumulator';
-import { buildMainCallbacks, makeInMemEffects } from './message-builder';
-import type { StoredEvent } from './types';
-import type { ChatMessage } from '@forgeax/interface/store';
-
 /** Mirror store.ts::loadSession's replay wiring (minus the segments/meta
  *  bookkeeping that doesn't affect message ordering). */
 function replay(events: StoredEvent[], viewerId: string): ChatMessage[] {
-  const messages: ChatMessage[] = [];
-  let seq = 0;
-  const newId = () => `m${seq++}`;
-  let eventTimestamp = 0;
-  const eff = makeInMemEffects(messages, newId, () => eventTimestamp);
-  const mainCbs = buildMainCallbacks(eff);
-  const acc = new TurnAccumulator(
-    {
-      ...mainCbs,
-      onTurn: (turn) => {
-        mainCbs.onTurn?.(turn);
-        // The fix: seal at every real agent turn boundary.
-        if (turn.agent && turn.agent !== 'user') eff.sealMain?.();
-      },
-    },
-    viewerId,
-  );
-  for (const ev of [...events].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))) {
-    eventTimestamp = ev.ts ?? Date.now();
-    acc.feed(ev);
-  }
-  acc.flush();
-  return messages;
+	const messages: ChatMessage[] = [];
+	let seq = 0;
+	const newId = () => `m${seq++}`;
+	let eventTimestamp = 0;
+	const eff = makeInMemEffects(messages, newId, () => eventTimestamp);
+	const mainCbs = buildMainCallbacks(eff);
+	const acc = new TurnAccumulator(
+		{
+			...mainCbs,
+			onTurn: (turn) => {
+				mainCbs.onTurn?.(turn);
+				// The fix: seal at every real agent turn boundary.
+				if (turn.agent && turn.agent !== "user") eff.sealMain?.();
+			},
+		},
+		viewerId,
+	);
+	for (const ev of [...events].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))) {
+		eventTimestamp = ev.ts ?? Date.now();
+		acc.feed(ev);
+	}
+	acc.flush();
+	return messages;
 }
 
 const asstMsg = (emitter: string, ts: number, text: string): StoredEvent => ({
-  type: 'hook:assistantMessage',
-  emitterId: emitter,
-  ts,
-  payload: { llmMessage: { role: 'assistant', content: text } },
+	type: "hook:assistantMessage",
+	emitterId: emitter,
+	ts,
+	payload: { llmMessage: { role: "assistant", content: text } },
 });
 
-describe('replay ordering — inter-agent cards interleave with multi-turn forge text', () => {
-  it('rebuilds assistant prose around tools in one turn without overwriting earlier prose', () => {
-    const events: StoredEvent[] = [
-      { type: 'user_input', source: 'user', ts: 1, payload: { content: 'make one file' } },
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 2 },
-      asstMsg('forge', 3, 'I will inspect first.\n'),
-      { type: 'hook:toolCall', emitterId: 'forge', ts: 4, payload: { name: 'read_file', callId: 'r1', args: {} } },
-      { type: 'hook:toolResult', emitterId: 'forge', ts: 5, payload: { name: 'read_file', callId: 'r1', ok: true, result: 'ok' } },
-      asstMsg('forge', 6, 'Now I will write it.\n'),
-      { type: 'hook:toolCall', emitterId: 'forge', ts: 7, payload: { name: 'write_file', callId: 'w1', args: {} } },
-      { type: 'hook:toolResult', emitterId: 'forge', ts: 8, payload: { name: 'write_file', callId: 'w1', ok: true, result: 'ok' } },
-      asstMsg('forge', 9, 'Finished.'),
-      { type: 'hook:turnEnd', emitterId: 'forge', ts: 10 },
-    ];
+describe("replay ordering — inter-agent cards interleave with multi-turn forge text", () => {
+	it("rebuilds assistant prose around tools in one turn without overwriting earlier prose", () => {
+		const events: StoredEvent[] = [
+			{
+				type: "user_input",
+				source: "user",
+				ts: 1,
+				payload: { content: "make one file" },
+			},
+			{ type: "hook:turnStart", emitterId: "forge", ts: 2 },
+			asstMsg("forge", 3, "I will inspect first.\n"),
+			{
+				type: "hook:toolCall",
+				emitterId: "forge",
+				ts: 4,
+				payload: { name: "read_file", callId: "r1", args: {} },
+			},
+			{
+				type: "hook:toolResult",
+				emitterId: "forge",
+				ts: 5,
+				payload: { name: "read_file", callId: "r1", ok: true, result: "ok" },
+			},
+			asstMsg("forge", 6, "Now I will write it.\n"),
+			{
+				type: "hook:toolCall",
+				emitterId: "forge",
+				ts: 7,
+				payload: { name: "write_file", callId: "w1", args: {} },
+			},
+			{
+				type: "hook:toolResult",
+				emitterId: "forge",
+				ts: 8,
+				payload: { name: "write_file", callId: "w1", ok: true, result: "ok" },
+			},
+			asstMsg("forge", 9, "Finished."),
+			{ type: "hook:turnEnd", emitterId: "forge", ts: 10 },
+		];
 
-    const msgs = replay(events, 'forge');
-    const assistant = msgs.find((message) => message.role === 'assistant');
-    expect(assistant?.text).toBe('I will inspect first.Now I will write it.Finished.');
-    expect(assistant?.toolCalls.map((tool) => tool.name)).toEqual(['read_file', 'write_file']);
-  });
+		const msgs = replay(events, "forge");
+		const assistant = msgs.find((message) => message.role === "assistant");
+		expect(assistant?.text).toBe(
+			"I will inspect first.Now I will write it.Finished.",
+		);
+		expect(assistant?.toolCalls.map((tool) => tool.name)).toEqual([
+			"read_file",
+			"write_file",
+		]);
+	});
 
-  it('keeps each forge turn in its own bubble, cards interleaved at event time', () => {
-    // forge: speaks → delegates to iori → iori replies → forge speaks again.
-    const events: StoredEvent[] = [
-      { type: 'user_input', source: 'user', ts: 1, payload: { content: 'make a game' } },
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 2 },
-      asstMsg('forge', 3, 'I will ask iori to build the arena.'),
-      { type: 'hook:turnEnd', emitterId: 'forge', ts: 4 },
-      // inter-agent traffic (forge→iori, iori→forge) — reshaped to system rows.
-      { type: 'user_input', source: 'agent', emitterId: 'forge', to: 'iori', ts: 5, payload: { content: 'build the arena' } },
-      { type: 'user_input', source: 'agent', emitterId: 'iori', to: 'forge', ts: 6, payload: { content: 'arena done' } },
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 7 },
-      asstMsg('forge', 8, 'Iori finished — here is the result.'),
-      { type: 'hook:turnEnd', emitterId: 'forge', ts: 9 },
-    ];
+	it("keeps each forge turn in its own bubble, cards interleaved at event time", () => {
+		// forge: speaks → delegates to iori → iori replies → forge speaks again.
+		const events: StoredEvent[] = [
+			{
+				type: "user_input",
+				source: "user",
+				ts: 1,
+				payload: { content: "make a game" },
+			},
+			{ type: "hook:turnStart", emitterId: "forge", ts: 2 },
+			asstMsg("forge", 3, "I will ask iori to build the arena."),
+			{ type: "hook:turnEnd", emitterId: "forge", ts: 4 },
+			// inter-agent traffic (forge→iori, iori→forge) — reshaped to system rows.
+			{
+				type: "user_input",
+				source: "agent",
+				emitterId: "forge",
+				to: "iori",
+				ts: 5,
+				payload: { content: "build the arena" },
+			},
+			{
+				type: "user_input",
+				source: "agent",
+				emitterId: "iori",
+				to: "forge",
+				ts: 6,
+				payload: { content: "arena done" },
+			},
+			{ type: "hook:turnStart", emitterId: "forge", ts: 7 },
+			asstMsg("forge", 8, "Iori finished — here is the result."),
+			{ type: "hook:turnEnd", emitterId: "forge", ts: 9 },
+		];
 
-    const msgs = replay(events, 'forge');
+		const msgs = replay(events, "forge");
 
-    // Exactly: user, forge-turn-1, forge→iori card, iori→forge card, forge-turn-2.
-    expect(msgs.map((m) => m.role)).toEqual([
-      'user',
-      'assistant',
-      'system',
-      'system',
-      'assistant',
-    ]);
+		// Exactly: user, forge-turn-1, forge→iori card, iori→forge card, forge-turn-2.
+		expect(msgs.map((m) => m.role)).toEqual([
+			"user",
+			"assistant",
+			"system",
+			"system",
+			"assistant",
+		]);
 
-    // Forge's two turns are SEPARATE bubbles — not merged into one.
-    expect(msgs[1]!.text).toBe('I will ask iori to build the arena.');
-    expect(msgs[4]!.text).toBe('Iori finished — here is the result.');
-    expect(msgs[1]!.id).not.toBe(msgs[4]!.id);
+		// Forge's two turns are SEPARATE bubbles — not merged into one.
+		expect(msgs[1]?.text).toBe("I will ask iori to build the arena.");
+		expect(msgs[4]?.text).toBe("Iori finished — here is the result.");
+		expect(msgs[1]?.id).not.toBe(msgs[4]?.id);
 
-    // The cards sit BETWEEN the two forge turns (real event-time order), not
-    // piled at the tail.
-    expect(msgs[2]!.direction).toBe('outgoing');
-    expect(msgs[2]!.to).toBe('iori');
-    expect(msgs[3]!.direction).toBe('incoming');
-    expect(msgs[3]!.from).toBe('iori');
+		// The cards sit BETWEEN the two forge turns (real event-time order), not
+		// piled at the tail.
+		expect(msgs[2]?.direction).toBe("outgoing");
+		expect(msgs[2]?.to).toBe("iori");
+		expect(msgs[3]?.direction).toBe("incoming");
+		expect(msgs[3]?.from).toBe("iori");
 
-    // Render order is strictly ts-ascending (ChatPanel renders in array order).
-    const tss = msgs.map((m) => m.ts);
-    expect([...tss].sort((a, b) => a - b)).toEqual(tss);
-  });
+		// Render order is strictly ts-ascending (ChatPanel renders in array order).
+		const tss = msgs.map((m) => m.ts);
+		expect([...tss].sort((a, b) => a - b)).toEqual(tss);
+	});
 
-  it('does not merge a second forge turn into the first when no turnEnd fires', () => {
-    // Some providers omit hook:turnEnd; the turnStart commitPending boundary
-    // must still seal the prior turn.
-    const events: StoredEvent[] = [
-      { type: 'user_input', source: 'user', ts: 1, payload: { content: 'go' } },
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 2 },
-      asstMsg('forge', 3, 'first'),
-      { type: 'user_input', source: 'agent', emitterId: 'forge', to: 'mochi', ts: 4, payload: { content: 'do X' } },
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 5 },
-      asstMsg('forge', 6, 'second'),
-    ];
+	it("does not merge a second forge turn into the first when no turnEnd fires", () => {
+		// Some providers omit hook:turnEnd; the turnStart commitPending boundary
+		// must still seal the prior turn.
+		const events: StoredEvent[] = [
+			{ type: "user_input", source: "user", ts: 1, payload: { content: "go" } },
+			{ type: "hook:turnStart", emitterId: "forge", ts: 2 },
+			asstMsg("forge", 3, "first"),
+			{
+				type: "user_input",
+				source: "agent",
+				emitterId: "forge",
+				to: "mochi",
+				ts: 4,
+				payload: { content: "do X" },
+			},
+			{ type: "hook:turnStart", emitterId: "forge", ts: 5 },
+			asstMsg("forge", 6, "second"),
+		];
 
-    const msgs = replay(events, 'forge');
-    expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant', 'system', 'assistant']);
-    expect(msgs[1]!.text).toBe('first');
-    expect(msgs[3]!.text).toBe('second');
-  });
+		const msgs = replay(events, "forge");
+		expect(msgs.map((m) => m.role)).toEqual([
+			"user",
+			"assistant",
+			"system",
+			"assistant",
+		]);
+		expect(msgs[1]?.text).toBe("first");
+		expect(msgs[3]?.text).toBe("second");
+	});
 });
 
-
-describe('delegation inside an open parent turn', () => {
-  it('keeps outgoing child input and its tool result in the same parent reply', () => {
-    const events: StoredEvent[] = [
-      { type: 'user_input', source: 'user', ts: 100, payload: { content: 'delegate one inspection' } },
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 110 },
-      { type: 'hook:toolCall', emitterId: 'forge', ts: 120, payload: { name: 'delegate_to_subagent', callId: 'delegate1', args: {} } },
-      { type: 'user_input', source: 'agent', emitterId: 'forge', to: 'sino', ts: 130, payload: { content: 'inspect' } },
-      { type: 'hook:toolResult', emitterId: 'forge', ts: 140, payload: { name: 'delegate_to_subagent', callId: 'delegate1', ok: true, result: 'accepted' } },
-      asstMsg('forge', 150, 'Delegated.'),
-      { type: 'hook:turnEnd', emitterId: 'forge', ts: 160 },
-      { type: 'user_input', source: 'agent', emitterId: 'sino', to: 'forge', ts: 170, payload: { content: 'inspection complete' } },
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 180 },
-      asstMsg('forge', 190, 'Inspection complete.'),
-      { type: 'hook:turnEnd', emitterId: 'forge', ts: 200 },
-    ];
-    const restored = replay(events, 'forge');
-    const replies = restored.filter((message) => message.role === 'assistant');
-    expect(replies.map((message) => message.text)).toEqual(['Delegated.', 'Inspection complete.']);
-    expect(replies[0]?.toolCalls).toHaveLength(1);
-    expect(replies[0]?.toolCalls[0]?.status).not.toBe('error');
-    expect(replies.map((message) => message.ts)).toEqual([100, 190]);
-    expect(replay(events, 'forge').map(({ role, text, ts }) => ({ role, text, ts }))).toEqual(restored.map(({ role, text, ts }) => ({ role, text, ts })));
-  });
-  it('keeps real human input as a boundary for an interrupted parent', () => {
-    const restored = replay([
-      { type: 'user_input', source: 'user', ts: 10, payload: { content: 'first' } },
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 11 },
-      asstMsg('forge', 12, 'First reply.'),
-      { type: 'user_input', source: 'user', ts: 20, payload: { content: 'second' } },
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 21 },
-      asstMsg('forge', 22, 'Second reply.'),
-      { type: 'hook:turnEnd', emitterId: 'forge', ts: 23 },
-    ], 'forge');
-    expect(restored.filter((message) => message.role === 'assistant').map((message) => [message.text, message.ts])).toEqual([['First reply.', 10], ['Second reply.', 20]]);
-  });
+describe("delegation inside an open parent turn", () => {
+	it("keeps outgoing child input and its tool result in the same parent reply", () => {
+		const events: StoredEvent[] = [
+			{
+				type: "user_input",
+				source: "user",
+				ts: 100,
+				payload: { content: "delegate one inspection" },
+			},
+			{ type: "hook:turnStart", emitterId: "forge", ts: 110 },
+			{
+				type: "hook:toolCall",
+				emitterId: "forge",
+				ts: 120,
+				payload: {
+					name: "delegate_to_subagent",
+					callId: "delegate1",
+					args: {},
+				},
+			},
+			{
+				type: "user_input",
+				source: "agent",
+				emitterId: "forge",
+				to: "sino",
+				ts: 130,
+				payload: { content: "inspect" },
+			},
+			{
+				type: "hook:toolResult",
+				emitterId: "forge",
+				ts: 140,
+				payload: {
+					name: "delegate_to_subagent",
+					callId: "delegate1",
+					ok: true,
+					result: "accepted",
+				},
+			},
+			asstMsg("forge", 150, "Delegated."),
+			{ type: "hook:turnEnd", emitterId: "forge", ts: 160 },
+			{
+				type: "user_input",
+				source: "agent",
+				emitterId: "sino",
+				to: "forge",
+				ts: 170,
+				payload: { content: "inspection complete" },
+			},
+			{ type: "hook:turnStart", emitterId: "forge", ts: 180 },
+			asstMsg("forge", 190, "Inspection complete."),
+			{ type: "hook:turnEnd", emitterId: "forge", ts: 200 },
+		];
+		const restored = replay(events, "forge");
+		const replies = restored.filter((message) => message.role === "assistant");
+		expect(replies.map((message) => message.text)).toEqual([
+			"Delegated.",
+			"Inspection complete.",
+		]);
+		expect(replies[0]?.toolCalls).toHaveLength(1);
+		expect(replies[0]?.toolCalls[0]?.status).not.toBe("error");
+		expect(replies.map((message) => message.ts)).toEqual([100, 190]);
+		expect(
+			replay(events, "forge").map(({ role, text, ts }) => ({ role, text, ts })),
+		).toEqual(restored.map(({ role, text, ts }) => ({ role, text, ts })));
+	});
+	it("keeps real human input as a boundary for an interrupted parent", () => {
+		const restored = replay(
+			[
+				{
+					type: "user_input",
+					source: "user",
+					ts: 10,
+					payload: { content: "first" },
+				},
+				{ type: "hook:turnStart", emitterId: "forge", ts: 11 },
+				asstMsg("forge", 12, "First reply."),
+				{
+					type: "user_input",
+					source: "user",
+					ts: 20,
+					payload: { content: "second" },
+				},
+				{ type: "hook:turnStart", emitterId: "forge", ts: 21 },
+				asstMsg("forge", 22, "Second reply."),
+				{ type: "hook:turnEnd", emitterId: "forge", ts: 23 },
+			],
+			"forge",
+		);
+		expect(
+			restored
+				.filter((message) => message.role === "assistant")
+				.map((message) => [message.text, message.ts]),
+		).toEqual([
+			["First reply.", 10],
+			["Second reply.", 20],
+		]);
+	});
 });
 
-it('preserves public failure details on history replay without turning a tool failure into cancellation', () => {
-  const error = 'protocol: tool "example" failed 2 consecutive times: {"content":"Invalid arguments…';
-  const messages = replay([
-    { type: 'hook:turnStart', emitterId: 'forge', ts: 1, payload: {} },
-    asstMsg('forge', 2, 'Working'),
-    { type: 'hook:turnEnd', emitterId: 'forge', ts: 3, payload: { error } },
-  ], 'forge');
-  const assistant = messages.find((message) => message.role === 'assistant');
-  expect(assistant).toMatchObject({ status: 'error', errorMessage: error, turnAborted: false });
-  const cancelled = replay([
-    { type: 'hook:turnStart', emitterId: 'forge', ts: 1, payload: {} },
-    asstMsg('forge', 2, 'Working'),
-    { type: 'hook:turnEnd', emitterId: 'forge', ts: 3, payload: { aborted: true } },
-  ], 'forge');
-  expect(cancelled.find((message) => message.role === 'assistant')).toMatchObject({ turnAborted: true, errorMessage: 'Turn interrupted' });
+it("preserves public failure details on history replay without turning a tool failure into cancellation", () => {
+	const error =
+		'protocol: tool "example" failed 2 consecutive times: {"content":"Invalid arguments…';
+	const messages = replay(
+		[
+			{ type: "hook:turnStart", emitterId: "forge", ts: 1, payload: {} },
+			asstMsg("forge", 2, "Working"),
+			{ type: "hook:turnEnd", emitterId: "forge", ts: 3, payload: { error } },
+		],
+		"forge",
+	);
+	const assistant = messages.find((message) => message.role === "assistant");
+	expect(assistant).toMatchObject({
+		status: "error",
+		errorMessage: error,
+		turnAborted: false,
+	});
+	const cancelled = replay(
+		[
+			{ type: "hook:turnStart", emitterId: "forge", ts: 1, payload: {} },
+			asstMsg("forge", 2, "Working"),
+			{
+				type: "hook:turnEnd",
+				emitterId: "forge",
+				ts: 3,
+				payload: { aborted: true },
+			},
+		],
+		"forge",
+	);
+	expect(
+		cancelled.find((message) => message.role === "assistant"),
+	).toMatchObject({ turnAborted: true, errorMessage: "Turn interrupted" });
 });
 
-it('retains failures before the first assistant output without creating empty successful turns', () => {
-  for (const payload of [{ error: 'InputValidationError: missing value' }, { aborted: true }]) {
-    const messages = replay([
-      { type: 'hook:turnStart', emitterId: 'forge', ts: 1, payload: {} },
-      { type: 'hook:turnEnd', emitterId: 'forge', ts: 2, payload },
-    ], 'forge');
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toMatchObject({ status: 'error', turnAborted: 'aborted' in payload });
-    expect(messages[0]?.errorMessage).toBe('error' in payload ? payload.error : 'Turn interrupted');
-  }
-  expect(replay([
-    { type: 'hook:turnStart', emitterId: 'forge', ts: 1, payload: {} },
-    { type: 'hook:turnEnd', emitterId: 'forge', ts: 2, payload: {} },
-  ], 'forge')).toEqual([]);
+it("retains failures before the first assistant output without creating empty successful turns", () => {
+	for (const payload of [
+		{ error: "InputValidationError: missing value" },
+		{ aborted: true },
+	]) {
+		const messages = replay(
+			[
+				{ type: "hook:turnStart", emitterId: "forge", ts: 1, payload: {} },
+				{ type: "hook:turnEnd", emitterId: "forge", ts: 2, payload },
+			],
+			"forge",
+		);
+		expect(messages).toHaveLength(1);
+		expect(messages[0]).toMatchObject({
+			status: "error",
+			turnAborted: "aborted" in payload,
+		});
+		expect(messages[0]?.errorMessage).toBe(
+			"error" in payload ? payload.error : "Turn interrupted",
+		);
+	}
+	expect(
+		replay(
+			[
+				{ type: "hook:turnStart", emitterId: "forge", ts: 1, payload: {} },
+				{ type: "hook:turnEnd", emitterId: "forge", ts: 2, payload: {} },
+			],
+			"forge",
+		),
+	).toEqual([]);
 });

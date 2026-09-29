@@ -15,125 +15,124 @@
 // ── StoredEvent — raw EventBus event shape (@forgeax/orchestrator native) ──
 
 export interface StoredEvent {
-  type: string;
-  ts?: number;
-  source?: string;
-  to?: string;
-  emitterId?: string;
-  handoff?: string;
-  payload?: Record<string, unknown>;
-  [key: string]: unknown;
+	type: string;
+	ts?: number;
+	source?: string;
+	to?: string;
+	emitterId?: string;
+	handoff?: string;
+	payload?: Record<string, unknown>;
+	[key: string]: unknown;
 }
 
 // ── RendererMessage union ──
 
 export interface RendererMessageBase {
-  kind: string;
-  agent: string;
-  timestamp: number;
+	kind: string;
+	agent: string;
+	timestamp: number;
 }
 
 export type RendererMessage =
-  | UserInputMessage
-  | AssistantCompleteMessage
-  | ToolCallMessage
-  | ToolResultMessage
-  | SystemMessage;
+	| UserInputMessage
+	| AssistantCompleteMessage
+	| ToolCallMessage
+	| ToolResultMessage
+	| SystemMessage;
 
 export interface UserInputMessage extends RendererMessageBase {
-  kind: 'user_input';
-  text: string;
-  isSteer: boolean;
-  source: string;
-  /** checkpoint 回退点外键(payload.msgId,server 注入;旧事件无)。 */
-  msgId?: string;
-  /** Path-only (or live base64) attachments from user_input payload. */
-  attachments?: Array<{
-    kind?: string;
-    name?: string;
-    mediaType?: string;
-    path?: string;
-    data?: string;
-  }>;
+	kind: "user_input";
+	text: string;
+	isSteer: boolean;
+	source: string;
+	/** checkpoint 回退点外键(payload.msgId,server 注入;旧事件无)。 */
+	msgId?: string;
+	/** Path-only (or live base64) attachments from user_input payload. */
+	attachments?: Array<{
+		kind?: string;
+		name?: string;
+		mediaType?: string;
+		path?: string;
+		data?: string;
+	}>;
 }
 
 export interface AssistantCompleteMessage extends RendererMessageBase {
-  kind: 'assistant_complete';
-  text: string;
-  thinking: string;
-  /** Host-labelled user-facing progress, distinct from private reasoning. */
-  publicSummary?: string;
+	kind: "assistant_complete";
+	text: string;
+	thinking: string;
+	/** Host-labelled user-facing progress, distinct from private reasoning. */
+	publicSummary?: string;
 }
 
-export type ToolStatus = 'pending' | 'running' | 'done' | 'error';
+export type ToolStatus = "pending" | "running" | "done" | "error";
 
 export interface ToolCallMessage extends RendererMessageBase {
-  kind: 'tool_call';
-  id: string;
-  name: string;
-  status: ToolStatus;
-  /** True when the CLI permission side-channel owns this interaction. */
-  permissionPrompt?: boolean;
-  visualDisplay?: string;
-  args: unknown;
-  resultDisplay?: string;
-  resultContent?: string;
-  /** Complete structured result for protocol consumers; never truncated. */
-  resultData?: unknown;
-  /** Full untruncated result for progressive expansion (when resultContent is truncated). */
-  fullResultContent?: string;
-  durationMs?: number;
-  subagentId?: string;
+	kind: "tool_call";
+	id: string;
+	name: string;
+	status: ToolStatus;
+	/** True when the CLI permission side-channel owns this interaction. */
+	permissionPrompt?: boolean;
+	visualDisplay?: string;
+	args: unknown;
+	resultDisplay?: string;
+	resultContent?: string;
+	/** Complete structured result for protocol consumers; never truncated. */
+	resultData?: unknown;
+	/** Full untruncated result for progressive expansion (when resultContent is truncated). */
+	fullResultContent?: string;
+	durationMs?: number;
+	subagentId?: string;
 }
 
 export interface ToolResultMessage extends RendererMessageBase {
-  kind: 'tool_result';
-  callId: string;
-  name: string;
-  visualDisplay?: string;
-  content: string;
-  /** Full untruncated content — only set when content was truncated. */
-  fullContent?: string;
-  /** Complete structured result from the hook payload. */
-  resultData?: unknown;
-  durationMs: number;
-  /** True when the tool execution failed / was aborted. */
-  isError?: boolean;
+	kind: "tool_result";
+	callId: string;
+	name: string;
+	visualDisplay?: string;
+	content: string;
+	/** Full untruncated content — only set when content was truncated. */
+	fullContent?: string;
+	/** Complete structured result from the hook payload. */
+	resultData?: unknown;
+	durationMs: number;
+	/** True when the tool execution failed / was aborted. */
+	isError?: boolean;
 }
 
 export interface SystemMessage extends RendererMessageBase {
-  delegation?: import('./delegation-status').DelegationSnapshot;
-  kind: 'system';
-  /** Stable public lifecycle row identity. */
-  compactionId?: string;
-  turnId?: string;
-  source: string;
-  text: string;
-  visualDisplay?: string;
-  level?: 'info' | 'warning' | 'error';
-  /**
-   * Direction of inter-agent traffic. Set by the fallback path for any non-hook
-   * event with content. `to` field decides: present → incoming, absent → outgoing.
-   * UI decides visual encoding.
-   */
-  direction?: 'incoming' | 'outgoing';
-  /** Sender agent id, copied verbatim from `event.emitterId`. */
-  from?: string;
-  /** Recipient agent id (only present when direction === 'incoming'). */
-  to?: string;
+	delegation?: import("./delegation-status").DelegationSnapshot;
+	kind: "system";
+	/** Stable public lifecycle row identity. */
+	compactionId?: string;
+	source: string;
+	text: string;
+	visualDisplay?: string;
+	level?: "info" | "warning" | "error";
+	/**
+	 * Direction of inter-agent traffic. Set by the fallback path for any non-hook
+	 * event with content. `to` field decides: present → incoming, absent → outgoing.
+	 * UI decides visual encoding.
+	 */
+	direction?: "incoming" | "outgoing";
+	/** Sender agent id, copied verbatim from `event.emitterId`. */
+	from?: string;
+	/** Recipient agent id (only present when direction === 'incoming'). */
+	to?: string;
 }
 
 // ── CompletedTurn ──
 
 export interface CompletedTurn {
-  agent: string;
-  messages: RendererMessage[];
-  timestamp: number;
-  /** The kernel ended this turn by cancellation or error. */
-  interrupted?: boolean;
-  /** Preserve the public terminal cause for live/replay parity. */
-  error?: string;
-  aborted?: boolean;
-  /** When true, this turn is still being built (live streaming). commitTurn replaces it. */
-  _draft?: boolean;
+	agent: string;
+	messages: RendererMessage[];
+	timestamp: number;
+	/** The kernel ended this turn by cancellation or error. */
+	interrupted?: boolean;
+	/** Preserve the public terminal cause for live/replay parity. */
+	error?: string;
+	aborted?: boolean;
+	/** When true, this turn is still being built (live streaming). commitTurn replaces it. */
+	_draft?: boolean;
 }

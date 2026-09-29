@@ -1,58 +1,90 @@
-import { onSessionEvent } from '../../session-bridge';
-import { Popover, PopoverTrigger, PopoverContent } from '@forgeax/interface/components/ui/popover';
-import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useSyncExternalStore } from 'react';
+import { agentCatalogUrl } from "@forgeax/agents/lib/agent-api-url";
+import { resolveNaming } from "@forgeax/agents/lib/agent-name";
+import {
+	type AgentModelState,
+	APP_EVENTS,
+	advanceComposerTextRevision,
+	appendComposerText,
+	appendComposerTextOnce,
+	buildAssetPill,
+	buildSlashPill,
+	checkModelReady,
+	clearComposerPendingInsert,
+	clearComposerPendingText,
+	type ExtensionInfo,
+	emitDeepLink,
+	encodePill,
+	getAgentModel,
+	getLastModel,
+	getLocale,
+	initialSessionCatalogModel,
+	listExtensions,
+	listModels,
+	pickLang,
+	preferredCatalogModel,
+	recordLastModel,
+	requestComposerInsert,
+	resetActiveAgentModelToProviderDefault,
+	setAgentModels,
+	useComposerPendingInsert,
+	useComposerPendingText,
+	useHost,
+	usePendingPermission,
+	useShellStore,
+	useTranslation,
+} from "@forgeax/chat/runtime";
+import {
+	ArrowUp,
+	AtSign,
+	ChevronDown,
+	Pencil,
+	Square,
+	SquareChartGantt,
+	Trash2,
+	Unplug,
+	Upload,
+	Zap,
+} from "lucide-react";
+import {
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react";
+import { useModelLabel } from "../../model-label";
+import { useActiveStreaming, useChatStore } from "../../session-store";
+import {
+	buildPastedFilePill,
+	RichInput,
+	type RichInputHandle,
+} from "../Composer/RichInput";
+import { ModelPicker } from "../ModelPicker/ModelPicker";
+import { AgentIdentityAvatar } from "./AgentIdentityAvatar";
+import type { AgentIdentity } from "./agent-identity";
+import {
+	agentMatches,
+	avatarInitialsForAgents,
+	preferredAgentKeyForPage,
+	queuedSendOptions,
+	reconcileSummonSelection,
+	resolveSummonAgentId,
+} from "./agent-key";
+import ContextRing from "./ContextRing";
+import { runCliPrewarm } from "./cli-prewarm";
+import {
+	clearComposerDraft,
+	readComposerDraft,
+	writeComposerDraft,
+} from "./composer-draft";
+import { useSummonSelection } from "./summon-selection";
 
-
-import { AtSign, SquareChartGantt, Upload, ChevronDown, ArrowUp, Unplug, Square, Pencil, Trash2 } from 'lucide-react';
-import { useTranslation, getLocale } from '@forgeax/interface/i18n';
-import { agentCatalogUrl } from '@forgeax/agents/lib/agent-api-url';
-import { useShellStore } from '@forgeax/interface/store';
-import { useHost } from '@forgeax/interface/core/app-shell';
-import { emitDeepLink } from '@forgeax/interface/lib/deep-link-bus';
-import {
-  checkModelReady,
-  initialSessionCatalogModel,
-  passiveSessionCatalogModel,
-  resetActiveAgentModelToProviderDefault,
-} from '@forgeax/interface/lib/model-route';
-import { APP_EVENTS } from '@forgeax/interface/lib/storageKeys';
-import { useChatStore, useActiveStreaming } from '../../session-store';
-import { useModelLabel } from '@forgeax/interface/lib/model';
-import { resolveNaming } from '@forgeax/agents/lib/agent-name';
-import { listExtensions, pickLang, type ExtensionInfo } from '@forgeax/interface/lib/extension-api';
-import { buildSlashPill, encodePill } from '@forgeax/interface/lib/composer-bridge';
-import { RichInput, buildPastedFilePill, type RichInputHandle } from '../Composer/RichInput';
-import {
-  buildAssetPill,
-  requestComposerInsert,
-  useComposerPendingInsert,
-  clearComposerPendingInsert,
-  appendComposerText,
-  appendComposerTextOnce,
-  advanceComposerTextRevision,
-  useComposerPendingText,
-  clearComposerPendingText,
-} from '@forgeax/interface/lib/composer-bridge';
-import {
-  getAgentModel,
-  listModels,
-  setAgentModels,
-  type AgentModelState,
-} from '@forgeax/interface/lib/model-config';
-import { getLastModel, recordLastModel } from '@forgeax/interface/lib/model-prefs';
-import { ModelPicker } from '@forgeax/interface/components/ModelPicker';
-import ContextRing from './ContextRing';
-import { usePendingPermission } from '@forgeax/interface/lib/permission-stream';
-import { runCliPrewarm } from './cli-prewarm';
-import { agentMatches, avatarInitialsForAgents, preferredAgentKeyForPage, reconcileSummonSelection, queuedSendOptions, resolveSummonAgentId } from './agent-key';
-import { AgentIdentityAvatar } from './AgentIdentityAvatar';
-import type { AgentIdentity } from './agent-identity';
-import { useSummonSelection } from './summon-selection';
-import { clearComposerDraft, readComposerDraft, writeComposerDraft } from './composer-draft';
 interface CliProviderInfo {
-  id: string;
-  displayName: string;
-  health: { ok: boolean; detail?: string };
+	id: string;
+	displayName: string;
+	health: { ok: boolean; detail?: string };
 }
 
 // 2026-05-20 — `cb-mbsel`（模型选择按钮）从「kind=model-binding 插件预览 +
@@ -78,13 +110,13 @@ interface CliProviderInfo {
 // listExtensions('skill') — that only returns kind=skill plugins and drops
 // the majority of slash-triggered skills declared on other extension packs.
 interface BusSkillRow {
-  extensionId: string;
-  displayName: string;
-  descZh: string;
-  skillId: string;
-  trigger: string;
-  /** Distinguishes bus skills from server builtin commands in the slash menu. */
-  source: 'skill' | 'command';
+	extensionId: string;
+	displayName: string;
+	descZh: string;
+	skillId: string;
+	trigger: string;
+	/** Distinguishes bus skills from server builtin commands in the slash menu. */
+	source: "skill" | "command";
 }
 
 // P3.46 — agent mention row for the @ menu. Mirrors the P3.45 Sparkles popover
@@ -93,30 +125,30 @@ interface BusSkillRow {
 // The @ button was the 2nd remaining 即将上线 placeholder in composer-bar;
 // this turns it into a working insertion source.
 interface AgentMentionRow {
-  id: string;
-  name: string;
-  naming?: { title: string; sub: string };
-  role: string;
-  avatar: string;
-  isMain: boolean;
-  inBus: boolean;
-  // P3.48 — bus plugin id (e.g. `@forgeax-plugin/agent-cc-coder`) when inBus,
-  // enabling per-row Bus admin deep-link via pendingBusExpandId pipeline.
-  busExtensionId?: string;
+	id: string;
+	name: string;
+	naming?: { title: string; sub: string };
+	role: string;
+	avatar: string;
+	isMain: boolean;
+	inBus: boolean;
+	// P3.48 — bus plugin id (e.g. `@forgeax-plugin/agent-cc-coder`) when inBus,
+	// enabling per-row Bus admin deep-link via pendingBusExpandId pipeline.
+	busExtensionId?: string;
 }
 
 // P2.7d — bus cli-provider ids follow `@forgeax-plugin/cli-{providerId}` (see
 // packages/marketplace/plugins/cli-*/forgeax-plugin.json). Strip the prefix so
 // we can cross-reference with the runtime /api/cli-providers id list.
-const BUS_CLI_ID_PREFIX = '@forgeax-plugin/cli-';
+const BUS_CLI_ID_PREFIX = "@forgeax-plugin/cli-";
 
 // P2.7g — entry in the bus cli-provider map. Holds enough of the plugin
 // manifest to render a description mini-strip under each dropdown row. We
 // keep the full ExtensionInfo so future extensions (manifest version /
 // experimental flag etc.) don't need another refetch.
 interface BusCliEntry {
-  full: ExtensionInfo;
-  descZh: string;
+	full: ExtensionInfo;
+	descZh: string;
 }
 
 // Hard-coded fallback display names so a persisted providerOverride doesn't
@@ -124,13 +156,13 @@ interface BusCliEntry {
 // /api/cli-providers populates the real list. Keep keys in sync with the
 // known provider ids in server/src/cli-providers/.
 const PROVIDER_DISPLAY_FALLBACK: Record<string, string> = {
-  'forgeax': 'ForgeaX CLI',
-  'claude-code': 'the reference agent CLI',
-  'codex': 'OpenAI Codex',
-  'cursor-agent': 'Cursor',
-  'codebuddy': 'a peer agent CLI',
-  'kimi-code': 'Kimi Code',
-  'deepseek-harness': 'DeepSeek Harness',
+	forgeax: "ForgeaX CLI",
+	"claude-code": "the reference agent CLI",
+	codex: "OpenAI Codex",
+	"cursor-agent": "Cursor",
+	codebuddy: "a peer agent CLI",
+	"kimi-code": "Kimi Code",
+	"deepseek-harness": "DeepSeek Harness",
 };
 
 // Concise one-line description per provider/kernel id → i18n key. Every dropdown
@@ -138,14 +170,14 @@ const PROVIDER_DISPLAY_FALLBACK: Record<string, string> = {
 // long for a picker). forgeax/forgeax-core share one (they are the same thing —
 // the standalone 'forgeax-core' kernel row is hidden, see fetchProviders filter).
 const PROVIDER_DESC_I18N: Record<string, string> = {
-  'forgeax': 'composer.cliDescForgeax',
-  'forgeax-core': 'composer.cliDescForgeax',
-  'claude-code': 'composer.cliDescClaudeCode',
-  'codex': 'composer.cliDescCodex',
-  'cursor-agent': 'composer.cliDescCursor',
-  'codebuddy': 'composer.cliDescCodebuddy',
-  'kimi-code': 'composer.cliDescKimiCode',
-  'deepseek-harness': 'composer.cliDescDeepSeekHarness',
+	forgeax: "composer.cliDescForgeax",
+	"forgeax-core": "composer.cliDescForgeax",
+	"claude-code": "composer.cliDescClaudeCode",
+	codex: "composer.cliDescCodex",
+	"cursor-agent": "composer.cliDescCursor",
+	codebuddy: "composer.cliDescCodebuddy",
+	"kimi-code": "composer.cliDescKimiCode",
+	"deepseek-harness": "composer.cliDescDeepSeekHarness",
 };
 
 // Provider (model-source) switching is owned by Settings › Providers now — it's
@@ -171,19 +203,30 @@ const SHOW_CHAT_PROVIDER_SWITCHER = false;
 // reset value, instead of a hit on the previous provider's stale model (the
 // "切了 provider 但模型还停在 gpt" regression).
 const agentModelCache = new Map<string, AgentModelState | null>();
-const CLI_CATALOG_IDS = new Set(['claude-code', 'codex', 'cursor-agent', 'codebuddy', 'kimi-code']);
+const CLI_CATALOG_IDS = new Set([
+	"claude-code",
+	"codex",
+	"cursor-agent",
+	"codebuddy",
+	"kimi-code",
+]);
 /** Catalog-provider id in effect for a providerOverride (null = native forgeax). */
 const catalogOf = (providerOverride: string | null): string | null =>
-  providerOverride && CLI_CATALOG_IDS.has(providerOverride) ? providerOverride : null;
-const agentModelKey = (sid: string, agentPath: string, providerId: string | null): string =>
-  `${sid}\u0000${agentPath}\u0000${providerId ?? 'forgeax'}`;
+	providerOverride && CLI_CATALOG_IDS.has(providerOverride)
+		? providerOverride
+		: null;
+const agentModelKey = (
+	sid: string,
+	agentPath: string,
+	providerId: string | null,
+): string => `${sid}\u0000${agentPath}\u0000${providerId ?? "forgeax"}`;
 
 // iter-107: enumerate the placeholder-button hint ids. Centralizes the
 // strings so typos become compile errors instead of silently breaking the
 // `hintFor === 'at'` checks, and makes "where can a future button slot in"
 // obvious. Keep these short — they only flow through component-local state.
-const CB_HINT = { AT: 'at', SLASH: 'slash', IMG: 'img' } as const;
-type CbHintId = typeof CB_HINT[keyof typeof CB_HINT];
+const CB_HINT = { AT: "at", SLASH: "slash", IMG: "img" } as const;
+type CbHintId = (typeof CB_HINT)[keyof typeof CB_HINT];
 
 // ── 文件粘贴/拖拽/选择:文本类文件判定 ──
 // 图片和 PDF 走 attachments(kind:'image'/'document' → 内核组 image/document block),
@@ -191,1854 +234,2492 @@ type CbHintId = typeof CB_HINT[keyof typeof CB_HINT];
 // kind:'file' 附件,编排层落盘 uploads/ 换成路径注记,由 agent 用工具解析。
 // MIME 常缺(拖拽本地 .ts/.toml 等浏览器给空 type),所以 MIME 判不出时兜底看扩展名。
 const ATTACH_FILE_MAX_BYTES = 2 * 1024 * 1024;
-const ATTACH_FILE_MAX_LABEL = '2MB';
+const ATTACH_FILE_MAX_LABEL = "2MB";
 const TEXT_MIME_SET = new Set([
-  'application/json', 'application/xml', 'application/javascript', 'application/typescript',
-  'application/x-yaml', 'application/yaml', 'application/toml', 'application/sql',
-  'application/x-sh', 'application/xhtml+xml', 'image/svg+xml',
+	"application/json",
+	"application/xml",
+	"application/javascript",
+	"application/typescript",
+	"application/x-yaml",
+	"application/yaml",
+	"application/toml",
+	"application/sql",
+	"application/x-sh",
+	"application/xhtml+xml",
+	"image/svg+xml",
 ]);
 const TEXT_FILE_EXTS = [
-  'txt', 'md', 'markdown', 'json', 'jsonc', 'json5', 'yaml', 'yml', 'toml', 'xml', 'html', 'htm',
-  'css', 'scss', 'less', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'py', 'rb', 'go', 'rs', 'java',
-  'kt', 'c', 'h', 'cpp', 'hpp', 'cc', 'cs', 'swift', 'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat',
-  'sql', 'csv', 'tsv', 'ini', 'cfg', 'conf', 'env', 'log', 'svg', 'vue', 'svelte', 'astro', 'lua',
-  'php', 'pl', 'r', 'dart', 'scala', 'clj', 'ex', 'exs', 'erl', 'hs', 'zig', 'gd', 'glsl', 'wgsl',
-  'vert', 'frag', 'gitignore', 'dockerfile', 'makefile', 'lock', 'patch', 'diff',
+	"txt",
+	"md",
+	"markdown",
+	"json",
+	"jsonc",
+	"json5",
+	"yaml",
+	"yml",
+	"toml",
+	"xml",
+	"html",
+	"htm",
+	"css",
+	"scss",
+	"less",
+	"js",
+	"jsx",
+	"ts",
+	"tsx",
+	"mjs",
+	"cjs",
+	"py",
+	"rb",
+	"go",
+	"rs",
+	"java",
+	"kt",
+	"c",
+	"h",
+	"cpp",
+	"hpp",
+	"cc",
+	"cs",
+	"swift",
+	"sh",
+	"bash",
+	"zsh",
+	"fish",
+	"ps1",
+	"bat",
+	"sql",
+	"csv",
+	"tsv",
+	"ini",
+	"cfg",
+	"conf",
+	"env",
+	"log",
+	"svg",
+	"vue",
+	"svelte",
+	"astro",
+	"lua",
+	"php",
+	"pl",
+	"r",
+	"dart",
+	"scala",
+	"clj",
+	"ex",
+	"exs",
+	"erl",
+	"hs",
+	"zig",
+	"gd",
+	"glsl",
+	"wgsl",
+	"vert",
+	"frag",
+	"gitignore",
+	"dockerfile",
+	"makefile",
+	"lock",
+	"patch",
+	"diff",
 ];
-const TEXT_EXT_RE = new RegExp(`\\.(${TEXT_FILE_EXTS.join('|')})$`, 'i');
+const TEXT_EXT_RE = new RegExp(`\\.(${TEXT_FILE_EXTS.join("|")})$`, "i");
 function isTextLikeFile(f: File): boolean {
-  if (f.type.startsWith('text/')) return true;
-  if (TEXT_MIME_SET.has(f.type)) return true;
-  return TEXT_EXT_RE.test(f.name);
+	if (f.type.startsWith("text/")) return true;
+	if (TEXT_MIME_SET.has(f.type)) return true;
+	return TEXT_EXT_RE.test(f.name);
 }
 
 function compactModelLabel(label: string): string {
-  const trimmed = label.trim();
-  const slugOpus = trimmed.match(/claude[-_\s]+opus[-_\s]+([\d.]+)(?:[-_\s]+(\d))?/i);
-  if (slugOpus) return `Opus ${slugOpus[1]}${slugOpus[2] ? `.${slugOpus[2]}` : ''}`;
-  return trimmed
-    .replace(/^claude[-_\s]+/i, '')
-    .replace(/\bclaude\b\s*/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+	const trimmed = label.trim();
+	const slugOpus = trimmed.match(
+		/claude[-_\s]+opus[-_\s]+([\d.]+)(?:[-_\s]+(\d))?/i,
+	);
+	if (slugOpus)
+		return `Opus ${slugOpus[1]}${slugOpus[2] ? `.${slugOpus[2]}` : ""}`;
+	return trimmed
+		.replace(/^claude[-_\s]+/i, "")
+		.replace(/\bclaude\b\s*/i, "")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
-function compactProviderLabel(label: string, providerId: string | null): string {
-  if (!providerId || providerId === 'forgeax' || /^forgeax\b/i.test(label)) return 'FX';
-  if (/claude/i.test(label) || /claude/i.test(providerId)) return 'Claude';
-  if (/codex|openai/i.test(label) || /codex|openai/i.test(providerId)) return 'Codex';
-  if (/cursor/i.test(label) || /cursor/i.test(providerId)) return 'Cursor';
-  return label.replace(/\b(code|cli|agent)\b/gi, '').trim() || providerId;
+function compactProviderLabel(
+	label: string,
+	providerId: string | null,
+): string {
+	if (!providerId || providerId === "forgeax" || /^forgeax\b/i.test(label))
+		return "FX";
+	if (/claude/i.test(label) || /claude/i.test(providerId)) return "Claude";
+	if (/codex|openai/i.test(label) || /codex|openai/i.test(providerId))
+		return "Codex";
+	if (/cursor/i.test(label) || /cursor/i.test(providerId)) return "Cursor";
+	return label.replace(/\b(code|cli|agent)\b/gi, "").trim() || providerId;
 }
 
 /** Same idle catalog video as Settings › Agents; initials only if rules are missing. */
-function mentionIdentity(agent: AgentMentionRow, initials: string): AgentIdentity {
-  return {
-    id: agent.id,
-    name: resolveNaming(agent).title,
-    initials,
-    ...(agent.avatar?.trim() ? { avatar: agent.avatar.trim() } : {}),
-    accent: 'transparent',
-  };
+function mentionIdentity(
+	agent: AgentMentionRow,
+	initials: string,
+): AgentIdentity {
+	return {
+		id: agent.id,
+		name: resolveNaming(agent).title,
+		initials,
+		...(agent.avatar?.trim() ? { avatar: agent.avatar.trim() } : {}),
+		accent: "transparent",
+	};
 }
 
 function MentionAvatar({
-  agent,
-  initials,
-  size,
-  className,
+	agent,
+	initials,
+	size,
+	className,
 }: {
-  agent: AgentMentionRow;
-  initials: string;
-  size: number;
-  className?: string;
+	agent: AgentMentionRow;
+	initials: string;
+	size: number;
+	className?: string;
 }) {
-  return (
-    <AgentIdentityAvatar
-      identity={mentionIdentity(agent, initials)}
-      agentId={agent.id}
-      size={size}
-      className={className}
-      mode="idle"
-      shape="circle"
-    />
-  );
+	return (
+		<AgentIdentityAvatar
+			identity={mentionIdentity(agent, initials)}
+			agentId={agent.id}
+			size={size}
+			className={className}
+			mode="idle"
+			shape="circle"
+		/>
+	);
 }
 
 export function Composer({
-  highlight = false,
-  specialistSummonEnabled = true,
-  delegatedWorkRunning = false,
+	highlight = false,
+	specialistSummonEnabled = true,
 }: {
-  highlight?: boolean;
-  /** A direct sub-agent thread cannot delegate again through the root composer. */
-  specialistSummonEnabled?: boolean;
-  /** A live outgoing handoff keeps Stop available after the owner replies. */
-  delegatedWorkRunning?: boolean;
+	highlight?: boolean;
+	/** A direct sub-agent thread cannot delegate again through the root composer. */
+	specialistSummonEnabled?: boolean;
 } = {}) {
-  const { t, i18n } = useTranslation();
-  const host = useHost();
-  const activities = useSyncExternalStore(host.activities.subscribe, host.activities.getSnapshot, host.activities.getSnapshot);
-  const pages = useSyncExternalStore(host.pages.subscribe, host.pages.getSnapshot, host.pages.getSnapshot);
-  const [text, setText] = useState(() => {
-    const shell = useShellStore.getState();
-    const sid = shell.activeSid;
-    const agentId = sid ? (shell.tabs.find((tab) => tab.sid === sid)?.agentId ?? null) : null;
-    return readComposerDraft(sid, agentId);
-  });
-  const textRef = useRef(text);
-  textRef.current = text;
-  const sendMessage = useChatStore((s) => s.sendMessage);
-  const cancelStream = useChatStore((s) => s.cancelStream);
-  const isStreaming = useActiveStreaming();
-  // Message queue (Cursor-style): while streaming, sends land here and flush
-  // one-per-turn on hook:turnEnd. Keyed by `${sid}::${agentId}` in the store.
-  const enqueueMessage = useChatStore((s) => s.enqueueMessage);
-  const dequeueMessage = useChatStore((s) => s.dequeueMessage);
-  const clearQueue = useChatStore((s) => s.clearQueue);
-  const queuedMessages = useChatStore((s) => s.queuedMessages);
-  const providerOverride = useShellStore((s) => s.providerOverride);
-  const setProviderOverride = useShellStore((s) => s.setProviderOverride);
-  // Derive from active tab's agent binding (first-class key, post-PR #9).
-  // null when the active tab hasn't been pinned yet (fresh tab pre-
-  // AgentSwitcher fetch).
-  const activeAgent = useShellStore(
-    (s) => s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null,
-  );
-  const activeSid = useShellStore((s) => s.activeSid);
-  const composerOwnerKey = `${activeSid ?? ''}\u0000${activeAgent ?? ''}`;
-  const [boundComposerOwnerKey, setBoundComposerOwnerKey] = useState(composerOwnerKey);
-  if (boundComposerOwnerKey !== composerOwnerKey) {
-    const [prevSid, prevAgent] = boundComposerOwnerKey.split('\u0000');
-    if (prevSid && prevAgent) writeComposerDraft(prevSid, prevAgent, text);
-    setBoundComposerOwnerKey(composerOwnerKey);
-    setText(readComposerDraft(activeSid, activeAgent));
-  }
-  // P8 — while a claude-code permission card is up the turn is *blocked waiting
-  // on the user*, not idle. Sending now would cancel that turn (SIGTERM →
-  // `claude exited 143`) yet leave the card answering a dead turn. So we gate
-  // send/queue/interrupt on "no pending permission for this session" and nudge
-  // the user to resolve the card first. Stop (cancelStream) stays available.
-  const pendingPermission = usePendingPermission(activeSid);
-  const [permFlash, setPermFlash] = useState(false);
-  useEffect(() => {
-    if (!permFlash) return;
-    const id = setTimeout(() => setPermFlash(false), 2600);
-    return () => clearTimeout(id);
-  }, [permFlash]);
-  // Card resolved → drop any stale "处理授权" nudge.
-  useEffect(() => {
-    if (!pendingPermission) setPermFlash(false);
-  }, [pendingPermission]);
-  // P3.36 deep-link slot — cli dropdown row's bus pill into Bus admin.
-  // Reuses the pendingBusExpandId pipeline (P2.7f Sidebar / P3.32 AgentsPanel /
-  // P3.34 ChatPanel agent bar). Set BEFORE switching mode so BusAdminPanel's
-  // mount-time consumer reads non-null on first render.
-  const openOverlay = useShellStore((s) => s.openOverlay);
-  // 2026-05-20 — cb-mbsel deep-link 到 BusAdmin kind=model-binding 的入口
-  // 删除（mb popover 现在是真模型选择器，不再混 bus 数据源）。R5/P2 起深链走
-  // bus（emitDeepLink('bus:filter-kind'|'bus:expand-plugin')），不再占 store slot。
-  const modelLabel = useModelLabel();
-  const ref = useRef<RichInputHandle>(null);
+	const { t } = useTranslation();
+	const host = useHost();
+	const activities = useSyncExternalStore(
+		host.activities.subscribe,
+		host.activities.getSnapshot,
+		host.activities.getSnapshot,
+	);
+	const pages = useSyncExternalStore(
+		host.pages.subscribe,
+		host.pages.getSnapshot,
+		host.pages.getSnapshot,
+	);
+	const [text, setText] = useState(() => {
+		const shell = useShellStore.getState();
+		const sid = shell.activeSid;
+		const agentId = sid
+			? (shell.tabs.find((tab) => tab.sid === sid)?.agentId ?? null)
+			: null;
+		return readComposerDraft(sid, agentId);
+	});
+	const textRef = useRef(text);
+	textRef.current = text;
+	const sendMessage = useChatStore((s) => s.sendMessage);
+	const cancelStream = useChatStore((s) => s.cancelStream);
+	const isStreaming = useActiveStreaming();
+	// Message queue (Cursor-style): while streaming, sends land here and flush
+	// one-per-turn on hook:turnEnd. Keyed by `${sid}::${agentId}` in the store.
+	const enqueueMessage = useChatStore((s) => s.enqueueMessage);
+	const dequeueMessage = useChatStore((s) => s.dequeueMessage);
+	const clearQueue = useChatStore((s) => s.clearQueue);
+	const queuedMessages = useChatStore((s) => s.queuedMessages);
+	const providerOverride = useShellStore((s) => s.providerOverride);
+	const setProviderOverride = useShellStore((s) => s.setProviderOverride);
+	// Derive from active tab's agent binding (first-class key, post-PR #9).
+	// null when the active tab hasn't been pinned yet (fresh tab pre-
+	// AgentSwitcher fetch).
+	const activeAgent = useShellStore(
+		(s) => s.tabs.find((t) => t.sid === s.activeSid)?.agentId ?? null,
+	);
+	const activeSid = useShellStore((s) => s.activeSid);
+	const composerOwnerKey = `${activeSid ?? ""}\u0000${activeAgent ?? ""}`;
+	const [boundComposerOwnerKey, setBoundComposerOwnerKey] =
+		useState(composerOwnerKey);
+	if (boundComposerOwnerKey !== composerOwnerKey) {
+		const [prevSid, prevAgent] = boundComposerOwnerKey.split("\u0000");
+		if (prevSid && prevAgent) writeComposerDraft(prevSid, prevAgent, text);
+		setBoundComposerOwnerKey(composerOwnerKey);
+		setText(readComposerDraft(activeSid, activeAgent));
+	}
+	// P8 — while a claude-code permission card is up the turn is *blocked waiting
+	// on the user*, not idle. Sending now would cancel that turn (SIGTERM →
+	// `claude exited 143`) yet leave the card answering a dead turn. So we gate
+	// send/queue/interrupt on "no pending permission for this session" and nudge
+	// the user to resolve the card first. Stop (cancelStream) stays available.
+	const pendingPermission = usePendingPermission(activeSid);
+	const [permFlash, setPermFlash] = useState(false);
+	useEffect(() => {
+		if (!permFlash) return;
+		const id = setTimeout(() => setPermFlash(false), 2600);
+		return () => clearTimeout(id);
+	}, [permFlash]);
+	// Card resolved → drop any stale "处理授权" nudge.
+	useEffect(() => {
+		if (!pendingPermission) setPermFlash(false);
+	}, [pendingPermission]);
+	// P3.36 deep-link slot — cli dropdown row's bus pill into Bus admin.
+	// Reuses the pendingBusExpandId pipeline (P2.7f Sidebar / P3.32 AgentsPanel /
+	// P3.34 ChatPanel agent bar). Set BEFORE switching mode so BusAdminPanel's
+	// mount-time consumer reads non-null on first render.
+	const openOverlay = useShellStore((s) => s.openOverlay);
+	// 2026-05-20 — cb-mbsel deep-link 到 BusAdmin kind=model-binding 的入口
+	// 删除（mb popover 现在是真模型选择器，不再混 bus 数据源）。R5/P2 起深链走
+	// bus（emitDeepLink('bus:filter-kind'|'bus:expand-plugin')），不再占 store slot。
+	const modelLabel = useModelLabel();
+	const ref = useRef<RichInputHandle>(null);
 
-  // Provider list — fetched once on mount; refetched on every dropdown open
-  // so health-pill state stays fresh (codex might just have been installed).
-  const [providers, setProviders] = useState<CliProviderInfo[]>([]);
-  // P2.7d — map of provider ids that are ALSO exposed by bus as cli-provider
-  // plugins. Drives the small "bus" pill on each dropdown row, signalling
-  // "this CLI backend is reachable via two surfaces". Refetched on dropdown
-  // open in case a new plugin was hot-loaded.
-  // P2.7g — upgraded from Set<string> to Map<id, BusCliEntry> so each row can
-  // also surface the bus manifest description.zh as a permanent mini-strip
-  // (previously the description was hidden inside `title=` hover-tooltip on
-  // the bus pill — invisible on a default scan).
-  const [busCliMap, setBusCliMap] = useState<Map<string, BusCliEntry>>(new Map());
-  // 当前 activeAgent 在 agent.json 里的 model 状态（get_agent_model 读盘）。
-  // null = 还没拉到 / 拉失败 / 当前不走 forgeax 渠道（cli 桥不读 agent.json）。
-  // ModelPicker 内部自己拉 list_models catalog（useModelCatalog hook,会跨
-  // Composer / TopBar / ModelLab 共享 cache）—— 这里只持 agent 当前选择。
-  const [agentModel, setAgentModel] = useState<AgentModelState | null>(null);
-  // true while get_agent_model is in flight for the CURRENT (sid, agent) with no
-  // cached value to paint yet → the picker shows '…' instead of the global
-  // FORGEAX_MODEL fallback, killing the opus flash on session switch.
-  const [agentModelLoading, setAgentModelLoading] = useState(false);
-  const hasAgentModel = agentModel !== null;
-  // Keep only successful warm-ups as terminal state. A failed request must be
-  // retryable after a transient server/provider error; otherwise one dropped
-  // request permanently disables the optimization for this tab/provider.
-  const cliPrewarmInFlight = useRef(new Set<string>());
-  const cliPrewarmProviderInFlight = useRef(new Set<string>());
-  const cliPrewarmSucceeded = useRef(new Set<string>());
-  const cliPrewarmCooldowns = useRef(new Map<string, number>());
-  // 2026-05-20 重做后 sid 真值住 store.activeSid —— 不再单独本地 state。
-  // 旧 ensureForgeaXSid 单例已删，所有需要 sid 的调用直接用 activeSid。
-  const forgeaxSid = activeSid;
-  // P3.45 — bus skill rows (flattened across all kind=skill plugins). Null
-  // until the first fetch resolves so the Sparkles button stays in legacy
-  // cb-soon mode until we know there's at least one trigger to offer.
-  const [busSkills, setBusSkills] = useState<BusSkillRow[] | null>(null);
-  const [slashOpen, setSlashOpen] = useState(false);
-  const [showCommands, setShowCommands] = useState(false);
-  const slashMenuRef = useRef<HTMLDivElement>(null);
-  const slashRestoreComposer = useRef(false);
+	// Provider list — fetched once on mount; refetched on every dropdown open
+	// so health-pill state stays fresh (codex might just have been installed).
+	const [providers, setProviders] = useState<CliProviderInfo[]>([]);
+	// P2.7d — map of provider ids that are ALSO exposed by bus as cli-provider
+	// plugins. Drives the small "bus" pill on each dropdown row, signalling
+	// "this CLI backend is reachable via two surfaces". Refetched on dropdown
+	// open in case a new plugin was hot-loaded.
+	// P2.7g — upgraded from Set<string> to Map<id, BusCliEntry> so each row can
+	// also surface the bus manifest description.zh as a permanent mini-strip
+	// (previously the description was hidden inside `title=` hover-tooltip on
+	// the bus pill — invisible on a default scan).
+	const [busCliMap, setBusCliMap] = useState<Map<string, BusCliEntry>>(
+		new Map(),
+	);
+	// 当前 activeAgent 在 agent.json 里的 model 状态（get_agent_model 读盘）。
+	// null = 还没拉到 / 拉失败 / 当前不走 forgeax 渠道（cli 桥不读 agent.json）。
+	// ModelPicker 内部自己拉 list_models catalog（useModelCatalog hook,会跨
+	// Composer / TopBar / ModelLab 共享 cache）—— 这里只持 agent 当前选择。
+	const [agentModel, setAgentModel] = useState<AgentModelState | null>(null);
+	// true while get_agent_model is in flight for the CURRENT (sid, agent) with no
+	// cached value to paint yet → the picker shows '…' instead of the global
+	// FORGEAX_MODEL fallback, killing the opus flash on session switch.
+	const [agentModelLoading, setAgentModelLoading] = useState(false);
+	const hasAgentModel = agentModel !== null;
+	// Keep only successful warm-ups as terminal state. A failed request must be
+	// retryable after a transient server/provider error; otherwise one dropped
+	// request permanently disables the optimization for this tab/provider.
+	const cliPrewarmInFlight = useRef(new Set<string>());
+	const cliPrewarmProviderInFlight = useRef(new Set<string>());
+	const cliPrewarmSucceeded = useRef(new Set<string>());
+	const cliPrewarmCooldowns = useRef(new Map<string, number>());
+	// 2026-05-20 重做后 sid 真值住 store.activeSid —— 不再单独本地 state。
+	// 旧 ensureForgeaXSid 单例已删，所有需要 sid 的调用直接用 activeSid。
+	const forgeaxSid = activeSid;
+	// P3.45 — bus skill rows (flattened across all kind=skill plugins). Null
+	// until the first fetch resolves so the Sparkles button stays in legacy
+	// cb-soon mode until we know there's at least one trigger to offer.
+	const [busSkills, setBusSkills] = useState<BusSkillRow[] | null>(null);
+	const [slashOpen, setSlashOpen] = useState(false);
+	// P3.46 — agent rows merged from /api/agents `.agents` (marketplace,
+	// 7) and `.agents_from_bus` (bus, 1). Null = unfetched / failed → the @ button
+	// stays in legacy cb-soon mode. The endpoint already returns both arrays so
+	// we don't need a second bus call.
+	const [agentMentions, setAgentMentions] = useState<AgentMentionRow[] | null>(
+		null,
+	);
+	const [extensions, setExtensions] = useState<ExtensionInfo[]>([]);
+	const {
+		summonAgentId,
+		setSummonAgentId,
+		summonManual,
+		setSummonManual,
+		resolvedSummonAgentIdRef,
+	} = useSummonSelection();
+	const [atOpen, setAtOpen] = useState(false);
+	useEffect(() => {
+		// A main-thread menu can be open while the user follows a handoff. Close
+		// it as the mounted Composer becomes a direct sub-agent composer.
+		if (!specialistSummonEnabled) setAtOpen(false);
+	}, [specialistSummonEnabled]);
+	// P3.49 — keyboard navigation for the slash / at popovers. -1 = no row focused
+	// (idle / mouse mode), 0..N-1 = the corresponding popover row. Refs feed the
+	// window keydown closure (which only re-registers on *Open toggle) so it can
+	// read fresh idx/length without re-binding per keystroke.
+	// Note: model-picker keyboard nav lives inside <ModelPicker> itself.
+	const [slashFocused, setSlashFocused] = useState(-1);
+	const [atFocused, setAtFocused] = useState(-1);
+	const slashFocusedRef = useRef(-1);
+	const atFocusedRef = useRef(-1);
+	const busSkillsRef = useRef<BusSkillRow[] | null>(null);
+	const agentMentionsRef = useRef<AgentMentionRow[] | null>(null);
+	useEffect(() => {
+		slashFocusedRef.current = slashFocused;
+	}, [slashFocused]);
+	useEffect(() => {
+		atFocusedRef.current = atFocused;
+	}, [atFocused]);
+	useEffect(() => {
+		busSkillsRef.current = busSkills;
+	}, [busSkills]);
+	useEffect(() => {
+		agentMentionsRef.current = agentMentions;
+	}, [agentMentions]);
+	const [cliOpen, setCliOpen] = useState(false);
+	// Keyboard navigation: -1 means no focused item, 0 = 'forgeax' default row, 1..N = providers list.
+	const [cliFocused, setCliFocused] = useState(-1);
+	// Refs mirror current cliFocused + providers so the window keydown closure (which
+	// attaches once per cliOpen toggle) can read fresh values without re-registering.
+	const cliFocusedRef = useRef(-1);
+	const providersRef = useRef<CliProviderInfo[]>([]);
+	useEffect(() => {
+		cliFocusedRef.current = cliFocused;
+	}, [cliFocused]);
+	useEffect(() => {
+		providersRef.current = providers;
+	}, [providers]);
+	// Feed the warm-up effect only the selected provider's health bit. The
+	// provider list is refreshed for UI display and often gets a new identity;
+	// its identity must not itself trigger another optional warm-up.
+	const activeCliProviderReady = Boolean(
+		providerOverride &&
+			providers.some((item) => item.id === providerOverride && item.health.ok),
+	);
+	const fetchProviders = useCallback(async () => {
+		try {
+			const { fetchCliProviders } = await import("@forgeax/chat/runtime");
+			const { providers: raw } = await fetchCliProviders();
+			// forgeax === forgeax-core: hide the standalone 'forgeax-core' kernel row;
+			// the special 'forgeax' default row (below) already represents it.
+			const list = raw.filter((p) => p.id !== "forgeax-core");
+			setProviders(list);
+			// Self-heal a stale persisted override: if localStorage points at a
+			// provider that the server no longer registers (provider removed,
+			// typo'd at write-time, etc.), reset to auto. Without this the user
+			// would see an "unknown providerOverride" error on every turn and
+			// have to manually fix it via the dropdown.
+			const persisted = useShellStore.getState().providerOverride;
+			if (
+				persisted &&
+				list.length > 0 &&
+				!list.some((p) => p.id === persisted)
+			) {
+				console.warn(
+					`[composer] cleared stale providerOverride="${persisted}" (not in registered providers: ${list.map((p) => p.id).join(",")})`,
+				);
+				setProviderOverride(null);
+			}
+		} catch {
+			/* ignore */
+		}
+	}, [setProviderOverride]);
+	// P2.7d/g — independent of /api/cli-providers. Failure here just hides the
+	// bus pill + description mini-strip; the dropdown still works.
+	const fetchBusCliInfo = useCallback(async () => {
+		try {
+			const resp = await listExtensions("cli-provider");
+			const next = new Map<string, BusCliEntry>();
+			for (const item of resp.items) {
+				if (!item.id.startsWith(BUS_CLI_ID_PREFIX)) continue;
+				const providerId = item.id.slice(BUS_CLI_ID_PREFIX.length);
+				next.set(providerId, {
+					full: item,
+					descZh: pickLang(item.description, getLocale(), ""),
+				});
+			}
+			setBusCliMap(next);
+		} catch {
+			/* ignore — pill + strip simply absent */
+		}
+	}, []);
+	// 2026-05-20 — 拉 activeAgent 在 agent.json::models.model 里的当前选择。仅在
+	// forgeax 渠道（providerOverride === null/'forgeax'）+ 有 activeAgent + 有 sid
+	// 时才发请求；第三方 cli 桥不读 agent.json，强行 get 会拿错语义。失败兜底
+	// null，UI 用 useModelLabel() 字符串占位。
+	const fetchAgentModel = useCallback(
+		async (sid: string, agentPath: string, providerId: string | null) => {
+			// Only commit the fetched value if the current (sid, agent, provider) is
+			// still what we fetched for — a session switch OR a provider switch mid-flight
+			// must not paint stale data.
+			const stillCurrent = (): boolean => {
+				const cur = useShellStore.getState();
+				const tab = cur.tabs.find((t) => t.sid === cur.activeSid);
+				return (
+					tab?.agentId === agentPath &&
+					cur.activeSid === sid &&
+					catalogOf(cur.providerOverride) === providerId
+				);
+			};
+			const needsInitialSeed =
+				useShellStore.getState().tabs.find((tab) => tab.sid === sid)
+					?.initialModelSeedAgentId === agentPath;
+			const finishInitialSeed = () => {
+				if (!needsInitialSeed) return;
+				useShellStore.setState((state) => ({
+					tabs: state.tabs.map((tab) =>
+						tab.sid === sid && tab.initialModelSeedAgentId === agentPath
+							? { ...tab, initialModelSeedAgentId: undefined }
+							: tab,
+					),
+				}));
+			};
+			let initialSeedResolved = false;
+			try {
+				const m = await getAgentModel(sid, agentPath);
+				let nextModel = m;
+				try {
+					// Provider switches can leave agent.json pointing at a model id that the
+					// new driver catalog cannot run. Snap to the catalog default immediately.
+					const catalog = await listModels(providerId);
+					const selectedInCatalog =
+						!!m.selected && catalog.some((entry) => entry.id === m.selected);
+					const initialModel = needsInitialSeed
+						? initialSessionCatalogModel(
+								catalog,
+								providerId,
+								getLastModel(providerId),
+							)
+						: undefined;
+					const fallback =
+						initialModel ??
+						(!selectedInCatalog
+							? preferredCatalogModel(catalog, null)
+							: undefined);
+					const current = stillCurrent();
+					if (fallback && fallback !== m.selected && current) {
+						const res = await setAgentModels(sid, agentPath, [fallback]);
+						const selected = res.selected ?? fallback;
+						nextModel = {
+							sid,
+							agentPath,
+							selected,
+							chain: [selected],
+							raw: [selected],
+						};
+						// The write may finish after a session/provider switch. Preserve the
+						// marker in that case so the new route gets its own remembered seed.
+						initialSeedResolved = needsInitialSeed && stillCurrent();
+					} else if (
+						needsInitialSeed &&
+						current &&
+						catalog.length > 0 &&
+						(!initialModel || initialModel === m.selected)
+					) {
+						// The catalog was read successfully and the initial-session policy
+						// either requires no override or is already satisfied.
+						initialSeedResolved = true;
+					}
+				} catch (catalogErr) {
+					console.warn("[composer] reconcile agent model catalog failed", {
+						sid,
+						agentPath,
+						providerId,
+						err: catalogErr,
+					});
+				}
+				agentModelCache.set(
+					agentModelKey(sid, agentPath, providerId),
+					nextModel,
+				);
+				if (stillCurrent()) {
+					setAgentModel(nextModel);
+					setAgentModelLoading(false);
+				}
+			} catch (err) {
+				console.warn("[composer] get_agent_model failed", {
+					sid,
+					agentPath,
+					err,
+				});
+				if (stillCurrent()) {
+					setAgentModel(null);
+					setAgentModelLoading(false);
+				}
+			} finally {
+				if (initialSeedResolved) finishInitialSeed();
+			}
+		},
+		[],
+	);
+	// P3.45 — fetch the canonical skill registry (GET /api/skills), then merge
+	// server commands. Failure / empty → null, which collapses the Sparkles
+	// button back to its legacy 即将上线 hint behaviour.
+	const fetchBusSkills = useCallback(async () => {
+		const requestedSid = activeSid;
+		try {
+			const rows: BusSkillRow[] = [];
+			const seenTriggers = new Set<string>();
+			const skillResp = await fetch(
+				`/api/skills${requestedSid ? `?sessionId=${encodeURIComponent(requestedSid)}` : ""}`,
+			);
+			if (!skillResp.ok)
+				throw new Error(`GET /api/skills → ${skillResp.status}`);
+			const { skills } = (await skillResp.json()) as {
+				skills?: Array<{
+					id: string;
+					extensionId: string;
+					displayName?: { zh?: string; en?: string; ja?: string } | string;
+					description?: { zh?: string; en?: string; ja?: string } | string;
+					triggers?: Array<{ kind: string; command?: string }>;
+				}>;
+			};
+			for (const s of skills ?? []) {
+				const slash = s.triggers?.find((t) => t.kind === "slash" && t.command);
+				if (!slash?.command) continue;
+				const trigger = slash.command.startsWith("/")
+					? slash.command
+					: `/${slash.command}`;
+				if (seenTriggers.has(trigger)) continue;
+				seenTriggers.add(trigger);
+				rows.push({
+					extensionId: s.extensionId,
+					displayName: pickLang(s.displayName, getLocale(), s.id),
+					descZh: pickLang(s.description, getLocale(), ""),
+					skillId: s.id,
+					trigger,
+					source: "skill",
+				});
+			}
+			// Merge server commands (e.g. /compact) into the slash popover alongside bus skills.
+			try {
+				const cmdResp = await fetch("/api/commands");
+				if (cmdResp.ok) {
+					const { commands } = (await cmdResp.json()) as {
+						commands?: Array<{
+							name: string;
+							description: string;
+							hasExecute: boolean;
+						}>;
+					};
+					for (const cmd of commands ?? []) {
+						if (!cmd.hasExecute) continue;
+						if (cmd.name.startsWith("_error:")) continue;
+						const trigger = `/${cmd.name}`;
+						if (seenTriggers.has(trigger)) continue;
+						seenTriggers.add(trigger);
+						rows.push({
+							extensionId: "server",
+							displayName: cmd.name,
+							descZh: cmd.description,
+							skillId: cmd.name,
+							trigger,
+							source: "command",
+						});
+					}
+				}
+			} catch {
+				/* server commands unavailable — still show bus skills */
+			}
+			if (useShellStore.getState().activeSid === requestedSid)
+				setBusSkills(rows);
+		} catch {
+			if (useShellStore.getState().activeSid === requestedSid)
+				setBusSkills(null);
+		}
+	}, [activeSid]);
+	// P3.46 — pull /api/agents once, merge marketplace + bus by id.
+	// Bus agents (`agents_from_bus[]`) currently overlap with marketplace
+	// cc-coder, so the merge yields 7 unique rows with cc-coder flagged inBus.
+	// Order: marketplace order first (player already sees this order in Sidebar
+	// AGENTS list and AgentSwitcher), then bus-only agents appended.
+	const fetchAgentMentions = useCallback(async () => {
+		try {
+			const res = await fetch(agentCatalogUrl());
+			if (!res.ok) throw new Error(`GET /api/agents → ${res.status}`);
+			const data = (await res.json()) as {
+				agents?: Array<{
+					id: string;
+					name: string;
+					naming?: { title: string; sub: string };
+					role: string;
+					avatar: string;
+					isMain: boolean;
+				}>;
+				agents_from_bus?: Array<{
+					id: string;
+					name: string;
+					naming?: { title: string; sub: string };
+					role: string;
+					avatar: string;
+					extensionId?: string;
+				}>;
+			};
+			const busExtensionIds = new Map<string, string>();
+			for (const a of data.agents_from_bus ?? []) {
+				if (a.extensionId) busExtensionIds.set(a.id, a.extensionId);
+			}
+			const rows: AgentMentionRow[] = [];
+			const seen = new Set<string>();
+			for (const a of data.agents ?? []) {
+				rows.push({
+					id: a.id,
+					name: a.name,
+					naming: a.naming,
+					role: a.role,
+					avatar: a.avatar,
+					isMain: !!a.isMain,
+					inBus: busExtensionIds.has(a.id),
+					busExtensionId: busExtensionIds.get(a.id),
+				});
+				seen.add(a.id);
+			}
+			for (const a of data.agents_from_bus ?? []) {
+				if (seen.has(a.id)) continue;
+				rows.push({
+					id: a.id,
+					name: a.name,
+					naming: a.naming,
+					role: a.role,
+					avatar: a.avatar,
+					isMain: false,
+					inBus: true,
+					busExtensionId: a.extensionId,
+				});
+			}
+			setAgentMentions(rows.filter((row) => !row.isMain));
+		} catch {
+			setAgentMentions(null);
+		}
+	}, []);
+	useEffect(() => {
+		void fetchProviders();
+		void fetchBusCliInfo();
+		void fetchAgentMentions();
+		void listExtensions()
+			.then((result) => setExtensions(result.items))
+			.catch(() => setExtensions([]));
+	}, [fetchBusCliInfo, fetchAgentMentions, fetchProviders]);
 
-  // P3.46 — agent rows merged from /api/agents `.agents` (marketplace,
-  // 7) and `.agents_from_bus` (bus, 1). Null = unfetched / failed → the @ button
-  // stays in legacy cb-soon mode. The endpoint already returns both arrays so
-  // we don't need a second bus call.
-  const [agentMentions, setAgentMentions] = useState<AgentMentionRow[] | null>(null);
-  const [extensions, setExtensions] = useState<ExtensionInfo[]>([]);
-  const { summonAgentId, setSummonAgentId, summonManual, setSummonManual, resolvedSummonAgentIdRef } = useSummonSelection();
-  const [atOpen, setAtOpen] = useState(false);
-  useEffect(() => {
-    // A main-thread menu can be open while the user follows a handoff. Close
-    // it as the mounted Composer becomes a direct sub-agent composer.
-    if (!specialistSummonEnabled) setAtOpen(false);
-  }, [specialistSummonEnabled]);
-  // P3.49 — keyboard navigation for the slash / at popovers. -1 = no row focused
-  // (idle / mouse mode), 0..N-1 = the corresponding popover row. Refs feed the
-  // window keydown closure (which only re-registers on *Open toggle) so it can
-  // read fresh idx/length without re-binding per keystroke.
-  // Note: model-picker keyboard nav lives inside <ModelPicker> itself.
-  const [slashFocused, setSlashFocused] = useState(-1);
-  const [atFocused, setAtFocused] = useState(-1);
-  const slashFocusedRef = useRef(-1);
-  const atFocusedRef = useRef(-1);
-  const busSkillsRef = useRef<BusSkillRow[] | null>(null);
-  const agentMentionsRef = useRef<AgentMentionRow[] | null>(null);
-  useEffect(() => { slashFocusedRef.current = slashFocused; }, [slashFocused]);
-  useEffect(() => { atFocusedRef.current = atFocused; }, [atFocused]);
-  useEffect(() => { busSkillsRef.current = busSkills; }, [busSkills]);
-  useEffect(() => { agentMentionsRef.current = agentMentions; }, [agentMentions]);
-  const [cliOpen, setCliOpen] = useState(false);
-  // Keyboard navigation: -1 means no focused item, 0 = 'forgeax' default row, 1..N = providers list.
-  const [cliFocused, setCliFocused] = useState(-1);
-  // Refs mirror current cliFocused + providers so the window keydown closure (which
-  // attaches once per cliOpen toggle) can read fresh values without re-registering.
-  const cliFocusedRef = useRef(-1);
-  const providersRef = useRef<CliProviderInfo[]>([]);
-  useEffect(() => { cliFocusedRef.current = cliFocused; }, [cliFocused]);
-  useEffect(() => { providersRef.current = providers; }, [providers]);
-  // Feed the warm-up effect only the selected provider's health bit. The
-  // provider list is refreshed for UI display and often gets a new identity;
-  // its identity must not itself trigger another optional warm-up.
-  const activeCliProviderReady = Boolean(
-    providerOverride
-    && providers.some((item) => item.id === providerOverride && item.health.ok),
-  );
-  const fetchProviders = async () => {
-    try {
-      const { fetchCliProviders } = await import('@forgeax/interface/lib/cli-providers');
-      const { providers: raw } = await fetchCliProviders();
-      // forgeax === forgeax-core: hide the standalone 'forgeax-core' kernel row;
-      // the special 'forgeax' default row (below) already represents it.
-      const list = raw.filter((p) => p.id !== 'forgeax-core');
-      setProviders(list);
-      // Self-heal a stale persisted override: if localStorage points at a
-      // provider that the server no longer registers (provider removed,
-      // typo'd at write-time, etc.), reset to auto. Without this the user
-      // would see an "unknown providerOverride" error on every turn and
-      // have to manually fix it via the dropdown.
-      const persisted = useShellStore.getState().providerOverride;
-      if (persisted && list.length > 0 && !list.some((p) => p.id === persisted)) {
-        console.warn(`[composer] cleared stale providerOverride="${persisted}" (not in registered providers: ${list.map((p) => p.id).join(',')})`);
-        setProviderOverride(null);
-      }
-    } catch { /* ignore */ }
-  };
-  // P2.7d/g — independent of /api/cli-providers. Failure here just hides the
-  // bus pill + description mini-strip; the dropdown still works.
-  const fetchBusCliInfo = async () => {
-    try {
-      const resp = await listExtensions('cli-provider');
-      const next = new Map<string, BusCliEntry>();
-      for (const item of resp.items) {
-        if (!item.id.startsWith(BUS_CLI_ID_PREFIX)) continue;
-        const providerId = item.id.slice(BUS_CLI_ID_PREFIX.length);
-        next.set(providerId, {
-          full: item,
-          descZh: pickLang(item.description, getLocale(), ''),
-        });
-      }
-      setBusCliMap(next);
-    } catch { /* ignore — pill + strip simply absent */ }
-  };
-  // 2026-05-20 — 拉 activeAgent 在 agent.json::models.model 里的当前选择。仅在
-  // forgeax 渠道（providerOverride === null/'forgeax'）+ 有 activeAgent + 有 sid
-  // 时才发请求；第三方 cli 桥不读 agent.json，强行 get 会拿错语义。失败兜底
-  // null，UI 用 useModelLabel() 字符串占位。
-  const fetchAgentModel = async (sid: string, agentPath: string, providerId: string | null) => {
-    // Only commit the fetched value if the current (sid, agent, provider) is
-    // still what we fetched for — a session switch OR a provider switch mid-flight
-    // must not paint stale data.
-    const stillCurrent = (): boolean => {
-      const cur = useShellStore.getState();
-      const tab = cur.tabs.find((t) => t.sid === cur.activeSid);
-      return tab?.agentId === agentPath && cur.activeSid === sid && catalogOf(cur.providerOverride) === providerId;
-    };
-    const needsInitialSeed = useShellStore.getState().tabs
-      .find((tab) => tab.sid === sid)?.initialModelSeedAgentId === agentPath;
-    const finishInitialSeed = () => {
-      if (!needsInitialSeed) return;
-      useShellStore.setState((state) => ({
-        tabs: state.tabs.map((tab) => tab.sid === sid && tab.initialModelSeedAgentId === agentPath
-          ? { ...tab, initialModelSeedAgentId: undefined }
-          : tab),
-      }));
-    };
-    let initialSeedResolved = false;
-    try {
-      const m = await getAgentModel(sid, agentPath);
-      let nextModel = m;
-      // A scaffold may carry another provider's default without a local seed
-      // marker (for example after game creation or page reload). Validate it
-      // against the current catalog; stillCurrent guards cross-page races.
-      const catalog = await listModels(providerId);
-      if (catalog.length === 0) throw new Error('Active provider model catalog is empty');
-      const initialModel = needsInitialSeed
-        ? initialSessionCatalogModel(catalog, providerId, getLastModel(providerId))
-        : undefined;
-      const fallback = initialModel
-        ?? passiveSessionCatalogModel(catalog, m.selected, getLastModel(providerId));
-      const current = stillCurrent();
-      if (fallback && fallback !== m.selected && current) {
-        // Passive refreshes must not write shared configuration: windows can
-        // have different provider selections and otherwise overwrite each
-        // other indefinitely via runtime:config-revision notifications.
-        const selected = needsInitialSeed
-          ? (await setAgentModels(sid, agentPath, [fallback])).selected ?? fallback
-          : fallback;
-        nextModel = { sid, agentPath, selected, chain: [selected], raw: [selected] };
-        // The write may finish after a session/provider switch. Preserve the
-        // marker in that case so the new route gets its own remembered seed.
-        initialSeedResolved = needsInitialSeed && stillCurrent();
-      } else if (
-        needsInitialSeed
-        && current
-        && catalog.length > 0
-        && (!initialModel || initialModel === m.selected)
-      ) {
-        // The catalog was read successfully and the initial-session policy
-        // either requires no override or is already satisfied.
-        initialSeedResolved = true;
-      }
-      if (!stillCurrent()) return;
-      if (!nextModel.selected) throw new Error('No model available for the active provider');
-      agentModelCache.set(agentModelKey(sid, agentPath, providerId), nextModel);
-      if (stillCurrent()) {
-        setAgentModel(nextModel);
-        setAgentModelLoading(false);
-      }
-    } catch (err) {
-      console.warn('[composer] get_agent_model failed', { sid, agentPath, err });
-      if (stillCurrent()) {
-        setAgentModel(null);
-        setAgentModelLoading(false);
-      }
-    } finally {
-      if (initialSeedResolved) finishInitialSeed();
-    }
-  };
-  // P3.45 — fetch the canonical skill registry (GET /api/skills), then merge
-  // server commands. Failure / empty → null, which collapses the Sparkles
-  // button back to its legacy 即将上线 hint behaviour.
-  const fetchBusSkills = async () => {
-    const requestedSid = activeSid;
-    try {
-      const rows: BusSkillRow[] = [];
-      const seenTriggers = new Set<string>();
-      const skillResp = await fetch(`/api/skills${requestedSid ? `?sessionId=${encodeURIComponent(requestedSid)}` : ''}`);
-      if (!skillResp.ok) throw new Error(`GET /api/skills → ${skillResp.status}`);
-      const { skills } = (await skillResp.json()) as {
-        skills?: Array<{
-          id: string;
-          extensionId: string;
-          displayName?: { zh?: string; en?: string; ja?: string } | string;
-          description?: { zh?: string; en?: string; ja?: string } | string;
-          triggers?: Array<{ kind: string; command?: string }>;
-        }>;
-      };
-      for (const s of skills ?? []) {
-        const slash = s.triggers?.find((t) => t.kind === 'slash' && t.command);
-        if (!slash?.command) continue;
-        const trigger = slash.command.startsWith('/') ? slash.command : `/${slash.command}`;
-        if (seenTriggers.has(trigger)) continue;
-        seenTriggers.add(trigger);
-        rows.push({
-          extensionId: s.extensionId,
-          displayName: pickLang(s.displayName, getLocale(), s.id),
-          descZh: pickLang(s.description, getLocale(), ''),
-          skillId: s.id,
-          trigger,
-          source: 'skill',
-        });
-      }
-      // Merge server commands (e.g. /compact) into the slash popover alongside bus skills.
-      try {
-        const cmdResp = await fetch('/api/commands');
-        if (cmdResp.ok) {
-          const { commands } = (await cmdResp.json()) as { commands?: Array<{ name: string; description: string; hasExecute: boolean }> };
-          for (const cmd of commands ?? []) {
-            if (!cmd.hasExecute) continue;
-            if (cmd.name.startsWith('_error:')) continue;
-            const trigger = `/${cmd.name}`;
-            if (seenTriggers.has(trigger)) continue;
-            seenTriggers.add(trigger);
-            rows.push({
-              extensionId: 'server',
-              displayName: cmd.name,
-              descZh: cmd.description,
-              skillId: cmd.name,
-              trigger,
-              source: 'command',
-            });
-          }
-        }
-      } catch { /* server commands unavailable — still show bus skills */ }
-      if (useShellStore.getState().activeSid === requestedSid) setBusSkills(rows);
-    } catch { if (useShellStore.getState().activeSid === requestedSid) setBusSkills(null); }
-  };
-  // P3.46 — pull /api/agents once, merge marketplace + bus by id.
-  // Bus agents (`agents_from_bus[]`) currently overlap with marketplace
-  // cc-coder, so the merge yields 7 unique rows with cc-coder flagged inBus.
-  // Order: marketplace order first (player already sees this order in Sidebar
-  // AGENTS list and AgentSwitcher), then bus-only agents appended.
-  const fetchAgentMentions = async () => {
-    try {
-      const res = await fetch(agentCatalogUrl());
-      if (!res.ok) throw new Error(`GET /api/agents → ${res.status}`);
-      const data = (await res.json()) as {
-        agents?: Array<{ id: string; name: string; naming?: { title: string; sub: string }; role: string; avatar: string; isMain: boolean }>;
-        agents_from_bus?: Array<{ id: string; name: string; naming?: { title: string; sub: string }; role: string; avatar: string; extensionId?: string }>;
-      };
-      const busExtensionIds = new Map<string, string>();
-      for (const a of data.agents_from_bus ?? []) {
-        if (a.extensionId) busExtensionIds.set(a.id, a.extensionId);
-      }
-      const rows: AgentMentionRow[] = [];
-      const seen = new Set<string>();
-      for (const a of data.agents ?? []) {
-        rows.push({
-          id: a.id,
-          name: a.name,
-          naming: a.naming,
-          role: a.role,
-          avatar: a.avatar,
-          isMain: !!a.isMain,
-          inBus: busExtensionIds.has(a.id),
-          busExtensionId: busExtensionIds.get(a.id),
-        });
-        seen.add(a.id);
-      }
-      for (const a of data.agents_from_bus ?? []) {
-        if (seen.has(a.id)) continue;
-        rows.push({
-          id: a.id,
-          name: a.name,
-          naming: a.naming,
-          role: a.role,
-          avatar: a.avatar,
-          isMain: false,
-          inBus: true,
-          busExtensionId: a.extensionId,
-        });
-      }
-      setAgentMentions(rows.filter((row) => !row.isMain));
-    } catch { setAgentMentions(null); }
-  };
-  useEffect(() => {
-    void fetchProviders();
-    void fetchBusCliInfo();
-    void fetchAgentMentions();
-    void listExtensions().then((result) => setExtensions(result.items)).catch(() => setExtensions([]));
-  }, [i18n.language]);
+	useEffect(() => {
+		setBusSkills(null);
+		void fetchBusSkills();
+	}, [fetchBusSkills]);
 
-  useEffect(() => {
-    setBusSkills(null);
-    void fetchBusSkills();
-  }, [activeSid, i18n.language]);
+	const activeTypeId = pages.instances.find(
+		(page) => page.encodedKey === pages.activeKey,
+	)?.typeId;
+	const activeOwner = activeTypeId
+		? host.pageRegistry.ownerOf(activeTypeId)
+		: undefined;
+	// Subscribe to activities as well as pages: contributions can change while
+	// Composer stays mounted. Panel identity itself is only activeKey/type/owner.
+	void activities.generation;
+	const activePanelKey = `${pages.activeKey ?? ""}\u0000${activeTypeId ?? ""}\u0000${activeOwner ?? ""}`;
+	const preferredAgentKey = useMemo(
+		() => preferredAgentKeyForPage(extensions, activeOwner, activeTypeId),
+		[extensions, activeOwner, activeTypeId],
+	);
+	const availableAgents = agentMentions ?? [];
+	const availableAgentIds = useMemo(
+		() => agentMentions?.map((agent) => agent.id),
+		[agentMentions],
+	);
+	// Resolve as pure render data, then publish only after React commits this
+	// render. A discarded concurrent render must never mutate the shared value
+	// consumed by sibling rewind actions.
+	const resolvedSummonAgentId = resolveSummonAgentId(
+		summonAgentId,
+		availableAgentIds,
+		specialistSummonEnabled,
+	);
+	useLayoutEffect(() => {
+		resolvedSummonAgentIdRef.current = resolvedSummonAgentId;
+		// The direct sub-agent composer stays mounted. Publishing null when its
+		// delegation capability is disabled prevents a prior main-thread expert
+		// from crossing that thread; unmount remains fail-closed as well.
+		return () => {
+			resolvedSummonAgentIdRef.current = null;
+		};
+	}, [resolvedSummonAgentId, resolvedSummonAgentIdRef]);
+	const preferredAvailable = useMemo(
+		() =>
+			preferredAgentKey
+				? (availableAgents.find((agent) =>
+						agentMatches(agent.id, preferredAgentKey),
+					) ?? null)
+				: null,
+		[availableAgents, preferredAgentKey],
+	);
+	const panelKeyRef = useRef(activePanelKey);
+	useEffect(() => {
+		const panelChanged = panelKeyRef.current !== activePanelKey;
+		panelKeyRef.current = activePanelKey;
+		const next = reconcileSummonSelection(
+			{ summonAgentId, manual: summonManual },
+			preferredAvailable?.id ?? null,
+			panelChanged,
+			availableAgentIds,
+		);
+		if (next.summonAgentId !== summonAgentId)
+			setSummonAgentId(next.summonAgentId);
+		if (next.manual !== summonManual) setSummonManual(next.manual);
+	}, [
+		activePanelKey,
+		preferredAvailable,
+		availableAgentIds,
+		summonAgentId,
+		summonManual,
+		setSummonAgentId,
+		setSummonManual,
+	]);
+	const avatarInitials = useMemo(
+		() => avatarInitialsForAgents(availableAgents),
+		[availableAgents],
+	);
+	useEffect(() => {
+		if (cliOpen) {
+			void fetchProviders();
+			void fetchBusCliInfo();
+			setCliFocused(-1); // reset focus when reopening
+		}
+	}, [cliOpen, fetchProviders, fetchBusCliInfo]);
 
-  const activeTypeId = pages.instances.find((page) => page.encodedKey === pages.activeKey)?.typeId;
-  const activeOwner = activeTypeId ? host.pageRegistry.ownerOf(activeTypeId) : undefined;
-  // Subscribe to activities as well as pages: contributions can change while
-  // Composer stays mounted. Panel identity itself is only activeKey/type/owner.
-  void activities.generation;
-  const activePanelKey = `${pages.activeKey ?? ''}\u0000${activeTypeId ?? ''}\u0000${activeOwner ?? ''}`;
-  const preferredAgentKey = useMemo(
-    () => preferredAgentKeyForPage(extensions, activeOwner, activeTypeId),
-    [extensions, activeOwner, activeTypeId],
-  );
-  const availableAgents = agentMentions ?? [];
-  const availableAgentIds = useMemo(() => agentMentions?.map((agent) => agent.id), [agentMentions]);
-  // Resolve as pure render data, then publish only after React commits this
-  // render. A discarded concurrent render must never mutate the shared value
-  // consumed by sibling rewind actions.
-  const resolvedSummonAgentId = resolveSummonAgentId(
-    summonAgentId,
-    availableAgentIds,
-    specialistSummonEnabled,
-  );
-  useLayoutEffect(() => {
-    resolvedSummonAgentIdRef.current = resolvedSummonAgentId;
-    // The direct sub-agent composer stays mounted. Publishing null when its
-    // delegation capability is disabled prevents a prior main-thread expert
-    // from crossing that thread; unmount remains fail-closed as well.
-    return () => { resolvedSummonAgentIdRef.current = null; };
-  }, [resolvedSummonAgentId, resolvedSummonAgentIdRef]);
-  const preferredAvailable = useMemo(() => preferredAgentKey
-    ? availableAgents.find((agent) => agentMatches(agent.id, preferredAgentKey)) ?? null
-    : null, [availableAgents, preferredAgentKey]);
-  const panelKeyRef = useRef(activePanelKey);
-  useEffect(() => {
-    const panelChanged = panelKeyRef.current !== activePanelKey;
-    panelKeyRef.current = activePanelKey;
-    const next = reconcileSummonSelection(
-      { summonAgentId, manual: summonManual },
-      preferredAvailable?.id ?? null,
-      panelChanged,
-      availableAgentIds,
-    );
-    if (next.summonAgentId !== summonAgentId) setSummonAgentId(next.summonAgentId);
-    if (next.manual !== summonManual) setSummonManual(next.manual);
-  }, [activePanelKey, preferredAvailable, availableAgentIds, summonAgentId, summonManual]);
-  const avatarInitials = useMemo(() => avatarInitialsForAgents(availableAgents), [availableAgents]);
-  useEffect(() => {
-    if (cliOpen) {
-      void fetchProviders();
-      void fetchBusCliInfo();
-      setCliFocused(-1);  // reset focus when reopening
-    }
-  }, [cliOpen]);
+	// 2026-05-20 — forgeax 渠道 + 有 activeAgent + 有 sid 时拉 agent.json 当前
+	// model。任意条件变化都重拉。其余情况清空 agentModel（cb-mbsel 降级用
+	// useModelLabel）。
+	const isForgeaXNative =
+		providerOverride === null || providerOverride === "forgeax";
+	// 2026-06-02 — claude-code 现在也读 agent.json::models.model（chat 桥把它解析进
+	// req.options.model，provider 转成 `claude --model`）。2026-07 — rented CLI 都走
+	// driver-scoped catalog，选中模型经 TurnRequest.model 传给各自 `--model`。
+	const canSwitchModel =
+		isForgeaXNative || CLI_CATALOG_IDS.has(providerOverride ?? "");
+	const modelCatalogProviderId = catalogOf(providerOverride);
+	const catalogProviderFor = useCallback(catalogOf, []);
+	const switchProviderWithDefaultModel = useCallback(
+		(nextProvider: string | null) => {
+			if (providerOverride === nextProvider) {
+				setCliOpen(false);
+				return;
+			}
+			setProviderOverride(nextProvider);
+			setCliOpen(false);
 
-  // 2026-05-20 — forgeax 渠道 + 有 activeAgent + 有 sid 时拉 agent.json 当前
-  // model。任意条件变化都重拉。其余情况清空 agentModel（cb-mbsel 降级用
-  // useModelLabel）。
-  const isForgeaXNative = providerOverride === null || providerOverride === 'forgeax';
-  // 2026-06-02 — claude-code 现在也读 agent.json::models.model（chat 桥把它解析进
-  // req.options.model，provider 转成 `claude --model`）。2026-07 — rented CLI 都走
-  // driver-scoped catalog，选中模型经 TurnRequest.model 传给各自 `--model`。
-  const canSwitchModel = isForgeaXNative || CLI_CATALOG_IDS.has(providerOverride ?? '');
-  const modelCatalogProviderId = catalogOf(providerOverride);
-  const catalogProviderFor = useCallback(catalogOf, []);
-  const switchProviderWithDefaultModel = useCallback((nextProvider: string | null) => {
-    if (providerOverride === nextProvider) {
-      setCliOpen(false);
-      return;
-    }
-    setProviderOverride(nextProvider);
-    setCliOpen(false);
+			// Land the active agent on the new provider's default model. Shared with
+			// Settings › Providers via resetActiveAgentModelToProviderDefault so both
+			// switch surfaces behave identically (SSOT).
+			void (async () => {
+				try {
+					const done = await resetActiveAgentModelToProviderDefault(
+						catalogProviderFor(nextProvider),
+					);
+					if (done) {
+						const reset: AgentModelState = {
+							sid: done.sid,
+							agentPath: done.agentPath,
+							selected: done.selected,
+							chain: [done.selected],
+							raw: [done.selected],
+						};
+						setAgentModel(reset);
+						setAgentModelLoading(false);
+						agentModelCache.set(
+							agentModelKey(
+								done.sid,
+								done.agentPath,
+								catalogProviderFor(nextProvider),
+							),
+							reset,
+						);
+					}
+				} catch (err) {
+					console.warn("[composer] switch provider default model failed", {
+						provider: nextProvider,
+						err,
+					});
+				}
+			})();
+		},
+		[catalogProviderFor, providerOverride, setProviderOverride],
+	);
+	useEffect(() => {
+		if (!canSwitchModel || !activeAgent || !forgeaxSid) {
+			setAgentModel(null);
+			setAgentModelLoading(false);
+			return;
+		}
+		// Paint from cache instantly if we've seen this (sid, agent, provider)
+		// before; else clear to a loading placeholder (NOT the stale prev value or
+		// the global default) while we round-trip get_agent_model. Re-runs on a
+		// providerOverride change (via modelCatalogProviderId) so a Settings-driven
+		// provider switch refreshes the displayed model — that was the missing
+		// reactivity behind "切了 provider 但模型没变".
+		const cached = agentModelCache.get(
+			agentModelKey(forgeaxSid, activeAgent, modelCatalogProviderId),
+		);
+		if (cached !== undefined) {
+			setAgentModel(cached);
+			setAgentModelLoading(false);
+		} else {
+			setAgentModel(null);
+			setAgentModelLoading(true);
+		}
+		void fetchAgentModel(forgeaxSid, activeAgent, modelCatalogProviderId);
+	}, [
+		canSwitchModel,
+		activeAgent,
+		forgeaxSid,
+		modelCatalogProviderId,
+		fetchAgentModel,
+	]);
 
-    // Land the active agent on the new provider's default model. Shared with
-    // Settings › Providers via resetActiveAgentModelToProviderDefault so both
-    // switch surfaces behave identically (SSOT).
-    void (async () => {
-      try {
-        const done = await resetActiveAgentModelToProviderDefault(catalogProviderFor(nextProvider));
-        const current = useShellStore.getState();
-        if (done && current.activeSid === done.sid
-          && current.tabs.find((tab) => tab.sid === done.sid)?.agentId === done.agentPath
-          && catalogOf(current.providerOverride) === catalogProviderFor(nextProvider)) {
-          const reset: AgentModelState = { sid: done.sid, agentPath: done.agentPath, selected: done.selected, chain: [done.selected], raw: [done.selected] };
-          setAgentModel(reset);
-          setAgentModelLoading(false);
-          agentModelCache.set(agentModelKey(done.sid, done.agentPath, catalogProviderFor(nextProvider)), reset);
-        }
-      } catch (err) {
-        console.warn('[composer] switch provider default model failed', { provider: nextProvider, err });
-      }
-    })();
-  }, [catalogProviderFor, providerOverride, setProviderOverride]);
-  useEffect(() => {
-    if (!canSwitchModel || !activeAgent || !forgeaxSid) {
-      setAgentModel(null);
-      setAgentModelLoading(false);
-      return;
-    }
-    // Paint from cache instantly if we've seen this (sid, agent, provider)
-    // before; else clear to a loading placeholder (NOT the stale prev value or
-    // the global default) while we round-trip get_agent_model. Re-runs on a
-    // providerOverride change (via modelCatalogProviderId) so a Settings-driven
-    // provider switch refreshes the displayed model — that was the missing
-    // reactivity behind "切了 provider 但模型没变".
-    const cached = agentModelCache.get(agentModelKey(forgeaxSid, activeAgent, modelCatalogProviderId));
-    if (cached !== undefined) {
-      setAgentModel(cached);
-      setAgentModelLoading(false);
-    } else {
-      setAgentModel(null);
-      setAgentModelLoading(true);
-    }
-    void fetchAgentModel(forgeaxSid, activeAgent, modelCatalogProviderId);
-  }, [canSwitchModel, activeAgent, forgeaxSid, modelCatalogProviderId]);
+	// Start a provider-owned persistent transport once the active Studio
+	// session, agent, provider and model are known. This is intentionally an
+	// empty transport warm-up: the server composes the exact same native
+	// MCP/plugin/skill/CLAUDE.md/settings surface as the real turn and sends no
+	// hidden model prompt. Kernels without this optional capability return a
+	// no-op, so the chat UI stays provider-agnostic. Wait for the selection to
+	// settle before starting optional work: rapid session CRUD must win over a
+	// warm-up for a session the user has already left.
+	useEffect(() => {
+		if (
+			!activeSid ||
+			!activeAgent ||
+			!providerOverride ||
+			!CLI_CATALOG_IDS.has(providerOverride)
+		)
+			return;
+		if (
+			agentModelLoading ||
+			!hasAgentModel ||
+			!activeCliProviderReady ||
+			isStreaming
+		)
+			return;
+		const attemptKey = `${activeSid}\u0000${activeAgent}\u0000${providerOverride}`;
+		const timer = window.setTimeout(() => {
+			void runCliPrewarm({
+				attemptKey,
+				cooldownKey: providerOverride,
+				inFlight: cliPrewarmInFlight.current,
+				providerInFlight: cliPrewarmProviderInFlight.current,
+				succeeded: cliPrewarmSucceeded.current,
+				cooldowns: cliPrewarmCooldowns.current,
+				request: (endpoint) =>
+					fetch(endpoint, {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							sessionId: activeSid,
+							// Keep the legacy wire field for older hosts; the server canonicalizes
+							// the provider-native key from (sessionId, agentId).
+							threadId: activeSid,
+							agentId: activeAgent,
+							providerOverride,
+						}),
+					}),
+			}).catch((error) => {
+				// Prewarm is an optimization. A provider failure must remain visible on
+				// the real turn and must never block composing or sending a message.
+				console.warn("[composer] cli transport prewarm failed", {
+					provider: providerOverride,
+					sid: activeSid,
+					agent: activeAgent,
+					error,
+				});
+			});
+		}, 1_000);
+		return () => window.clearTimeout(timer);
+	}, [
+		activeAgent,
+		activeCliProviderReady,
+		activeSid,
+		agentModelLoading,
+		hasAgentModel,
+		isStreaming,
+		providerOverride,
+	]);
 
-  // Server revisions invalidate only the selected session/agent. A tab that
-  // missed events while suspended revalidates on focus without changing config.
-  useEffect(() => {
-    if (!canSwitchModel || !activeAgent || !forgeaxSid) return;
-    const refresh = () => { void fetchAgentModel(forgeaxSid, activeAgent, modelCatalogProviderId); };
-    const unsubscribe = onSessionEvent('composer-model', (event) => {
-      if (event.sid === forgeaxSid && event.emitterId === activeAgent && event.event.type === 'runtime:config-revision') refresh();
-    });
-    window.addEventListener('focus', refresh);
-    return () => { unsubscribe(); window.removeEventListener('focus', refresh); };
-  }, [canSwitchModel, activeAgent, forgeaxSid, modelCatalogProviderId]);
+	// Auto-close the dropdown if a stream starts while it's open. The override
+	// wouldn't apply to the in-flight turn anyway, so showing a clickable list
+	// while the result is already streaming is misleading.
+	useEffect(() => {
+		if (isStreaming && cliOpen) setCliOpen(false);
+	}, [isStreaming, cliOpen]);
+	// Close dropdown on outside click or Esc.
+	useEffect(() => {
+		if (!cliOpen) return;
+		const onClick = (e: MouseEvent) => {
+			const t = e.target as HTMLElement | null;
+			if (!t?.closest(".cb-cli")) setCliOpen(false);
+		};
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") {
+				e.preventDefault();
+				setCliOpen(false);
+				return;
+			}
+			// ↑/↓ cycle through items; Enter commits the focused one.
+			// Item indices: 0 = 'forgeax' (default row), 1..N = providers[i-1].
+			// Read via refs so the closure sees current values (effect re-runs only on cliOpen).
+			const list = providersRef.current;
+			const total = list.length + 1;
+			if (e.key === "ArrowDown") {
+				e.preventDefault();
+				setCliFocused((i) => (i + 1 + total) % total);
+			} else if (e.key === "ArrowUp") {
+				e.preventDefault();
+				setCliFocused((i) => (i <= 0 ? total - 1 : i - 1));
+			} else if (e.key === "Enter") {
+				const focused = cliFocusedRef.current;
+				if (focused < 0) return;
+				e.preventDefault();
+				if (focused === 0) {
+					switchProviderWithDefaultModel(null);
+				} else {
+					const p = list[focused - 1];
+					// Only commit + close on a healthy pick. Enter on a DOWN row used to
+					// silently close the dropdown, which felt like a swallowed keystroke
+					// (mouse click on disabled row is already blocked by `disabled=`).
+					// Keep the menu open so the user can pick another row instead.
+					if (p?.health.ok) {
+						switchProviderWithDefaultModel(p.id);
+					}
+				}
+			}
+		};
+		window.addEventListener("click", onClick);
+		window.addEventListener("keydown", onKey);
+		return () => {
+			window.removeEventListener("click", onClick);
+			window.removeEventListener("keydown", onKey);
+		};
+	}, [cliOpen, switchProviderWithDefaultModel]);
+	// R3 (2026-05-20)：默认行（providerOverride === null）的语义从「auto · 用
+	// agent 自己 declared 的 backend」变成「forgeax 原生 · 直发 Session/EventBus」。
+	// 三方 CLI 桥（claude-code 等）继续作为下面的可选条目。等 commands.attach_script_agent
+	// 把 ScriptAgent 接进 Session 之后，下面这些 CLI 行整片下线。
+	const currentLabel = providerOverride
+		? (providers.find((p) => p.id === providerOverride)?.displayName ??
+			PROVIDER_DISPLAY_FALLBACK[providerOverride] ??
+			providerOverride)
+		: "ForgeaX";
+	// Detect "override is set but its provider is currently 不可用". The probe
+	// row exists (claude-code/codex registered) but health.ok=false. We can't
+	// clear the persisted override (user picked it deliberately), but we can
+	// warn in the button tooltip + apply a cb-cli-warning class so the user
+	// knows turns will error before they hit send.
+	const overrideRow = providerOverride
+		? providers.find((p) => p.id === providerOverride)
+		: undefined;
+	const overrideDown = !!overrideRow && !overrideRow.health.ok;
+	const cliButtonTitle = isStreaming
+		? "Streaming — provider locked for this turn (Esc/Stop to cancel)"
+		: overrideDown
+			? t("composer.cliButtonOverrideDown", {
+					provider: providerOverride ?? "",
+				})
+			: providerOverride
+				? `All turns route via ${providerOverride}. Pick 'forgeax' for the native EventBus path.`
+				: t("composer.cliButtonForgeaxNative");
+	// @ / slash / image icons are placeholders for upcoming features. Title-tooltip
+	// alone is hover-only + touch-unfriendly. Same click-hint pattern as iter-55
+	// AgentSwitcher: aria-disabled lets clicks reach the handler, a brand-yellow
+	// pill flashes "即将上线" for 2s.
+	const [hintFor, setHintFor] = useState<CbHintId | null>(null);
+	useEffect(() => {
+		if (!hintFor) return;
+		const id = setTimeout(() => setHintFor(null), 2000);
+		return () => clearTimeout(id);
+	}, [hintFor]);
 
-  // Start a provider-owned persistent transport once the active Studio
-  // session, agent, provider and model are known. This is intentionally an
-  // empty transport warm-up: the server composes the exact same native
-  // MCP/plugin/skill/CLAUDE.md/settings surface as the real turn and sends no
-  // hidden model prompt. Kernels without this optional capability return a
-  // no-op, so the chat UI stays provider-agnostic. Wait for the selection to
-  // settle before starting optional work: rapid session CRUD must win over a
-  // warm-up for a session the user has already left.
-  useEffect(() => {
-    if (!activeSid || !activeAgent || !providerOverride || !CLI_CATALOG_IDS.has(providerOverride)) return;
-    if (agentModelLoading || !hasAgentModel || !activeCliProviderReady || isStreaming) return;
-    const attemptKey = `${activeSid}\u0000${activeAgent}\u0000${providerOverride}`;
-    const timer = window.setTimeout(() => {
-      void runCliPrewarm({
-        attemptKey,
-        cooldownKey: providerOverride,
-        inFlight: cliPrewarmInFlight.current,
-        providerInFlight: cliPrewarmProviderInFlight.current,
-        succeeded: cliPrewarmSucceeded.current,
-        cooldowns: cliPrewarmCooldowns.current,
-        request: (endpoint) => fetch(endpoint, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            sessionId: activeSid,
-            // Keep the legacy wire field for older hosts; the server canonicalizes
-            // the provider-native key from (sessionId, agentId).
-            threadId: activeSid,
-            agentId: activeAgent,
-            providerOverride,
-          }),
-        }),
-      }).catch((error) => {
-        // Prewarm is an optimization. A provider failure must remain visible on
-        // the real turn and must never block composing or sending a message.
-        console.warn('[composer] cli transport prewarm failed', {
-          provider: providerOverride,
-          sid: activeSid,
-          agent: activeAgent,
-          error,
-        });
-      });
-    }, 1_000);
-    return () => window.clearTimeout(timer);
-  }, [activeAgent, activeCliProviderReady, activeSid, agentModelLoading, hasAgentModel, isStreaming, providerOverride]);
+	// ── 多模态:暂存待发送的附件(file picker / 粘贴 / 拖拽)。发送时随 sendMessage 的
+	//   attachments 传出:kind:'image' → image block,kind:'document' → PDF document block
+	//   (均由 forgeax-core 内核 facade 组块);kind:'file' = 其余任意格式,编排层落盘
+	//   uploads/ 换成路径注记,agent 用工具解析。发送后清空。data 用 base64(无 dataUrl 前缀)。
+	//   文本类文件不走附件:读内容折成文件 chip(expandPills 发送时原文还原给模型)。
+	//   唯一拒收理由 = 超过 2MB,给 3s「内容太大」提示,不静默吞。
+	type PendingAttachment = {
+		id: string;
+		name: string;
+		data: string;
+		mediaType: string;
+		kind: "image" | "document" | "file";
+		ownerGeneration: number;
+	};
+	type FileReadResult =
+		| { attachment: PendingAttachment }
+		| { pill: ReturnType<typeof buildPastedFilePill> }
+		| { error: string };
+	type ComposerOwner = { sid: string; agentId: string; generation: number };
+	const [attached, setAttached] = useState<PendingAttachment[]>([]);
+	const attachedRef = useRef<PendingAttachment[]>([]);
+	const pendingFileReadsRef = useRef<Map<Promise<void>, number>>(new Map());
+	const fileReadCommitQueueRef = useRef<Promise<void>>(Promise.resolve());
+	const ownerRef = useRef<ComposerOwner | null>(null);
+	const applyingPendingTextRef = useRef(false);
+	const textOwnerGenerationRef = useRef<number | null>(null);
+	const connectResumeOwnerRef = useRef<ComposerOwner | null>(null);
+	const mountedRef = useRef(true);
+	const submitPreparingRef = useRef(false);
+	const [pendingFileReadCount, setPendingFileReadCount] = useState(0);
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+			if (ownerRef.current) {
+				writeComposerDraft(
+					ownerRef.current.sid,
+					ownerRef.current.agentId,
+					ref.current?.getValue() ?? textRef.current,
+				);
+				ownerRef.current = {
+					...ownerRef.current,
+					generation: ownerRef.current.generation + 1,
+				};
+			}
+		};
+	}, []);
+	const currentOwner = useCallback((): ComposerOwner | null => {
+		const shell = useShellStore.getState();
+		const sid = shell.activeSid;
+		const agentId = sid
+			? (shell.tabs.find((tab) => tab.sid === sid)?.agentId ?? null)
+			: null;
+		if (!sid || !agentId) return null;
+		const previous = ownerRef.current;
+		if (!previous || previous.sid !== sid || previous.agentId !== agentId) {
+			ownerRef.current = {
+				sid,
+				agentId,
+				generation: (previous?.generation ?? 0) + 1,
+			};
+		}
+		return ownerRef.current;
+	}, []);
+	const ownsComposer = (owner: ComposerOwner): boolean => {
+		if (!mountedRef.current) return false;
+		const current = currentOwner();
+		return (
+			!!current &&
+			current.sid === owner.sid &&
+			current.agentId === owner.agentId &&
+			current.generation === owner.generation
+		);
+	};
+	const bindTextToCurrentOwner = (value: string) => {
+		const owner = currentOwner();
+		textOwnerGenerationRef.current = value && owner ? owner.generation : null;
+		setText(value);
+		writeComposerDraft(
+			owner?.sid ?? activeSid,
+			owner?.agentId ?? activeAgent,
+			value,
+		);
+		if (applyingPendingTextRef.current) return;
+		// A manual edit starts a fresh recommendation revision. The bridge still
+		// dedupes clicks queued in the same revision.
+		advanceComposerTextRevision();
+	};
+	const updatePendingFileReadCount = useCallback(() => {
+		if (!mountedRef.current) return;
+		const owner = currentOwner();
+		const count = owner
+			? Array.from(pendingFileReadsRef.current.values()).filter(
+					(generation) => generation === owner.generation,
+				).length
+			: 0;
+		setPendingFileReadCount(count);
+	}, [currentOwner]);
+	useLayoutEffect(() => {
+		const owner = currentOwner();
+		attachedRef.current = owner
+			? attachedRef.current.filter(
+					(item) => item.ownerGeneration === owner.generation,
+				)
+			: [];
+		setAttached(attachedRef.current);
+		const currentText = ref.current?.getValue() ?? textRef.current;
+		textOwnerGenerationRef.current =
+			currentText && owner ? owner.generation : null;
+		connectResumeOwnerRef.current = null;
+		updatePendingFileReadCount();
+	}, [updatePendingFileReadCount, currentOwner]);
+	const [fileNotice, setFileNotice] = useState<string | null>(null);
+	useEffect(() => {
+		if (!fileNotice) return;
+		const id = setTimeout(() => setFileNotice(null), 3000);
+		return () => clearTimeout(id);
+	}, [fileNotice]);
+	const imgInputRef = useRef<HTMLInputElement | null>(null);
+	const readAttachment = (
+		f: File,
+		kind: PendingAttachment["kind"],
+		fallbackType: string,
+		ownerGeneration: number,
+	): Promise<FileReadResult> =>
+		new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => {
+				const res = typeof reader.result === "string" ? reader.result : "";
+				const comma = res.indexOf(",");
+				const data = comma >= 0 ? res.slice(comma + 1) : res; // 剥 dataUrl 前缀,只留 base64
+				resolve({
+					attachment: {
+						id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+						// Clipboard screenshots often arrive as "" or a colliding "image.png".
+						// Stamp a unique name so multi-paste uploads don't overwrite each other
+						// in the UI label (server also uniquePath's on disk).
+						name: (() => {
+							const raw = (f.name || "").trim();
+							if (raw && raw !== "image.png" && raw !== "image.jpg") return raw;
+							const ext =
+								f.type === "image/jpeg" || /\.jpe?g$/i.test(raw)
+									? "jpg"
+									: f.type === "image/webp" || /\.webp$/i.test(raw)
+										? "webp"
+										: f.type === "image/gif" || /\.gif$/i.test(raw)
+											? "gif"
+											: "png";
+							return `paste-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
+						})(),
+						data,
+						mediaType: f.type || fallbackType,
+						kind,
+						ownerGeneration,
+					},
+				});
+			};
+			reader.onerror = () =>
+				reject(reader.error ?? new Error(`Failed to read ${f.name}`));
+			reader.onabort = () => reject(new Error(`Reading ${f.name} was aborted`));
+			reader.readAsDataURL(f);
+		});
+	const addFiles = (files: FileList | File[] | null) => {
+		if (!files) return;
+		const owner = currentOwner();
+		if (!owner) return;
+		const reads: Array<Promise<FileReadResult>> = [];
+		for (const f of Array.from(files)) {
+			// 所有类型先走同一份单文件上限,再决定读取方式。
+			if (f.size > ATTACH_FILE_MAX_BYTES) {
+				setFileNotice(
+					t("composer.fileTooLarge", {
+						name: f.name,
+						limit: ATTACH_FILE_MAX_LABEL,
+					}),
+				);
+				continue;
+			}
+			let read: Promise<FileReadResult>;
+			// SVG is image/* but the image block only takes raster formats — it's XML,
+			// so route it down the text path.
+			if (f.type.startsWith("image/") && f.type !== "image/svg+xml") {
+				read = readAttachment(f, "image", "image/png", owner.generation);
+			} else if (f.type === "application/pdf" || /\.pdf$/i.test(f.name)) {
+				read = readAttachment(
+					f,
+					"document",
+					"application/pdf",
+					owner.generation,
+				);
+			} else if (isTextLikeFile(f)) {
+				read = f
+					.text()
+					.then((text) => ({ pill: buildPastedFilePill(f.name, text) }));
+			} else {
+				// 其余任意格式(Excel/zip/音频…)不拒收:kind:'file' 附件,编排层落盘换路径注记。
+				read = readAttachment(
+					f,
+					"file",
+					"application/octet-stream",
+					owner.generation,
+				);
+			}
+			reads.push(
+				read.catch((err) => {
+					console.warn("[composer] file read failed", { name: f.name, err });
+					return { error: f.name };
+				}),
+			);
+		}
+		if (reads.length === 0) return;
 
-  // Auto-close the dropdown if a stream starts while it's open. The override
-  // wouldn't apply to the in-flight turn anyway, so showing a clickable list
-  // while the result is already streaming is misleading.
-  useEffect(() => {
-    if (isStreaming && cliOpen) setCliOpen(false);
-  }, [isStreaming, cliOpen]);
-  // Close dropdown on outside click or Esc.
-  useEffect(() => {
-    if (!cliOpen) return;
-    const onClick = (e: MouseEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (!t?.closest('.cb-cli')) setCliOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        setCliOpen(false);
-        return;
-      }
-      // ↑/↓ cycle through items; Enter commits the focused one.
-      // Item indices: 0 = 'forgeax' (default row), 1..N = providers[i-1].
-      // Read via refs so the closure sees current values (effect re-runs only on cliOpen).
-      const list = providersRef.current;
-      const total = list.length + 1;
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setCliFocused((i) => (i + 1 + total) % total);
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setCliFocused((i) => (i <= 0 ? total - 1 : i - 1));
-      } else if (e.key === 'Enter') {
-        const focused = cliFocusedRef.current;
-        if (focused < 0) return;
-        e.preventDefault();
-        if (focused === 0) {
-          switchProviderWithDefaultModel(null);
-        } else {
-          const p = list[focused - 1];
-          // Only commit + close on a healthy pick. Enter on a DOWN row used to
-          // silently close the dropdown, which felt like a swallowed keystroke
-          // (mouse click on disabled row is already blocked by `disabled=`).
-          // Keep the menu open so the user can pick another row instead.
-          if (p && p.health.ok) {
-            switchProviderWithDefaultModel(p.id);
-          }
-        }
-      }
-    };
-    window.addEventListener('click', onClick);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('click', onClick);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [cliOpen, switchProviderWithDefaultModel]);
-  // R3 (2026-05-20)：默认行（providerOverride === null）的语义从「auto · 用
-  // agent 自己 declared 的 backend」变成「forgeax 原生 · 直发 Session/EventBus」。
-  // 三方 CLI 桥（claude-code 等）继续作为下面的可选条目。等 commands.attach_script_agent
-  // 把 ScriptAgent 接进 Session 之后，下面这些 CLI 行整片下线。
-  const currentLabel = providerOverride
-    ? providers.find((p) => p.id === providerOverride)?.displayName
-        ?? PROVIDER_DISPLAY_FALLBACK[providerOverride]
-        ?? providerOverride
-    : 'ForgeaX';
-  // Detect "override is set but its provider is currently 不可用". The probe
-  // row exists (claude-code/codex registered) but health.ok=false. We can't
-  // clear the persisted override (user picked it deliberately), but we can
-  // warn in the button tooltip + apply a cb-cli-warning class so the user
-  // knows turns will error before they hit send.
-  const overrideRow = providerOverride
-    ? providers.find((p) => p.id === providerOverride)
-    : undefined;
-  const overrideDown = !!overrideRow && !overrideRow.health.ok;
-  const cliButtonTitle = isStreaming
-    ? 'Streaming — provider locked for this turn (Esc/Stop to cancel)'
-    : overrideDown
-      ? t('composer.cliButtonOverrideDown', { provider: providerOverride ?? '' })
-      : providerOverride
-        ? `All turns route via ${providerOverride}. Pick 'forgeax' for the native EventBus path.`
-        : t('composer.cliButtonForgeaxNative');
-  // @ / slash / image icons are placeholders for upcoming features. Title-tooltip
-  // alone is hover-only + touch-unfriendly. Same click-hint pattern as iter-55
-  // AgentSwitcher: aria-disabled lets clicks reach the handler, a brand-yellow
-  // pill flashes "即将上线" for 2s.
-  const [hintFor, setHintFor] = useState<CbHintId | null>(null);
-  useEffect(() => {
-    if (!hintFor) return;
-    const id = setTimeout(() => setHintFor(null), 2000);
-    return () => clearTimeout(id);
-  }, [hintFor]);
+		// Commit one accepted selection in source order. Submission drains every
+		// registered batch before it snapshots text and attachments for this turn.
+		const resultsReady = Promise.all(reads);
+		const batch = fileReadCommitQueueRef.current.then(async () => {
+			const results = await resultsReady;
+			if (!ownsComposer(owner)) return;
+			const nextAttachments: PendingAttachment[] = [];
+			for (const result of results) {
+				if ("error" in result) {
+					setFileNotice(t("settings.readFailed", { error: result.error }));
+				} else if ("pill" in result) {
+					textOwnerGenerationRef.current = owner.generation;
+					ref.current?.insertPill(result.pill);
+				} else {
+					nextAttachments.push(result.attachment);
+				}
+			}
+			if (nextAttachments.length > 0) {
+				attachedRef.current = [...attachedRef.current, ...nextAttachments];
+				setAttached(attachedRef.current);
+			}
+		});
+		fileReadCommitQueueRef.current = batch.catch(() => undefined);
+		pendingFileReadsRef.current.set(batch, owner.generation);
+		updatePendingFileReadCount();
+		const finishBatch = () => {
+			pendingFileReadsRef.current.delete(batch);
+			updatePendingFileReadCount();
+		};
+		void batch.then(finishBatch, finishBatch);
+	};
+	const removeAttached = (id: string) => {
+		attachedRef.current = attachedRef.current.filter((i) => i.id !== id);
+		setAttached(attachedRef.current);
+	};
+	/** 把暂存附件转成 sendMessage 的 attachments。name 供编排层落盘 kind:'file' 用。 */
+	const takeAttachments = (
+		owner: ComposerOwner,
+	): Array<Record<string, unknown>> | undefined => {
+		const owned = attachedRef.current.filter(
+			(item) => item.ownerGeneration === owner.generation,
+		);
+		if (owned.length === 0) return undefined;
+		const atts = owned.map((i) => ({
+			kind: i.kind,
+			name: i.name,
+			mediaType: i.mediaType,
+			data: i.data,
+		}));
+		attachedRef.current = attachedRef.current.filter(
+			(item) => item.ownerGeneration !== owner.generation,
+		);
+		setAttached(attachedRef.current);
+		return atts;
+	};
+	const slashPrefixMatch = text.match(/^\/([a-z0-9_-]*)$/i);
+	const slashPrefix = slashPrefixMatch ? slashPrefixMatch[1] : null;
+	const slashHasSkills = !!(busSkills && busSkills.length > 0);
+	const insertSkillTrigger = useCallback(
+		(row: BusSkillRow) => {
+			const pill = buildSlashPill({
+				trigger: row.trigger,
+				source: row.source,
+				displayName: row.displayName,
+				description: row.descZh,
+			});
+			setSlashOpen(false);
+			const editor = ref.current;
+			if (slashPrefixMatch) {
+				if (editor) {
+					editor.setValue("");
+					editor.insertPill(pill);
+					editor.focus();
+				} else {
+					setText(`${encodePill(pill)} `);
+				}
+			} else if (editor) {
+				editor.focus();
+				editor.insertPill(pill);
+			} else {
+				setText((currentText) => `${currentText}${encodePill(pill)} `);
+			}
+		},
+		[slashPrefixMatch],
+	);
 
-  // ── 多模态:暂存待发送的附件(file picker / 粘贴 / 拖拽)。发送时随 sendMessage 的
-  //   attachments 传出:kind:'image' → image block,kind:'document' → PDF document block
-  //   (均由 forgeax-core 内核 facade 组块);kind:'file' = 其余任意格式,编排层落盘
-  //   uploads/ 换成路径注记,agent 用工具解析。发送后清空。data 用 base64(无 dataUrl 前缀)。
-  //   文本类文件不走附件:读内容折成文件 chip(expandPills 发送时原文还原给模型)。
-  //   唯一拒收理由 = 超过 2MB,给 3s「内容太大」提示,不静默吞。
-  type PendingAttachment = { id: string; name: string; data: string; mediaType: string; kind: 'image' | 'document' | 'file'; ownerGeneration: number };
-  type FileReadResult =
-    | { attachment: PendingAttachment }
-    | { pill: ReturnType<typeof buildPastedFilePill> }
-    | { error: string };
-  type ComposerOwner = { sid: string; agentId: string; generation: number };
-  const [attached, setAttached] = useState<PendingAttachment[]>([]);
-  const attachedRef = useRef<PendingAttachment[]>([]);
-  const pendingFileReadsRef = useRef<Map<Promise<void>, number>>(new Map());
-  const fileReadCommitQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const ownerRef = useRef<ComposerOwner | null>(null);
-  const applyingPendingTextRef = useRef(false);
-  const textOwnerGenerationRef = useRef<number | null>(null);
-  const connectResumeOwnerRef = useRef<ComposerOwner | null>(null);
-  const mountedRef = useRef(true);
-  const submitPreparingRef = useRef(false);
-  const [pendingFileReadCount, setPendingFileReadCount] = useState(0);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      if (ownerRef.current) {
-        writeComposerDraft(
-          ownerRef.current.sid,
-          ownerRef.current.agentId,
-          ref.current?.getValue() ?? textRef.current,
-        );
-        ownerRef.current = { ...ownerRef.current, generation: ownerRef.current.generation + 1 };
-      }
-    };
-  }, []);
-  const currentOwner = (): ComposerOwner | null => {
-    const shell = useShellStore.getState();
-    const sid = shell.activeSid;
-    const agentId = sid ? (shell.tabs.find((tab) => tab.sid === sid)?.agentId ?? null) : null;
-    if (!sid || !agentId) return null;
-    const previous = ownerRef.current;
-    if (!previous || previous.sid !== sid || previous.agentId !== agentId) {
-      ownerRef.current = { sid, agentId, generation: (previous?.generation ?? 0) + 1 };
-    }
-    return ownerRef.current;
-  };
-  const ownsComposer = (owner: ComposerOwner): boolean => {
-    if (!mountedRef.current) return false;
-    const current = currentOwner();
-    return !!current
-      && current.sid === owner.sid
-      && current.agentId === owner.agentId
-      && current.generation === owner.generation;
-  };
-  const bindTextToCurrentOwner = (value: string) => {
-    const owner = currentOwner();
-    textOwnerGenerationRef.current = value && owner ? owner.generation : null;
-    setText(value);
-    writeComposerDraft(owner?.sid ?? activeSid, owner?.agentId ?? activeAgent, value);
-    if (applyingPendingTextRef.current) return;
-    // A manual edit starts a fresh recommendation revision. The bridge still
-    // dedupes clicks queued in the same revision.
-    advanceComposerTextRevision();
-  };
-  const updatePendingFileReadCount = () => {
-    if (!mountedRef.current) return;
-    const owner = currentOwner();
-    const count = owner
-      ? Array.from(pendingFileReadsRef.current.values()).filter((generation) => generation === owner.generation).length
-      : 0;
-    setPendingFileReadCount(count);
-  };
-  useLayoutEffect(() => {
-    const owner = currentOwner();
-    attachedRef.current = owner
-      ? attachedRef.current.filter((item) => item.ownerGeneration === owner.generation)
-      : [];
-    setAttached(attachedRef.current);
-    const currentText = ref.current?.getValue() ?? textRef.current;
-    textOwnerGenerationRef.current = currentText && owner ? owner.generation : null;
-    connectResumeOwnerRef.current = null;
-    updatePendingFileReadCount();
-  }, [activeSid, activeAgent]);
-  const [fileNotice, setFileNotice] = useState<string | null>(null);
-  useEffect(() => {
-    if (!fileNotice) return;
-    const id = setTimeout(() => setFileNotice(null), 3000);
-    return () => clearTimeout(id);
-  }, [fileNotice]);
-  const imgInputRef = useRef<HTMLInputElement | null>(null);
-  const readAttachment = (f: File, kind: PendingAttachment['kind'], fallbackType: string, ownerGeneration: number): Promise<FileReadResult> => (
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const res = typeof reader.result === 'string' ? reader.result : '';
-        const comma = res.indexOf(',');
-        const data = comma >= 0 ? res.slice(comma + 1) : res; // 剥 dataUrl 前缀,只留 base64
-        resolve({
-          attachment: {
-            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            // Clipboard screenshots often arrive as "" or a colliding "image.png".
-            // Stamp a unique name so multi-paste uploads don't overwrite each other
-            // in the UI label (server also uniquePath's on disk).
-            name: (() => {
-              const raw = (f.name || '').trim();
-              if (raw && raw !== 'image.png' && raw !== 'image.jpg') return raw;
-              const ext = (f.type === 'image/jpeg' || /\.jpe?g$/i.test(raw)) ? 'jpg'
-                : (f.type === 'image/webp' || /\.webp$/i.test(raw)) ? 'webp'
-                : (f.type === 'image/gif' || /\.gif$/i.test(raw)) ? 'gif'
-                : 'png';
-              return `paste-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
-            })(),
-            data,
-            mediaType: f.type || fallbackType,
-            kind,
-            ownerGeneration,
-          },
-        });
-      };
-      reader.onerror = () => reject(reader.error ?? new Error(`Failed to read ${f.name}`));
-      reader.onabort = () => reject(new Error(`Reading ${f.name} was aborted`));
-      reader.readAsDataURL(f);
-    })
-  );
-  const addFiles = (files: FileList | File[] | null) => {
-    if (!files) return;
-    const owner = currentOwner();
-    if (!owner) return;
-    const reads: Array<Promise<FileReadResult>> = [];
-    for (const f of Array.from(files)) {
-      // 所有类型先走同一份单文件上限,再决定读取方式。
-      if (f.size > ATTACH_FILE_MAX_BYTES) {
-        setFileNotice(t('composer.fileTooLarge', { name: f.name, limit: ATTACH_FILE_MAX_LABEL }));
-        continue;
-      }
-      let read: Promise<FileReadResult>;
-      // SVG is image/* but the image block only takes raster formats — it's XML,
-      // so route it down the text path.
-      if (f.type.startsWith('image/') && f.type !== 'image/svg+xml') {
-        read = readAttachment(f, 'image', 'image/png', owner.generation);
-      } else if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
-        read = readAttachment(f, 'document', 'application/pdf', owner.generation);
-      } else if (isTextLikeFile(f)) {
-        read = f.text().then((text) => ({ pill: buildPastedFilePill(f.name, text) }));
-      } else {
-        // 其余任意格式(Excel/zip/音频…)不拒收:kind:'file' 附件,编排层落盘换路径注记。
-        read = readAttachment(f, 'file', 'application/octet-stream', owner.generation);
-      }
-      reads.push(read.catch((err) => {
-        console.warn('[composer] file read failed', { name: f.name, err });
-        return { error: f.name };
-      }));
-    }
-    if (reads.length === 0) return;
+	// P3.45 — close slash popover on outside-click or Escape. Mirrors the cliOpen
+	// dismissal contract so two popovers in the same composer-bar behave the
+	// same way to the player.
+	useEffect(() => {
+		if (!slashOpen) {
+			setSlashFocused(-1);
+			return;
+		}
+		setSlashFocused(0);
+		const onClick = (e: MouseEvent) => {
+			const t = e.target as HTMLElement | null;
+			if (!t?.closest(".cb-slash")) setSlashOpen(false);
+		};
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") {
+				e.preventDefault();
+				setSlashOpen(false);
+				return;
+			}
+			const list = filteredSkillsRef.current;
+			const total = list.length;
+			if (total === 0) return;
+			if (e.key === "ArrowDown") {
+				e.preventDefault();
+				setSlashFocused((i) => (i < 0 ? 0 : (i + 1) % total));
+			} else if (e.key === "ArrowUp") {
+				e.preventDefault();
+				setSlashFocused((i) => (i <= 0 ? total - 1 : i - 1));
+			} else if (e.key === "Enter") {
+				const idx = slashFocusedRef.current;
+				if (idx < 0 || idx >= total) return;
+				e.preventDefault();
+				insertSkillTrigger(list[idx]);
+			}
+		};
+		window.addEventListener("click", onClick);
+		window.addEventListener("keydown", onKey);
+		return () => {
+			window.removeEventListener("click", onClick);
+			window.removeEventListener("keydown", onKey);
+		};
+	}, [slashOpen, insertSkillTrigger]);
 
-    // Commit one accepted selection in source order. Submission drains every
-    // registered batch before it snapshots text and attachments for this turn.
-    const resultsReady = Promise.all(reads);
-    const batch = fileReadCommitQueueRef.current.then(async () => {
-      const results = await resultsReady;
-      if (!ownsComposer(owner)) return;
-      const nextAttachments: PendingAttachment[] = [];
-      for (const result of results) {
-        if ('error' in result) {
-          setFileNotice(t('settings.readFailed', { error: result.error }));
-        } else if ('pill' in result) {
-          textOwnerGenerationRef.current = owner.generation;
-          ref.current?.insertPill(result.pill);
-        } else {
-          nextAttachments.push(result.attachment);
-        }
-      }
-      if (nextAttachments.length > 0) {
-        attachedRef.current = [...attachedRef.current, ...nextAttachments];
-        setAttached(attachedRef.current);
-      }
-    });
-    fileReadCommitQueueRef.current = batch.catch(() => undefined);
-    pendingFileReadsRef.current.set(batch, owner.generation);
-    updatePendingFileReadCount();
-    const finishBatch = () => {
-      pendingFileReadsRef.current.delete(batch);
-      updatePendingFileReadCount();
-    };
-    void batch.then(finishBatch, finishBatch);
-  };
-  const removeAttached = (id: string) => {
-    attachedRef.current = attachedRef.current.filter((i) => i.id !== id);
-    setAttached(attachedRef.current);
-  };
-  /** 把暂存附件转成 sendMessage 的 attachments。name 供编排层落盘 kind:'file' 用。 */
-  const takeAttachments = (owner: ComposerOwner): Array<Record<string, unknown>> | undefined => {
-    const owned = attachedRef.current.filter((item) => item.ownerGeneration === owner.generation);
-    if (owned.length === 0) return undefined;
-    const atts = owned.map((i) => ({ kind: i.kind, name: i.name, mediaType: i.mediaType, data: i.data }));
-    attachedRef.current = attachedRef.current.filter((item) => item.ownerGeneration !== owner.generation);
-    setAttached(attachedRef.current);
-    return atts;
-  };
+	// Text-driven slash popover: auto-open when text is just a command prefix
+	// (e.g. "/", "/c", "/compact") and auto-close otherwise.
+	useEffect(() => {
+		if (slashPrefix !== null && slashHasSkills) {
+			setSlashOpen(true);
+		} else if (slashPrefix === null) {
+			setSlashOpen(false);
+		}
+	}, [slashPrefix, slashHasSkills]);
 
-  // P3.45 — close slash popover on outside-click or Escape. Mirrors the cliOpen
-  // dismissal contract so two popovers in the same composer-bar behave the
-  // same way to the player.
-  useEffect(() => {
-    if (!slashOpen) {
-      setSlashFocused(-1);
-      return;
-    }
-    setSlashFocused(0);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        setSlashOpen(false);
-        return;
-      }
-      const list = filteredSkillsRef.current;
-      const total = list.length;
-      if (total === 0) return;
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSlashFocused((i) => (i < 0 ? 0 : (i + 1) % total));
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setSlashFocused((i) => (i <= 0 ? total - 1 : i - 1));
-      } else if (e.key === 'Enter') {
-        if ((e.target as HTMLElement)?.closest('.cb-slash-menu button, .cb-slash-menu [role=button]')) return;
-        const idx = slashFocusedRef.current;
-        if (idx < 0 || idx >= total) return;
-        e.preventDefault();
-        insertSkillTrigger(list[idx]);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [slashOpen]);
+	// Filtered skills for the popover — full list when opened by button with no
+	// prefix, or narrowed when the user is typing a prefix like "/c".
+	const filteredSkills = useMemo(() => {
+		if (!busSkills) return [];
+		if (slashPrefix === null || slashPrefix === "") return busSkills;
+		return busSkills.filter((s) =>
+			s.trigger.toLowerCase().startsWith(`/${slashPrefix.toLowerCase()}`),
+		);
+	}, [busSkills, slashPrefix]);
+	const filteredSkillsRef = useRef<BusSkillRow[]>([]);
+	useEffect(() => {
+		filteredSkillsRef.current = filteredSkills;
+		if (filteredSkills.length > 0) setSlashFocused(0);
+		else setSlashFocused(-1);
+	}, [filteredSkills]);
 
-  // P3.45 — insert a skill/command pill at the cursor (or replace a typed
-  // prefix like "/c"). Trailing space lets the user type arguments immediately.
-  const insertSkillTrigger = (row: BusSkillRow) => {
-    slashRestoreComposer.current = true;
-    const pill = buildSlashPill({
-      trigger: row.trigger,
-      source: row.source,
-      displayName: row.displayName,
-      description: row.descZh,
-    });
-    setSlashOpen(false);
-    const r = ref.current;
-    if (slashPrefixMatch) {
-      if (r) {
-        r.setValue('');
-        r.insertPill(pill);
-        r.focus();
-      } else {
-        setText(`${encodePill(pill)} `);
-      }
-    } else if (r) {
-      r.focus();
-      r.insertPill(pill);
-    } else {
-      setText((t) => `${t}${encodePill(pill)} `);
-    }
-  };
+	const selectSummonedAgent = useCallback(
+		(agentId: string) => {
+			setAtOpen(false);
+			setSummonManual(true);
+			setSummonAgentId(agentId);
+		},
+		[setSummonAgentId, setSummonManual],
+	);
 
-  const slashHasSkills = !!(busSkills && busSkills.length > 0);
+	// P3.46 — outside-click / Esc dismissal for the @ popover. Same shape as the
+	// slash popover (P3.45) and cli dropdown — players learn one popover language.
+	useEffect(() => {
+		if (!atOpen) {
+			setAtFocused(-1);
+			return;
+		}
+		setAtFocused(0);
+		const onClick = (e: MouseEvent) => {
+			const t = e.target as HTMLElement | null;
+			if (!t?.closest(".cb-at, .cb-at-menu")) setAtOpen(false);
+		};
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") {
+				e.preventDefault();
+				setAtOpen(false);
+				return;
+			}
+			const list = agentMentionsRef.current ?? [];
+			const total = list.length;
+			if (total === 0) return;
+			if (e.key === "ArrowDown") {
+				e.preventDefault();
+				setAtFocused((i) => (i < 0 ? 0 : (i + 1) % total));
+			} else if (e.key === "ArrowUp") {
+				e.preventDefault();
+				setAtFocused((i) => (i <= 0 ? total - 1 : i - 1));
+			} else if (e.key === "Enter") {
+				const idx = atFocusedRef.current;
+				if (idx < 0 || idx >= total) return;
+				e.preventDefault();
+				selectSummonedAgent(list[idx].id);
+			}
+		};
+		window.addEventListener("click", onClick);
+		window.addEventListener("keydown", onKey);
+		return () => {
+			window.removeEventListener("click", onClick);
+			window.removeEventListener("keydown", onKey);
+		};
+	}, [atOpen, selectSummonedAgent]);
 
-  // Text-driven slash popover: auto-open when text is just a command prefix
-  // (e.g. "/", "/c", "/compact") and auto-close otherwise.
-  const slashPrefixMatch = text.match(/^\/([a-z0-9_-]*)$/i);
-  const slashPrefix = slashPrefixMatch ? slashPrefixMatch[1] : null;
-  useEffect(() => {
-    if (slashPrefix !== null && slashHasSkills) {
-      setSlashOpen(true);
-    } else if (slashPrefix === null) {
-      setSlashOpen(false);
-    }
-  }, [slashPrefix, slashHasSkills]);
+	const atHasMentions =
+		specialistSummonEnabled && !!(agentMentions && agentMentions.length > 0);
+	const summonedAgent = resolvedSummonAgentId
+		? (availableAgents.find((agent) => agent.id === resolvedSummonAgentId) ??
+			null)
+		: null;
 
-  // Filtered skills for the popover — full list when opened by button with no
-  // prefix, or narrowed when the user is typing a prefix like "/c".
-  const filteredSkills = useMemo(() => {
-    if (!busSkills) return [];
-    if (slashPrefix === null || slashPrefix === '') return busSkills.filter(row => showCommands || row.source === 'skill');
-    return busSkills.filter((s) =>
-      s.trigger.toLowerCase().startsWith(`/${slashPrefix.toLowerCase()}`),
-    );
-  }, [busSkills, slashPrefix, showCommands]);
-  const filteredSkillsRef = useRef<BusSkillRow[]>([]);
-  useEffect(() => {
-    filteredSkillsRef.current = filteredSkills;
-    if (filteredSkills.length > 0) setSlashFocused(0);
-    else setSlashFocused(-1);
-  }, [filteredSkills]);
+	// P3.48 — open Bus admin and expand the given plugin row. Reuses the
+	// pendingBusExpandId pipeline (P2.7f) shared with cb-mbsel-arrow / extension Page tab
+	// placeholder / AgentsPanel bus pill / cli dropdown so popover deep-links
+	// feel identical across all surfaces.
+	const openInBusAdmin = (extensionId: string) => {
+		emitDeepLink("bus:expand-plugin", extensionId);
+		openOverlay("settings", "plugins");
+		setAtOpen(false);
+		setSlashOpen(false);
+	};
+	// 2026-05-21 — cb-mbsel popover keyboard nav / outside-click / pickModel 写盘
+	// 全部下放到 <ModelPicker mode="single" writeToAgent={...}/>。Composer 这边只
+	// 负责拿到当前 selected 显示在按钮上，并把 onChange 同步到本地 agentModel state
+	// 兜底（picker 内部已经写过盘）。
+	const cliButtonLabel = compactProviderLabel(currentLabel, providerOverride);
+	useEffect(() => {
+		if (!isStreaming) ref.current?.focus();
+	}, [isStreaming]);
 
-  useEffect(() => {
-    slashMenuRef.current?.querySelector<HTMLElement>(`[data-skill-index="${slashFocused}"]`)?.scrollIntoView({ block: 'nearest' });
-  }, [slashFocused]);
+	// Pending pill insertion bridge — any surface (right-click → "引用到 Chat") can
+	// call requestComposerInsert(pill); we consume it here, drop the chip at the
+	// current caret, then clear the slot.
+	//
+	// We defer one rAF so the Radix DropdownMenu has fully closed and browser focus
+	// has returned to the contenteditable before we try to insert at the caret.
+	// Without the defer, window.getSelection() may still point at the menu overlay,
+	// causing insertNodeAtCaret to fall back to end-of-content or silently skip.
+	const composerPendingInsert = useComposerPendingInsert();
+	useEffect(() => {
+		if (!composerPendingInsert) return;
+		const id = requestAnimationFrame(() => {
+			const r = ref.current;
+			if (!r) {
+				// Composer not mounted yet (ChatPanel closed) — leave the pending pill in
+				// the store; it will be picked up on the next mount of this component.
+				return;
+			}
+			r.focus();
+			r.insertPill(composerPendingInsert);
+			clearComposerPendingInsert();
+		});
+		return () => cancelAnimationFrame(id);
+	}, [composerPendingInsert]);
 
-  // P3.46 — outside-click / Esc dismissal for the @ popover. Same shape as the
-  // slash popover (P3.45) and cli dropdown — players learn one popover language.
-  useEffect(() => {
-    if (!atOpen) {
-      setAtFocused(-1);
-      return;
-    }
-    setAtFocused(0);
-    const onClick = (e: MouseEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (!t?.closest('.cb-at, .cb-at-menu')) setAtOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        setAtOpen(false);
-        return;
-      }
-      const list = agentMentionsRef.current ?? [];
-      const total = list.length;
-      if (total === 0) return;
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setAtFocused((i) => (i < 0 ? 0 : (i + 1) % total));
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setAtFocused((i) => (i <= 0 ? total - 1 : i - 1));
-      } else if (e.key === 'Enter') {
-        const idx = atFocusedRef.current;
-        if (idx < 0 || idx >= total) return;
-        e.preventDefault();
-        selectSummonedAgent(list[idx].id);
-      }
-    };
-    window.addEventListener('click', onClick);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('click', onClick);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [atOpen]);
+	// Pending plain-text request bridge — kept separate from the pill channel:
+	// suggestions are draft text, not structured references. Use the same rAF
+	// handoff so a closed Radix menu cannot steal the contenteditable selection.
+	const composerPendingText = useComposerPendingText();
+	useEffect(() => {
+		if (!composerPendingText) return;
+		const id = requestAnimationFrame(() => {
+			const r = ref.current;
+			if (!r) return;
+			const current = r.getValue();
+			const next =
+				composerPendingText.mode === "replace"
+					? composerPendingText.text
+					: composerPendingText.recommendationId
+						? appendComposerText(current, composerPendingText.text)
+						: appendComposerTextOnce(current, composerPendingText.text);
+			r.focus();
+			if (next !== current) {
+				// RichInput.setValue intentionally calls onChange so every imperative
+				// write stays in sync with Composer state. This write is a bridge
+				// consumption, not a manual edit: advancing the recommendation
+				// revision here would make a second click on the same button look new.
+				applyingPendingTextRef.current = true;
+				try {
+					r.setValue(next);
+				} finally {
+					applyingPendingTextRef.current = false;
+				}
+				setText(next);
+			}
+			r.setSelection(next.length);
+			clearComposerPendingText();
+		});
+		return () => cancelAnimationFrame(id);
+	}, [composerPendingText]);
 
-  // Expert selection is metadata for this Composer, never literal user text.
-  const selectSummonedAgent = (agentId: string) => {
-    setAtOpen(false);
-    setSummonManual(true);
-    setSummonAgentId(agentId);
-  };
+	// Queued messages for the active (sid, agentId) slot.
+	const queueKey =
+		activeSid && activeAgent ? `${activeSid}::${activeAgent}` : null;
+	const queued = queueKey ? (queuedMessages[queueKey] ?? []) : [];
+	// Interrupt-send is a forgeax-native primitive (EventQueue steer); the CLI
+	// bridge has no equivalent, so only offer it on the native path.
+	const canInterrupt =
+		isStreaming &&
+		(providerOverride === null || providerOverride === "forgeax");
 
-  const atHasMentions = specialistSummonEnabled && !!(agentMentions && agentMentions.length > 0);
-  const summonedAgent = resolvedSummonAgentId ? availableAgents.find((agent) => agent.id === resolvedSummonAgentId) ?? null : null;
+	const drainPendingFileReads = async (
+		owner: ComposerOwner,
+	): Promise<boolean> => {
+		while (ownsComposer(owner)) {
+			const pending = Array.from(pendingFileReadsRef.current.entries())
+				.filter(([, generation]) => generation === owner.generation)
+				.map(([promise]) => promise);
+			if (pending.length === 0) return true;
+			await Promise.all(pending);
+		}
+		return false;
+	};
+	const onSubmit = async (expectedOwner?: ComposerOwner) => {
+		// Submission preparation is single-flight: repeated Enter/clicks cannot split
+		// or duplicate one composer transaction while its files are still resolving.
+		if (submitPreparingRef.current) return;
+		const owner = currentOwner();
+		if (!owner || (expectedOwner && !ownsComposer(expectedOwner))) return;
+		submitPreparingRef.current = true;
+		try {
+			if (!(await drainPendingFileReads(owner))) return;
+			// 文件读取会插入 pill / 附件,因此 await 后从 imperative ref 和同步 ref 取最新值,
+			// 不使用 await 前 render 的陈旧闭包。
+			let currentText = ref.current?.getValue() ?? text;
+			if (currentText && textOwnerGenerationRef.current !== owner.generation) {
+				ref.current?.setValue("");
+				textOwnerGenerationRef.current = null;
+				setText("");
+				currentText = "";
+			}
+			let t = currentText.trim();
+			// 允许"只发附件无文字"——但内核 user 文本不能为空,给个占位提示。
+			if (
+				!t &&
+				!attachedRef.current.some(
+					(item) => item.ownerGeneration === owner.generation,
+				)
+			)
+				return;
+			// First-chat interceptor (design §11): if there's no usable model path,
+			// don't send into a void — keep the typed text and open the connect prompt.
+			// ConnectModelPrompt re-fires APP_EVENTS.resumeSend once connected.
+			if (!(await checkModelReady())) {
+				if (ownsComposer(owner)) {
+					connectResumeOwnerRef.current = owner;
+					window.dispatchEvent(
+						new CustomEvent(APP_EVENTS.openConnectPrompt, {
+							detail: { text: t },
+						}),
+					);
+				}
+				return;
+			}
+			// Files may be accepted while model readiness is pending; drain to a stable
+			// empty set before taking the final text/attachment snapshot.
+			if (!(await drainPendingFileReads(owner))) return;
+			currentText = ref.current?.getValue() ?? currentText;
+			if (currentText && textOwnerGenerationRef.current !== owner.generation)
+				return;
+			t = currentText.trim();
+			if (
+				!t &&
+				!attachedRef.current.some(
+					(item) => item.ownerGeneration === owner.generation,
+				)
+			)
+				return;
 
-  // P3.48 — open Bus admin and expand the given plugin row. Reuses the
-  // pendingBusExpandId pipeline (P2.7f) shared with cb-mbsel-arrow / extension Page tab
-  // placeholder / AgentsPanel bus pill / cli dropdown so popover deep-links
-  // feel identical across all surfaces.
-  const openInBusAdmin = (extensionId: string) => {
-    emitDeepLink('bus:expand-plugin', extensionId);
-    openOverlay('settings', 'plugins');
-    setAtOpen(false);
-    setSlashOpen(false);
-  };
-  const onArrowKey = (e: React.KeyboardEvent<HTMLSpanElement>, extensionId: string) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      e.stopPropagation();
-      openInBusAdmin(extensionId);
-    }
-  };
+			const isTargetStreaming = Boolean(
+				useChatStore.getState().bySid[owner.sid]?.streamingByAgent[
+					owner.agentId
+				],
+			);
+			if (!ownsComposer(owner)) return;
+			if (isTargetStreaming) {
+				// Agent is mid-turn — queue client-side. It flushes as its own turn when
+				// the current turn ends (sequential, one turn per queued message).
+				// 注:排队消息暂不带附件(附件随当前输入即时发);有附件时直接发不入队。
+				if (
+					!attachedRef.current.some(
+						(item) => item.ownerGeneration === owner.generation,
+					)
+				) {
+					// Read the latest committed resolution at the capture point: model
+					// readiness/file reads above are async, so the previously rendered
+					// local value could be stale if the catalog disappeared meanwhile.
+					enqueueMessage(t, {
+						summonAgentId: resolvedSummonAgentIdRef.current,
+					});
+					clearComposerDraft(owner.sid, owner.agentId);
+					setText("");
+					return;
+				}
+			}
+			const attachments = takeAttachments(owner);
+			clearComposerDraft(owner.sid, owner.agentId);
+			ref.current?.setValue("");
+			textOwnerGenerationRef.current = null;
+			setText("");
+			// Claim is complete once dispatch has synchronously captured the target.
+			// Do not hold the preparation mutex through the streamed response.
+			// Mid-turn image paste must steer (interrupt) — queue path drops attachments.
+			const send = sendMessage(t || "(see attached file)", {
+				...(attachments ? { attachments } : {}),
+				...(isTargetStreaming && attachments
+					? { handoff: "steer" as const }
+					: {}),
+				target: { sid: owner.sid, agentId: owner.agentId },
+				summonAgentId: resolvedSummonAgentIdRef.current,
+			});
+			submitPreparingRef.current = false;
+			void send.catch((err) => console.warn("[composer] send failed", err));
+		} finally {
+			submitPreparingRef.current = false;
+		}
+	};
 
-  // 2026-05-21 — cb-mbsel popover keyboard nav / outside-click / pickModel 写盘
-  // 全部下放到 <ModelPicker mode="single" writeToAgent={...}/>。Composer 这边只
-  // 负责拿到当前 selected 显示在按钮上，并把 onChange 同步到本地 agentModel state
-  // 兜底（picker 内部已经写过盘）。
-  const cliButtonLabel = compactProviderLabel(currentLabel, providerOverride);
-  useEffect(() => {
-    if (!isStreaming) ref.current?.focus();
-  }, [isStreaming]);
+	// Resume the send the connect prompt intercepted: keep the ref pointing at the
+	// latest onSubmit so the (once-installed) listener always re-runs current logic
+	// — including a fresh checkModelReady, which now passes.
+	const onSubmitRef = useRef(onSubmit);
+	onSubmitRef.current = onSubmit;
+	useEffect(() => {
+		const onResume = () => {
+			const owner = connectResumeOwnerRef.current;
+			connectResumeOwnerRef.current = null;
+			if (owner) void onSubmitRef.current(owner);
+		};
+		window.addEventListener(APP_EVENTS.resumeSend, onResume);
+		return () => window.removeEventListener(APP_EVENTS.resumeSend, onResume);
+	}, []);
 
-  // Pending pill insertion bridge — any surface (right-click → "引用到 Chat") can
-  // call requestComposerInsert(pill); we consume it here, drop the chip at the
-  // current caret, then clear the slot.
-  //
-  // We defer one rAF so the Radix DropdownMenu has fully closed and browser focus
-  // has returned to the contenteditable before we try to insert at the caret.
-  // Without the defer, window.getSelection() may still point at the menu overlay,
-  // causing insertNodeAtCaret to fall back to end-of-content or silently skip.
-  const composerPendingInsert = useComposerPendingInsert();
-  useEffect(() => {
-    if (!composerPendingInsert) return;
-    const id = requestAnimationFrame(() => {
-      const r = ref.current;
-      if (!r) {
-        // Composer not mounted yet (ChatPanel closed) — leave the pending pill in
-        // the store; it will be picked up on the next mount of this component.
-        return;
-      }
-      r.focus();
-      r.insertPill(composerPendingInsert);
-      clearComposerPendingInsert();
-    });
-    return () => cancelAnimationFrame(id);
-  }, [composerPendingInsert, clearComposerPendingInsert]);
+	// Interrupt the running turn and send `text` immediately (handoff: steer).
+	const onInterrupt = () => {
+		const t = text.trim();
+		if (!t) return;
+		clearComposerDraft(activeSid, activeAgent);
+		setText("");
+		void sendMessage(t, {
+			handoff: "steer",
+			summonAgentId: resolvedSummonAgentIdRef.current,
+		});
+	};
 
-  // Pending plain-text request bridge — kept separate from the pill channel:
-  // suggestions are draft text, not structured references. Use the same rAF
-  // handoff so a closed Radix menu cannot steal the contenteditable selection.
-  const composerPendingText = useComposerPendingText();
-  useEffect(() => {
-    if (!composerPendingText) return;
-    const id = requestAnimationFrame(() => {
-      const r = ref.current;
-      if (!r) return;
-      const current = r.getValue();
-      const next = composerPendingText.mode === 'replace'
-        ? composerPendingText.text
-        : composerPendingText.recommendationId
-          ? appendComposerText(current, composerPendingText.text)
-          : appendComposerTextOnce(current, composerPendingText.text);
-      r.focus();
-      if (next !== current) {
-        // RichInput.setValue intentionally calls onChange so every imperative
-        // write stays in sync with Composer state. This write is a bridge
-        // consumption, not a manual edit: advancing the recommendation
-        // revision here would make a second click on the same button look new.
-        applyingPendingTextRef.current = true;
-        try {
-          r.setValue(next);
-        } finally {
-          applyingPendingTextRef.current = false;
-        }
-        setText(next);
-      }
-      r.setSelection(next.length);
-      clearComposerPendingText();
-    });
-    return () => cancelAnimationFrame(id);
-  }, [composerPendingText, clearComposerPendingText]);
+	// Per-chip "send now" (↑): pull this queued message out of the queue and send
+	// it immediately, jumping ahead of the rest. Mid-turn → steer-interrupt the
+	// running turn; idle → plain send. The remaining queued items keep their
+	// order and flush after this one's turn ends.
+	const onQueuedSendNow = (q: {
+		id: string;
+		text: string;
+		summonAgentId?: string | null;
+	}) => {
+		dequeueMessage(q.id);
+		void sendMessage(
+			q.text,
+			queuedSendOptions(
+				q.summonAgentId,
+				isStreaming && canInterrupt,
+				"summonAgentId" in q,
+			),
+		);
+	};
 
-  // Queued messages for the active (sid, agentId) slot.
-  const queueKey = activeSid && activeAgent ? `${activeSid}::${activeAgent}` : null;
-  const queued = queueKey ? (queuedMessages[queueKey] ?? []) : [];
-  // Interrupt-send is a forgeax-native primitive (EventQueue steer); the CLI
-  // bridge has no equivalent; queued-message send-now uses it only on the native path.
-  const canInterrupt = isStreaming && (providerOverride === null || providerOverride === 'forgeax');
+	// Per-chip "edit" (✎): pull the queued text back into the composer input for
+	// editing and drop it from the queue. The user re-sends (or re-queues) it.
+	const onQueuedEdit = (q: { id: string; text: string }) => {
+		dequeueMessage(q.id);
+		const r = ref.current;
+		if (r) {
+			r.setValue(q.text);
+			r.focus();
+		} else {
+			setText(q.text);
+		}
+	};
 
-  const drainPendingFileReads = async (owner: ComposerOwner): Promise<boolean> => {
-    while (ownsComposer(owner)) {
-      const pending = Array.from(pendingFileReadsRef.current.entries())
-        .filter(([, generation]) => generation === owner.generation)
-        .map(([promise]) => promise);
-      if (pending.length === 0) return true;
-      await Promise.all(pending);
-    }
-    return false;
-  };
-  const onSubmit = async (expectedOwner?: ComposerOwner) => {
-    // Submission preparation is single-flight: repeated Enter/clicks cannot split
-    // or duplicate one composer transaction while its files are still resolving.
-    if (submitPreparingRef.current || agentModelLoading || (canSwitchModel && !agentModel?.selected)) return;
-    const owner = currentOwner();
-    if (!owner || (expectedOwner && !ownsComposer(expectedOwner))) return;
-    submitPreparingRef.current = true;
-    try {
-      if (!(await drainPendingFileReads(owner))) return;
-      // 文件读取会插入 pill / 附件,因此 await 后从 imperative ref 和同步 ref 取最新值,
-      // 不使用 await 前 render 的陈旧闭包。
-      let currentText = ref.current?.getValue() ?? text;
-      if (currentText && textOwnerGenerationRef.current !== owner.generation) {
-        ref.current?.setValue('');
-        textOwnerGenerationRef.current = null;
-        setText('');
-        currentText = '';
-      }
-      let t = currentText.trim();
-      // 允许"只发附件无文字"——但内核 user 文本不能为空,给个占位提示。
-      if (!t && !attachedRef.current.some((item) => item.ownerGeneration === owner.generation)) return;
-      // First-chat interceptor (design §11): if there's no usable model path,
-      // don't send into a void — keep the typed text and open the connect prompt.
-      // ConnectModelPrompt re-fires APP_EVENTS.resumeSend once connected.
-      if (!(await checkModelReady())) {
-        if (ownsComposer(owner)) {
-          connectResumeOwnerRef.current = owner;
-          window.dispatchEvent(new CustomEvent(APP_EVENTS.openConnectPrompt, { detail: { text: t } }));
-        }
-        return;
-      }
-      // Files may be accepted while model readiness is pending; drain to a stable
-      // empty set before taking the final text/attachment snapshot.
-      if (!(await drainPendingFileReads(owner))) return;
-      currentText = ref.current?.getValue() ?? currentText;
-      if (currentText && textOwnerGenerationRef.current !== owner.generation) return;
-      t = currentText.trim();
-      if (!t && !attachedRef.current.some((item) => item.ownerGeneration === owner.generation)) return;
+	const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+		if (e.key !== "Enter") return;
+		if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+		// Shift/Ctrl/Meta+Enter: let RichInput insert a <br> at the caret (it
+		// handles linebreaks for us once we leave defaultPrevented unset).
+		if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+		// If a popover is open with a focused row, let the window keydown listener
+		// handle Enter (select the item) — don't submit.
+		if ((slashOpen && slashFocused >= 0) || (atOpen && atFocused >= 0)) {
+			e.preventDefault();
+			return;
+		}
+		// Plain Enter: submit. preventDefault stops RichInput from inserting a
+		// linebreak after us.
+		e.preventDefault();
+		void onSubmit();
+	};
 
-      const isTargetStreaming = Boolean(
-        useChatStore.getState().bySid[owner.sid]?.streamingByAgent[owner.agentId],
-      );
-      if (!ownsComposer(owner)) return;
-      if (isTargetStreaming) {
-        // Agent is mid-turn — queue client-side. It flushes as its own turn when
-        // the current turn ends (sequential, one turn per queued message).
-        // 注:排队消息暂不带附件(附件随当前输入即时发);有附件时直接发不入队。
-        if (!attachedRef.current.some((item) => item.ownerGeneration === owner.generation)) {
-          // Read the latest committed resolution at the capture point: model
-          // readiness/file reads above are async, so the previously rendered
-          // local value could be stale if the catalog disappeared meanwhile.
-          enqueueMessage(t, { summonAgentId: resolvedSummonAgentIdRef.current, model: agentModel?.selected ?? undefined });
-          clearComposerDraft(owner.sid, owner.agentId);
-          setText('');
-          return;
-        }
-      }
-      const attachments = takeAttachments(owner);
-      clearComposerDraft(owner.sid, owner.agentId);
-      ref.current?.setValue('');
-      textOwnerGenerationRef.current = null;
-      setText('');
-      // Claim is complete once dispatch has synchronously captured the target.
-      // Do not hold the preparation mutex through the streamed response.
-      // Mid-turn image paste must steer (interrupt) — queue path drops attachments.
-      const send = sendMessage(t || '(see attached file)', {
-        ...(attachments ? { attachments } : {}),
-        ...(isTargetStreaming && attachments ? { handoff: 'steer' as const } : {}),
-        target: { sid: owner.sid, agentId: owner.agentId },
-        model: agentModel?.selected ?? undefined,
-        summonAgentId: resolvedSummonAgentIdRef.current,
-      });
-      submitPreparingRef.current = false;
-      void send.catch((err) => console.warn('[composer] send failed', err));
-    } finally {
-      submitPreparingRef.current = false;
-    }
-  };
+	// ── Asset drag-drop: accept assets dragged from Content Browser (iframe) ──
+	// Cross-iframe dataTransfer is blocked by browser security, so the iframe
+	// sends the asset ref via postMessage and we cache it for the drop event.
+	const pendingDragAsset = useRef<{
+		type: string;
+		guid: string;
+		kind?: string;
+		name?: string;
+		path?: string;
+		payload?: Record<string, unknown>;
+	} | null>(null);
+	const [assetDragOver, setAssetDragOver] = useState(false);
 
-  // Resume the send the connect prompt intercepted: keep the ref pointing at the
-  // latest onSubmit so the (once-installed) listener always re-runs current logic
-  // — including a fresh checkModelReady, which now passes.
-  const onSubmitRef = useRef(onSubmit);
-  onSubmitRef.current = onSubmit;
-  useEffect(() => {
-    const onResume = () => {
-      const owner = connectResumeOwnerRef.current;
-      connectResumeOwnerRef.current = null;
-      if (owner) void onSubmitRef.current(owner);
-    };
-    window.addEventListener(APP_EVENTS.resumeSend, onResume);
-    return () => window.removeEventListener(APP_EVENTS.resumeSend, onResume);
-  }, []);
+	useEffect(() => {
+		const onMsg = (ev: MessageEvent) => {
+			const d = ev.data as { type?: string; ref?: unknown } | null;
+			if (d?.type === "FORGEAX_DRAG_ASSET_START" && d.ref) {
+				pendingDragAsset.current = d.ref as typeof pendingDragAsset.current;
+			} else if (d?.type === "FORGEAX_DRAG_ASSET_END") {
+				pendingDragAsset.current = null;
+			}
+		};
+		window.addEventListener("message", onMsg);
+		return () => window.removeEventListener("message", onMsg);
+	}, []);
 
-  // Per-chip "send now" (↑): pull this queued message out of the queue and send
-  // it immediately, jumping ahead of the rest. Mid-turn → steer-interrupt the
-  // running turn; idle → plain send. The remaining queued items keep their
-  // order and flush after this one's turn ends.
-  const onQueuedSendNow = (q: { id: string; text: string; model?: string; summonAgentId?: string | null }) => {
-    dequeueMessage(q.id);
-    void sendMessage(q.text, { ...queuedSendOptions(q.summonAgentId, isStreaming && canInterrupt, 'summonAgentId' in q), ...(q.model ? { model: q.model } : {}) });
-  };
+	const handleComposerDragOver = (e: React.DragEvent) => {
+		// Two drag sources land here: Content Browser assets (announced via
+		// postMessage, no dataTransfer) and OS files (dataTransfer type "Files").
+		// Without preventDefault the browser rejects the drop — and for OS files
+		// then navigates the whole app away to open the file.
+		if (pendingDragAsset.current || e.dataTransfer.types.includes("Files")) {
+			e.preventDefault();
+			e.dataTransfer.dropEffect = "copy";
+			setAssetDragOver(true);
+		}
+	};
+	const handleComposerDragLeave = () => setAssetDragOver(false);
+	const handleComposerDrop = (e: React.DragEvent) => {
+		setAssetDragOver(false);
+		const assetRef = pendingDragAsset.current;
+		if (assetRef) {
+			e.preventDefault();
+			e.stopPropagation();
+			pendingDragAsset.current = null;
+			requestComposerInsert(
+				buildAssetPill({
+					guid: assetRef.guid,
+					name: assetRef.name,
+					assetKind: assetRef.kind,
+					packPath: assetRef.path,
+					payload: assetRef.payload,
+				}),
+			);
+			return;
+		}
+		if (e.dataTransfer.files.length > 0) {
+			e.preventDefault();
+			e.stopPropagation();
+			addFiles(e.dataTransfer.files);
+		}
+	};
 
-  // Per-chip "edit" (✎): pull the queued text back into the composer input for
-  // editing and drop it from the queue. The user re-sends (or re-queues) it.
-  const onQueuedEdit = (q: { id: string; text: string }) => {
-    dequeueMessage(q.id);
-    const r = ref.current;
-    if (r) { r.setValue(q.text); r.focus(); } else { setText(q.text); }
-  };
-
-  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== 'Enter') return;
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    // Shift/Ctrl/Meta+Enter: let RichInput insert a <br> at the caret (it
-    // handles linebreaks for us once we leave defaultPrevented unset).
-    if (e.shiftKey || e.ctrlKey || e.metaKey) return;
-    // If a popover is open with a focused row, let the window keydown listener
-    // handle Enter (select the item) — don't submit.
-    if ((slashOpen && slashFocused >= 0) || (atOpen && atFocused >= 0)) {
-      e.preventDefault();
-      return;
-    }
-    // Plain Enter: submit. preventDefault stops RichInput from inserting a
-    // linebreak after us.
-    e.preventDefault();
-    void onSubmit();
-  };
-
-  // ── Asset drag-drop: accept assets dragged from Content Browser (iframe) ──
-  // Cross-iframe dataTransfer is blocked by browser security, so the iframe
-  // sends the asset ref via postMessage and we cache it for the drop event.
-  const pendingDragAsset = useRef<{
-    type: string; guid: string; kind?: string; name?: string;
-    path?: string; payload?: Record<string, unknown>;
-  } | null>(null);
-  const [assetDragOver, setAssetDragOver] = useState(false);
-
-  useEffect(() => {
-    const onMsg = (ev: MessageEvent) => {
-      const d = ev.data as { type?: string; ref?: unknown } | null;
-      if (d?.type === 'FORGEAX_DRAG_ASSET_START' && d.ref) {
-        pendingDragAsset.current = d.ref as typeof pendingDragAsset.current;
-      } else if (d?.type === 'FORGEAX_DRAG_ASSET_END') {
-        pendingDragAsset.current = null;
-      }
-    };
-    window.addEventListener('message', onMsg);
-    return () => window.removeEventListener('message', onMsg);
-  }, []);
-
-  const handleComposerDragOver = (e: React.DragEvent) => {
-    // Two drag sources land here: Content Browser assets (announced via
-    // postMessage, no dataTransfer) and OS files (dataTransfer type "Files").
-    // Without preventDefault the browser rejects the drop — and for OS files
-    // then navigates the whole app away to open the file.
-    if (pendingDragAsset.current || e.dataTransfer.types.includes('Files')) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'copy';
-      setAssetDragOver(true);
-    }
-  };
-  const handleComposerDragLeave = () => setAssetDragOver(false);
-  const handleComposerDrop = (e: React.DragEvent) => {
-    setAssetDragOver(false);
-    const assetRef = pendingDragAsset.current;
-    if (assetRef) {
-      e.preventDefault();
-      e.stopPropagation();
-      pendingDragAsset.current = null;
-      requestComposerInsert(buildAssetPill({
-        guid: assetRef.guid,
-        name: assetRef.name,
-        assetKind: assetRef.kind,
-        packPath: assetRef.path,
-        payload: assetRef.payload,
-      }));
-      return;
-    }
-    if (e.dataTransfer.files.length > 0) {
-      e.preventDefault();
-      e.stopPropagation();
-      addFiles(e.dataTransfer.files);
-    }
-  };
-
-  return (
-    <div
-      className={`composer${assetDragOver ? ' composer--asset-drop' : ''}${highlight ? ' composer--hint' : ''}`}
-      data-tour-id="composer"
-      onDragOver={handleComposerDragOver}
-      onDragLeave={handleComposerDragLeave}
-      onDrop={handleComposerDrop}
-    >
-      <div className="composer-card">
-        {queued.length > 0 && (
-          <div className="composer-queue" role="list" aria-label="Queued messages">
-            <div className="composer-queue-head">
-              <span className="composer-queue-tag">{t('composer.queuedCount', { count: queued.length })}</span>
-              <span className="composer-queue-sub">{t('composer.queueSub')}</span>
-              <button
-                type="button"
-                className="composer-queue-clear"
-                title={t('composer.clearQueueTitle')}
-                onClick={() => clearQueue()}
-              >{t('composer.clearQueue')}</button>
-            </div>
-            {queued.map((q, i) => (
-              <div key={q.id} className="composer-queue-chip" role="listitem" title={q.text}>
-                <span className="composer-queue-idx">{i + 1}</span>
-                <span className="composer-queue-text">{q.text.length > 80 ? `${q.text.slice(0, 80)}…` : q.text}</span>
-                <button
-                  type="button"
-                  className="composer-queue-act"
-                  aria-label={t('composer.queueEditAria')}
-                  title={t('composer.queueEditTitle')}
-                  onClick={() => onQueuedEdit(q)}
-                >
-                  <Pencil size={13} />
-                </button>
-                <button
-                  type="button"
-                  className="composer-queue-act composer-queue-now"
-                  aria-label={t('composer.queueSendNowAria')}
-                  title={isStreaming ? t('composer.queueSendNowStreamingTitle') : t('composer.queueSendNowTitle')}
-                  onClick={() => onQueuedSendNow(q)}
-                >
-                  <ArrowUp size={13} />
-                </button>
-                <button
-                  type="button"
-                  className="composer-queue-act composer-queue-x"
-                  aria-label={t('composer.queueRemoveAria')}
-                  title={t('composer.queueRemoveTitle')}
-                  onClick={() => dequeueMessage(q.id)}
-                >
-                  <Trash2 size={13} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-        <RichInput
-        ref={ref}
-        className="composer-input"
-        placeholder={
-          isStreaming
-            ? t('composer.placeholderStreaming')
-            : providerOverride
-              ? `Type your game idea... [Enter] to send · [Ctrl/Shift+Enter] newline  →  via ${currentLabel}${overrideDown ? t('composer.placeholderOverrideDownSuffix') : ''}`
-              : 'Type your game idea... [Enter] to send · [Ctrl/Shift+Enter] for a new line.'
-        }
-        value={text}
-        onChange={bindTextToCurrentOwner}
-        onKeyDown={onKeyDown}
-        onPasteFiles={addFiles}
-      />
-      {fileNotice && (
-        <div className="cb-hint" role="status" style={{ padding: '4px 10px' }}>{fileNotice}</div>
-      )}
-      {attached.length > 0 && (
-        <div className="cb-img-strip" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '6px 8px' }}>
-          {attached.map((att) => (
-            <div key={att.id} title={att.name} style={{ position: 'relative', width: att.kind === 'image' ? 56 : 'auto', height: 56, borderRadius: 6, overflow: 'hidden', border: '1px solid var(--color-border, #444)' }}>
-              {att.kind === 'image' ? (
-                <img
-                  src={`data:${att.mediaType};base64,${att.data}`}
-                  alt={att.name}
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                />
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, height: '100%', padding: '0 20px 0 8px', fontSize: 11 }}>
-                  <span style={{ fontSize: 18 }}>{att.kind === 'document' ? '📄' : '📎'}</span>
-                  <span style={{ maxWidth: 96, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.name}</span>
-                </div>
-              )}
-              <button
-                type="button"
-                aria-label="remove attachment"
-                onClick={() => removeAttached(att.id)}
-                style={{
-                  position: 'absolute', top: 1, right: 1, width: 16, height: 16, lineHeight: '14px',
-                  borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 11,
-                  background: 'rgba(0,0,0,0.6)', color: '#fff',
-                }}
-              >×</button>
-            </div>
-          ))}
-        </div>
-      )}
-      <input
-        ref={imgInputRef}
-        type="file"
-        multiple
-        style={{ display: 'none' }}
-        onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
-      />
-      <div className="composer-bar cb-at-menu-layout">
-        <div className="composer-toolbar-controls">
-        <div className={`cb-left-group${summonedAgent ? ' has-summon-chip' : ''}`}>
-          <button className="cb-btn" title={t('composer.imageUpload')} type="button" onClick={() => imgInputRef.current?.click()}>
-            <Upload size={16} />
-          </button>
-          <div className={`cb-at${summonedAgent ? ' has-summon-chip' : ''}`}>
-            <button
-              className={`cb-btn ${atHasMentions ? 'cb-at-btn' : 'cb-soon'}${summonedAgent ? ' cb-at-chip' : ''}${atOpen ? ' is-open' : ''}`}
-              title={
-                summonedAgent
-                  ? t('composer.summonChipTitle', { name: resolveNaming(summonedAgent).title })
-                  : atHasMentions
-                  ? t('composer.mentionAgentTitle', { count: agentMentions!.length })
-                  : t('composer.mentionSoon')
-              }
-              aria-disabled={atHasMentions ? undefined : true}
-              aria-expanded={atHasMentions ? atOpen : undefined}
-              aria-haspopup={atHasMentions ? 'menu' : undefined}
-              type="button"
-              onClick={() => {
-                if (atHasMentions) setAtOpen((v) => !v);
-                else setHintFor(CB_HINT.AT);
-              }}
-            >
-              {summonedAgent ? <>
-                <MentionAvatar
-                  agent={summonedAgent}
-                  initials={avatarInitials[summonedAgent.id] ?? '?'}
-                  size={18}
-                  className={`cb-at-avatar cb-at-chip-avatar cb-at-role-${summonedAgent.role}`}
-                />
-                <span className="cb-at-chip-name">{resolveNaming(summonedAgent).title}</span>
-                <ChevronDown size={13} className="cb-at-chip-chevron" aria-hidden="true" />
-              </> : <AtSign size={16} />}
-              {!atHasMentions && hintFor === CB_HINT.AT && <span className="cb-hint" role="status">{t('composer.comingSoon')}</span>}
-            </button>
-            {summonedAgent && (
-              <button
-                type="button"
-                className="cb-at-chip-clear"
-                aria-label={t('composer.summonChipClear')}
-                onClick={(event) => { event.preventDefault(); event.stopPropagation(); setSummonManual(true); setSummonAgentId(null); }}
-              >×</button>
-            )}
-          </div>
-          <Popover open={slashOpen && slashHasSkills} onOpenChange={setSlashOpen}><PopoverTrigger asChild>
-            <button
-              className={`cb-btn ${slashHasSkills ? 'cb-slash-btn' : 'cb-soon'}${slashOpen ? ' is-open' : ''}`}
-              title={
-                slashHasSkills
-                  ? (getLocale() === 'zh' ? '选择当前会话技能或搜索命令' : 'Choose session skills or search commands')
-                  : t('composer.slashSoon')
-              }
-              aria-disabled={slashHasSkills ? undefined : true}
-              aria-expanded={slashHasSkills ? slashOpen : undefined}
-              aria-haspopup={slashHasSkills ? 'menu' : undefined}
-              type="button"
-              onClick={(event) => {
-                if (!slashHasSkills) { event.preventDefault(); setHintFor(CB_HINT.SLASH); }
-              }}
-            >
-              <SquareChartGantt size={16} />
-              {!slashHasSkills && hintFor === CB_HINT.SLASH && <span className="cb-hint" role="status">{t('composer.comingSoon')}</span>}
-            </button>
-            </PopoverTrigger>
-            {slashOpen && slashHasSkills && (
-              <PopoverContent ref={slashMenuRef} side="top" align="end" collisionPadding={12} className="cb-slash-menu" role="menu" aria-label="Skills and commands" onOpenAutoFocus={event => event.preventDefault()} onCloseAutoFocus={event => { if (slashRestoreComposer.current) { event.preventDefault(); slashRestoreComposer.current = false; ref.current?.focus(); } }}>
-                {filteredSkills.length === 0 && <div className="cb-slash-foot" role="status">{getLocale() === 'zh' ? (slashPrefix ? '没有匹配的技能或命令' : '当前会话没有技能，可查看高级命令') : (slashPrefix ? 'No matching skills or commands' : 'No session skills. Advanced commands are available below.')}</div>}
-                {(['skill', 'command'] as const).map((source) => {
-                  const group = filteredSkills
-                    .map((s, i) => ({ s, i }))
-                    .filter(({ s }) => s.source === source);
-                  if (group.length === 0) return null;
-                  return (
-                    <div key={source} className="cb-slash-group">
-                      <div className="cb-slash-menu-head">
-                        <span className="cb-slash-menu-head-tag">{getLocale() === 'zh' ? (source === 'skill' ? '当前会话技能' : '高级命令') : (source === 'skill' ? 'Session skills' : 'Advanced commands')}</span>
-                        <span className="cb-slash-menu-head-n">{group.length}</span>
-                        <span className="cb-slash-menu-head-sub">
-                          {slashPrefix ? `/${slashPrefix}` : ''}
-                        </span>
-                      </div>
-                      {group.map(({ s, i }) => (
-                        <button
-                          key={`${s.extensionId}:${s.skillId}`}
-                          type="button"
-                          role="menuitem"
-                          data-skill-index={i}
-                          className={`cb-slash-item${slashFocused === i ? ' is-active' : ''}`}
-                          onMouseEnter={() => setSlashFocused(i)}
-                          title={
-                            s.descZh
-                              ? t('composer.slashItemDescTitle', { name: s.displayName, extension: s.extensionId, desc: s.descZh, trigger: s.trigger })
-                              : t('composer.slashItemTitle', { name: s.displayName, extension: s.extensionId, trigger: s.trigger })
-                          }
-                          onClick={() => insertSkillTrigger(s)}
-                        >
-                          <span className="cb-slash-trigger">{s.trigger}</span>
-                          {s.displayName !== s.trigger.slice(1) && <span className="cb-slash-name">{s.displayName}</span>}
-                          {s.descZh && (
-                            <span className="cb-slash-desc">
-                              {s.descZh.length > 60 ? `${s.descZh.slice(0, 60)}…` : s.descZh}
-                            </span>
-                          )}
-                          {s.source === 'skill' && (
-                            <span
-                              className="cb-slash-arrow"
-                              role="button"
-                              tabIndex={0}
-                              aria-label={t('composer.viewInBusAria', { extension: s.extensionId })}
-                              title={t('composer.viewInBusTitle', { extension: s.extensionId })}
-                              onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(s.extensionId); }}
-                              onKeyDown={(e) => onArrowKey(e, s.extensionId)}
-                            >→</span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })}
-                {!slashPrefix && <button type="button" className="cb-slash-advanced" onClick={() => setShowCommands(value => !value)}>
-                  {getLocale() === 'zh' ? (showCommands ? '隐藏高级命令' : '显示高级命令') : (showCommands ? 'Hide advanced commands' : 'Show advanced commands')}
-                </button>}
-                <div className="cb-slash-foot">{t('composer.slashFoot')}</div>
-              </PopoverContent>
-            )}
-          </Popover>
-          {/* Model picker follows the selected runtime. Gateway/native runtimes use
+	return (
+		<section
+			className={`composer${assetDragOver ? " composer--asset-drop" : ""}${highlight ? " composer--hint" : ""}`}
+			aria-label="Message composer"
+			data-tour-id="composer"
+			onDragOver={handleComposerDragOver}
+			onDragLeave={handleComposerDragLeave}
+			onDrop={handleComposerDrop}
+		>
+			<div className="composer-card">
+				{queued.length > 0 && (
+					<fieldset className="composer-queue">
+						<legend className="composer-queue-head">
+							<span className="composer-queue-tag">
+								{t("composer.queuedCount", { count: queued.length })}
+							</span>
+							<span className="composer-queue-sub">
+								{t("composer.queueSub")}
+							</span>
+							<button
+								type="button"
+								className="composer-queue-clear"
+								title={t("composer.clearQueueTitle")}
+								onClick={() => clearQueue()}
+							>
+								{t("composer.clearQueue")}
+							</button>
+						</legend>
+						<ul className="composer-queue-list">
+							{queued.map((q, i) => (
+								<li key={q.id} className="composer-queue-chip" title={q.text}>
+									<span className="composer-queue-idx">{i + 1}</span>
+									<span className="composer-queue-text">
+										{q.text.length > 80 ? `${q.text.slice(0, 80)}…` : q.text}
+									</span>
+									<button
+										type="button"
+										className="composer-queue-act"
+										aria-label={t("composer.queueEditAria")}
+										title={t("composer.queueEditTitle")}
+										onClick={() => onQueuedEdit(q)}
+									>
+										<Pencil size={13} />
+									</button>
+									<button
+										type="button"
+										className="composer-queue-act composer-queue-now"
+										aria-label={t("composer.queueSendNowAria")}
+										title={
+											isStreaming
+												? t("composer.queueSendNowStreamingTitle")
+												: t("composer.queueSendNowTitle")
+										}
+										onClick={() => onQueuedSendNow(q)}
+									>
+										<ArrowUp size={13} />
+									</button>
+									<button
+										type="button"
+										className="composer-queue-act composer-queue-x"
+										aria-label={t("composer.queueRemoveAria")}
+										title={t("composer.queueRemoveTitle")}
+										onClick={() => dequeueMessage(q.id)}
+									>
+										<Trash2 size={13} />
+									</button>
+								</li>
+							))}
+						</ul>
+					</fieldset>
+				)}
+				<RichInput
+					ref={ref}
+					className="composer-input"
+					placeholder={
+						isStreaming
+							? t("composer.placeholderStreaming") +
+								(canInterrupt
+									? t("composer.placeholderStreamingInterrupt")
+									: "")
+							: providerOverride
+								? `Type your game idea... [Enter] to send · [Ctrl/Shift+Enter] newline  →  via ${currentLabel}${overrideDown ? t("composer.placeholderOverrideDownSuffix") : ""}`
+								: "Type your game idea... [Enter] to send · [Ctrl/Shift+Enter] for a new line."
+					}
+					value={text}
+					onChange={bindTextToCurrentOwner}
+					onKeyDown={onKeyDown}
+					onPasteFiles={addFiles}
+				/>
+				{fileNotice && (
+					<div
+						className="cb-hint"
+						role="status"
+						style={{ padding: "4px 10px" }}
+					>
+						{fileNotice}
+					</div>
+				)}
+				{attached.length > 0 && (
+					<div
+						className="cb-img-strip"
+						style={{
+							display: "flex",
+							flexWrap: "wrap",
+							gap: 6,
+							padding: "6px 8px",
+						}}
+					>
+						{attached.map((att) => (
+							<div
+								key={att.id}
+								title={att.name}
+								style={{
+									position: "relative",
+									width: att.kind === "image" ? 56 : "auto",
+									height: 56,
+									borderRadius: 6,
+									overflow: "hidden",
+									border: "1px solid var(--color-border, #444)",
+								}}
+							>
+								{att.kind === "image" ? (
+									<img
+										src={`data:${att.mediaType};base64,${att.data}`}
+										alt={att.name}
+										style={{
+											width: "100%",
+											height: "100%",
+											objectFit: "cover",
+										}}
+									/>
+								) : (
+									<div
+										style={{
+											display: "flex",
+											flexDirection: "column",
+											alignItems: "center",
+											justifyContent: "center",
+											gap: 2,
+											height: "100%",
+											padding: "0 20px 0 8px",
+											fontSize: 11,
+										}}
+									>
+										<span style={{ fontSize: 18 }}>
+											{att.kind === "document" ? "📄" : "📎"}
+										</span>
+										<span
+											style={{
+												maxWidth: 96,
+												overflow: "hidden",
+												textOverflow: "ellipsis",
+												whiteSpace: "nowrap",
+											}}
+										>
+											{att.name}
+										</span>
+									</div>
+								)}
+								<button
+									type="button"
+									aria-label="remove attachment"
+									onClick={() => removeAttached(att.id)}
+									style={{
+										position: "absolute",
+										top: 1,
+										right: 1,
+										width: 16,
+										height: 16,
+										lineHeight: "14px",
+										borderRadius: 8,
+										border: "none",
+										cursor: "pointer",
+										fontSize: 11,
+										background: "rgba(0,0,0,0.6)",
+										color: "#fff",
+									}}
+								>
+									×
+								</button>
+							</div>
+						))}
+					</div>
+				)}
+				<input
+					ref={imgInputRef}
+					type="file"
+					multiple
+					style={{ display: "none" }}
+					onChange={(e) => {
+						addFiles(e.target.files);
+						e.target.value = "";
+					}}
+				/>
+				<div className="composer-bar cb-at-menu-layout">
+					<div className="composer-toolbar-controls">
+						<div
+							className={`cb-left-group${summonedAgent ? " has-summon-chip" : ""}`}
+						>
+							<button
+								className="cb-btn"
+								title={t("composer.imageUpload")}
+								type="button"
+								onClick={() => imgInputRef.current?.click()}
+							>
+								<Upload size={16} />
+							</button>
+							<div
+								className={`cb-at${summonedAgent ? " has-summon-chip" : ""}`}
+							>
+								<button
+									className={`cb-btn ${atHasMentions ? "cb-at-btn" : "cb-soon"}${summonedAgent ? " cb-at-chip" : ""}${atOpen ? " is-open" : ""}`}
+									title={
+										summonedAgent
+											? t("composer.summonChipTitle", {
+													name: resolveNaming(summonedAgent).title,
+												})
+											: atHasMentions
+												? t("composer.mentionAgentTitle", {
+														count: agentMentions?.length,
+													})
+												: t("composer.mentionSoon")
+									}
+									aria-disabled={atHasMentions ? undefined : true}
+									aria-expanded={atHasMentions ? atOpen : undefined}
+									aria-haspopup={atHasMentions ? "menu" : undefined}
+									type="button"
+									onClick={() => {
+										if (atHasMentions) setAtOpen((v) => !v);
+										else setHintFor(CB_HINT.AT);
+									}}
+								>
+									{summonedAgent ? (
+										<>
+											<MentionAvatar
+												agent={summonedAgent}
+												initials={avatarInitials[summonedAgent.id] ?? "?"}
+												size={18}
+												className={`cb-at-avatar cb-at-chip-avatar cb-at-role-${summonedAgent.role}`}
+											/>
+											<span className="cb-at-chip-name">
+												{resolveNaming(summonedAgent).title}
+											</span>
+											<ChevronDown
+												size={13}
+												className="cb-at-chip-chevron"
+												aria-hidden="true"
+											/>
+										</>
+									) : (
+										<AtSign size={16} />
+									)}
+									{!atHasMentions && hintFor === CB_HINT.AT && (
+										<span className="cb-hint" role="status">
+											{t("composer.comingSoon")}
+										</span>
+									)}
+								</button>
+								{summonedAgent && (
+									<button
+										type="button"
+										className="cb-at-chip-clear"
+										aria-label={t("composer.summonChipClear")}
+										onClick={(event) => {
+											event.preventDefault();
+											event.stopPropagation();
+											setSummonManual(true);
+											setSummonAgentId(null);
+										}}
+									>
+										×
+									</button>
+								)}
+							</div>
+							<div className="cb-slash">
+								<button
+									className={`cb-btn ${slashHasSkills ? "cb-slash-btn" : "cb-soon"}${slashOpen ? " is-open" : ""}`}
+									title={
+										slashHasSkills
+											? t("composer.busSkillsTitle", {
+													count: busSkills?.length,
+												})
+											: t("composer.slashSoon")
+									}
+									aria-disabled={slashHasSkills ? undefined : true}
+									aria-expanded={slashHasSkills ? slashOpen : undefined}
+									aria-haspopup={slashHasSkills ? "menu" : undefined}
+									type="button"
+									onClick={() => {
+										if (slashHasSkills) setSlashOpen((v) => !v);
+										else setHintFor(CB_HINT.SLASH);
+									}}
+								>
+									<SquareChartGantt size={16} />
+									{!slashHasSkills && hintFor === CB_HINT.SLASH && (
+										<span className="cb-hint" role="status">
+											{t("composer.comingSoon")}
+										</span>
+									)}
+								</button>
+								{slashOpen && slashHasSkills && filteredSkills.length > 0 && (
+									<div
+										className="cb-slash-menu"
+										role="menu"
+										aria-label="Skills and commands"
+									>
+										{(["skill", "command"] as const).map((source) => {
+											const group = filteredSkills
+												.map((s, i) => ({ s, i }))
+												.filter(({ s }) => s.source === source);
+											if (group.length === 0) return null;
+											return (
+												<div key={source} className="cb-slash-group">
+													<div className="cb-slash-menu-head">
+														<span className="cb-slash-menu-head-tag">
+															{source === "skill" ? "SKILLS" : "COMMANDS"}
+														</span>
+														<span className="cb-slash-menu-head-n">
+															{group.length}
+														</span>
+														<span className="cb-slash-menu-head-sub">
+															{slashPrefix ? `matching /${slashPrefix}` : "all"}
+														</span>
+													</div>
+													{group.map(({ s, i }) => (
+														<div
+															key={`${s.extensionId}:${s.skillId}`}
+															role="none"
+															className="cb-slash-item-row"
+														>
+															<button
+																type="button"
+																role="menuitem"
+																className={`cb-slash-item${slashFocused === i ? " is-active" : ""}`}
+																onMouseEnter={() => setSlashFocused(i)}
+																title={
+																	s.descZh
+																		? t("composer.slashItemDescTitle", {
+																				name: s.displayName,
+																				plugin: s.extensionId,
+																				desc: s.descZh,
+																				trigger: s.trigger,
+																			})
+																		: t("composer.slashItemTitle", {
+																				name: s.displayName,
+																				plugin: s.extensionId,
+																				trigger: s.trigger,
+																			})
+																}
+																onClick={() => insertSkillTrigger(s)}
+															>
+																<span className="cb-slash-trigger">
+																	{s.trigger}
+																</span>
+																<span className="cb-slash-name">
+																	{s.displayName}
+																</span>
+																{s.descZh && (
+																	<span className="cb-slash-desc">
+																		{s.descZh.length > 60
+																			? `${s.descZh.slice(0, 60)}…`
+																			: s.descZh}
+																	</span>
+																)}
+															</button>
+															{s.source === "skill" && (
+																<button
+																	type="button"
+																	role="menuitem"
+																	className="cb-slash-arrow"
+																	aria-label={t("composer.viewInBusAria", {
+																		plugin: s.extensionId,
+																	})}
+																	title={t("composer.viewInBusTitle", {
+																		plugin: s.extensionId,
+																	})}
+																	onMouseEnter={() => setSlashFocused(i)}
+																	onClick={() => openInBusAdmin(s.extensionId)}
+																>
+																	→
+																</button>
+															)}
+														</div>
+													))}
+												</div>
+											);
+										})}
+										<div className="cb-slash-foot">
+											{t("composer.slashFoot")}
+										</div>
+									</div>
+								)}
+							</div>
+							{/* Model picker follows the selected runtime. Gateway/native runtimes use
               list_models; rented CLIs use their driver-scoped catalogs. */}
-          {canSwitchModel && (
-          <ModelPicker
-            className="cb-mbsel"
-            mode="single"
-            variant="button"
-            providerId={modelCatalogProviderId}
-            displayLabel={agentModelLoading ? '…' : agentModel?.selected ? compactModelLabel(agentModel.selected) : (getLocale() === 'zh' ? '选择模型' : 'Select model')}
-            value={agentModel?.selected ?? null}
-            onChange={(next) => {
-              if (typeof next !== 'string') return;
-              // This is a HAND-PICK → remember it as this provider's "last model"
-              // so the next new session seeds onto it (not the fixed default).
-              recordLastModel(modelCatalogProviderId, next);
-              // ModelPicker 已经替我们写过 agent.json（writeToAgent 传了 sid+agentPath）。
-              // 这里只把 selected 同步到本地 agentModel state,避免按钮 label 闪回旧值。
-              const nextState: AgentModelState | null =
-                forgeaxSid && activeAgent
-                  ? { sid: forgeaxSid, agentPath: activeAgent, selected: next, chain: [next], raw: [next] }
-                  : agentModel
-                    ? { ...agentModel, selected: next, chain: [next], raw: [next] }
-                    : null;
-              if (nextState) {
-                setAgentModel(nextState);
-                if (forgeaxSid && activeAgent) {
-                  agentModelCache.set(agentModelKey(forgeaxSid, activeAgent, modelCatalogProviderId), nextState);
-                }
-              }
-            }}
-            writeToAgent={
-              canSwitchModel && activeAgent && forgeaxSid
-                ? { sid: forgeaxSid, agentPath: activeAgent }
-                : null
-            }
-            fallbackLabel={modelLabel}
-            disabled={!canSwitchModel || !activeAgent || !forgeaxSid}
-            disabledReason={
-              !canSwitchModel
-                ? t('composer.modelDisabledProvider', { provider: providerOverride })
-                : !activeAgent
-                  ? t('composer.modelDisabledNoAgent')
-                  : !forgeaxSid
-                    ? t('composer.modelDisabledBooting')
-                    : undefined
-            }
-            triggerTitle={
-              activeAgent
-                ? t('composer.modelTriggerTitle', { agent: activeAgent })
-                : 'Model selector'
-            }
-          />
-          )}
-        </div>
-        <div className="cb-right-group">
-          <ContextRing />
-          {SHOW_CHAT_PROVIDER_SWITCHER && (
-          <div className="cb-cli">
-            <button
-              type="button"
-              className={`cb-cli-btn ${providerOverride ? 'cb-cli-active' : ''} ${overrideDown ? 'cb-cli-warning' : ''}`}
-              onClick={() => setCliOpen((v) => !v)}
-              disabled={isStreaming}
-              title={cliButtonTitle}
-            >
-              <Unplug size={16} />
-              <span className="cb-cli-label">{cliButtonLabel}</span>
-            </button>
-            {cliOpen && (
-              <div className="cb-cli-menu" role="menu">
-                <button
-                  type="button"
-                  role="menuitem"
-                  className={`cb-cli-item ${!providerOverride ? 'is-current' : ''} ${cliFocused === 0 ? 'is-focused' : ''}`}
-                  onClick={() => switchProviderWithDefaultModel(null)}
-                  onMouseEnter={() => setCliFocused(0)}
-                  title={t('composer.cliDescForgeax')}
-                >
-                  <span className="cb-cli-row">
-                    <span className="cb-cli-id">forgeax</span>
-                    {activeAgent && <span className="cb-cli-name" style={{ opacity: 0.6 }}>({activeAgent})</span>}
-                    <span className="cb-cli-pill ok">✓</span>
-                  </span>
-                  <span className="cb-cli-desc">{t('composer.cliDescForgeax')}</span>
-                </button>
-                {providers.map((p, idx) => {
-                  const busEntry = busCliMap.get(p.id);
-                  // Concise per-provider description (every row gets one); fall back
-                  // to the bus-manifest description only if no curated one exists.
-                  const descKey = PROVIDER_DESC_I18N[p.id];
-                  const desc = descKey ? t(descKey) : (busEntry?.descZh ?? '');
-                  return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    role="menuitem"
-                    className={`cb-cli-item ${providerOverride === p.id ? 'is-current' : ''} ${!p.health.ok ? 'is-down' : ''} ${cliFocused === idx + 1 ? 'is-focused' : ''}`}
-                    onClick={() => switchProviderWithDefaultModel(p.id)}
-                    onMouseEnter={() => setCliFocused(idx + 1)}
-                    title={p.health.detail ?? ''}
-                  >
-                    <span className="cb-cli-row">
-                      <span className="cb-cli-id">{p.id}</span>
-                      <span className="cb-cli-name">
-                        {p.displayName}
-                        {!p.health.ok && p.health.detail && (
-                          <span className="cb-cli-reason"> · {p.health.detail.slice(0, 100)}{p.health.detail.length > 100 ? '…' : ''}</span>
-                        )}
-                      </span>
-                      {busEntry && (
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          className="cb-cli-bus-pill is-link"
-                          title={t('composer.cliBusPillTitle', { plugin: `${BUS_CLI_ID_PREFIX}${p.id}` })}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            e.preventDefault();
-                            emitDeepLink('bus:expand-plugin', `${BUS_CLI_ID_PREFIX}${p.id}`);
-                            openOverlay('settings', 'plugins');
-                            setCliOpen(false);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key !== 'Enter' && e.key !== ' ') return;
-                            e.stopPropagation();
-                            e.preventDefault();
-                            emitDeepLink('bus:expand-plugin', `${BUS_CLI_ID_PREFIX}${p.id}`);
-                            openOverlay('settings', 'plugins');
-                            setCliOpen(false);
-                          }}
-                        >
-                          bus →
-                        </span>
-                      )}
-                      <span className={p.health.ok ? 'cb-cli-pill ok' : 'cb-cli-pill down'}>
-                        {p.health.ok ? '✓' : 'DOWN'}
-                      </span>
-                    </span>
-                    {desc && (
-                      <span className="cb-cli-desc" title={desc}>
-                        {desc}
-                      </span>
-                    )}
-                  </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-          )}
-          {isStreaming || delegatedWorkRunning ? (
-            <>
-              {(text.trim() || attached.length > 0) && (
-                <button
-                  className="cb-send cb-queue"
-                  title={t(isStreaming ? 'composer.queueSendTitle' : 'composer.send')}
-                  type="button"
-                  onClick={() => void onSubmit()}
-                >
-                  <ArrowUp size={16} />
-                </button>
-              )}
-              <button
-                className="cb-send cb-stop"
-                title={t('composer.stopTitle')}
-                type="button"
-                onClick={() => cancelStream()}
-              >
-                <Square size={12} />
-              </button>
-            </>
-          ) : (
-            <button
-              className="cb-send"
-              title={
-                !activeSid
-                  ? t('composer.sendNoSession')
-                  : !activeAgent
-                  ? t('composer.sendNoAgent')
-                  : t('composer.send')
-              }
-              type="button"
-              disabled={agentModelLoading || (canSwitchModel && !agentModel?.selected) || (!text.trim() && attached.length === 0 && pendingFileReadCount === 0) || !activeAgent || !activeSid}
-              onClick={() => void onSubmit()}
-            >
-              <ArrowUp size={16} />
-            </button>
-          )}
-        </div>
-        </div>
-        {atOpen && atHasMentions && (
-          <div className="cb-at-menu-anchor">
-            <div className="cb-at-menu" role="menu" aria-label="Agent mentions">
-              <div className="cb-at-menu-head">
-                <span className="cb-at-menu-head-tag">AGENTS</span>
-                <span className="cb-at-menu-head-n">{agentMentions!.length}</span>
-                <span className="cb-at-menu-head-sub">marketplace + bus</span>
-              </div>
-              {agentMentions!.map((a, i) => (
-                <button
-                  key={a.id}
-                  type="button"
-                  role="menuitem"
-                  className={`cb-at-item${summonAgentId === a.id ? ' is-selected' : ''}${atFocused === i ? ' is-active' : ''}`}
-                  onMouseEnter={() => setAtFocused(i)}
-                  title={a.inBus
-                    ? t('composer.agentItemInBusTitle', { name: a.name, role: a.role, id: a.id })
-                    : t('composer.agentItemTitle', { name: a.name, role: a.role, id: a.id })}
-                  onClick={() => selectSummonedAgent(a.id)}
-                >
-                  <MentionAvatar
-                    agent={a}
-                    initials={avatarInitials[a.id] ?? '?'}
-                    size={15}
-                    className={`cb-at-avatar cb-at-role-${a.role}`}
-                  />
-                  <span className="cb-at-id">{a.id}</span>
-                  <span className="cb-at-name">{resolveNaming(a).title}</span>
-                  <span className="cb-at-role">{resolveNaming(a).sub || a.role}</span>
-                  {a.inBus && <span className="cb-at-bus-pill" aria-label="bus host">bus</span>}
-                  {a.inBus && a.busExtensionId && (
-                    <span className="cb-at-arrow" role="button" tabIndex={0}
-                      aria-label={t('composer.viewInBusAria', { extension: a.busExtensionId })}
-                      title={t('composer.viewInBusTitle', { extension: a.busExtensionId })}
-                      onClick={(e) => { e.stopPropagation(); e.preventDefault(); openInBusAdmin(a.busExtensionId!); }}
-                      onKeyDown={(e) => onArrowKey(e, a.busExtensionId!)}
-                    >→</span>
-                  )}
-                </button>
-              ))}
-              <div className="cb-at-foot">{t('composer.atFoot')}</div>
-            </div>
-          </div>
-        )}
-      </div>
-      </div>
-    </div>
-  );
+							{canSwitchModel && (
+								<ModelPicker
+									className="cb-mbsel"
+									mode="single"
+									variant="button"
+									providerId={modelCatalogProviderId}
+									displayLabel={
+										agentModelLoading
+											? "…"
+											: compactModelLabel(agentModel?.selected ?? modelLabel)
+									}
+									value={agentModel?.selected ?? null}
+									onChange={(next) => {
+										if (typeof next !== "string") return;
+										// This is a HAND-PICK → remember it as this provider's "last model"
+										// so the next new session seeds onto it (not the fixed default).
+										recordLastModel(modelCatalogProviderId, next);
+										// ModelPicker 已经替我们写过 agent.json（writeToAgent 传了 sid+agentPath）。
+										// 这里只把 selected 同步到本地 agentModel state,避免按钮 label 闪回旧值。
+										const nextState: AgentModelState | null =
+											forgeaxSid && activeAgent
+												? {
+														sid: forgeaxSid,
+														agentPath: activeAgent,
+														selected: next,
+														chain: [next],
+														raw: [next],
+													}
+												: agentModel
+													? {
+															...agentModel,
+															selected: next,
+															chain: [next],
+															raw: [next],
+														}
+													: null;
+										if (nextState) {
+											setAgentModel(nextState);
+											if (forgeaxSid && activeAgent) {
+												agentModelCache.set(
+													agentModelKey(
+														forgeaxSid,
+														activeAgent,
+														modelCatalogProviderId,
+													),
+													nextState,
+												);
+											}
+										}
+									}}
+									writeToAgent={
+										canSwitchModel && activeAgent && forgeaxSid
+											? { sid: forgeaxSid, agentPath: activeAgent }
+											: null
+									}
+									fallbackLabel={modelLabel}
+									disabled={!canSwitchModel || !activeAgent || !forgeaxSid}
+									disabledReason={
+										!canSwitchModel
+											? t("composer.modelDisabledProvider", {
+													provider: providerOverride,
+												})
+											: !activeAgent
+												? t("composer.modelDisabledNoAgent")
+												: !forgeaxSid
+													? t("composer.modelDisabledBooting")
+													: undefined
+									}
+									triggerTitle={
+										activeAgent
+											? t("composer.modelTriggerTitle", { agent: activeAgent })
+											: "Model selector"
+									}
+								/>
+							)}
+						</div>
+						<div className="cb-right-group">
+							<ContextRing />
+							{SHOW_CHAT_PROVIDER_SWITCHER && (
+								<div className="cb-cli">
+									<button
+										type="button"
+										className={`cb-cli-btn ${providerOverride ? "cb-cli-active" : ""} ${overrideDown ? "cb-cli-warning" : ""}`}
+										onClick={() => setCliOpen((v) => !v)}
+										disabled={isStreaming}
+										title={cliButtonTitle}
+									>
+										<Unplug size={16} />
+										<span className="cb-cli-label">{cliButtonLabel}</span>
+									</button>
+									{cliOpen && (
+										<div className="cb-cli-menu" role="menu">
+											<button
+												type="button"
+												role="menuitem"
+												className={`cb-cli-item ${!providerOverride ? "is-current" : ""} ${cliFocused === 0 ? "is-focused" : ""}`}
+												onClick={() => switchProviderWithDefaultModel(null)}
+												onMouseEnter={() => setCliFocused(0)}
+												title={t("composer.cliDescForgeax")}
+											>
+												<span className="cb-cli-row">
+													<span className="cb-cli-id">forgeax</span>
+													{activeAgent && (
+														<span
+															className="cb-cli-name"
+															style={{ opacity: 0.6 }}
+														>
+															({activeAgent})
+														</span>
+													)}
+													<span className="cb-cli-pill ok">✓</span>
+												</span>
+												<span className="cb-cli-desc">
+													{t("composer.cliDescForgeax")}
+												</span>
+											</button>
+											{providers.map((p, idx) => {
+												const busEntry = busCliMap.get(p.id);
+												// Concise per-provider description (every row gets one); fall back
+												// to the bus-manifest description only if no curated one exists.
+												const descKey = PROVIDER_DESC_I18N[p.id];
+												const desc = descKey
+													? t(descKey)
+													: (busEntry?.descZh ?? "");
+												return (
+													<div
+														key={p.id}
+														role="none"
+														className={`cb-cli-item-row ${providerOverride === p.id ? "is-current" : ""} ${!p.health.ok ? "is-down" : ""} ${cliFocused === idx + 1 ? "is-focused" : ""}`}
+													>
+														<button
+															type="button"
+															role="menuitem"
+															className={`cb-cli-item cb-cli-item-main ${providerOverride === p.id ? "is-current" : ""} ${!p.health.ok ? "is-down" : ""} ${cliFocused === idx + 1 ? "is-focused" : ""}`}
+															onClick={() =>
+																switchProviderWithDefaultModel(p.id)
+															}
+															onMouseEnter={() => setCliFocused(idx + 1)}
+															title={p.health.detail ?? ""}
+														>
+															<span className="cb-cli-row">
+																<span className="cb-cli-id">{p.id}</span>
+																<span className="cb-cli-name">
+																	{p.displayName}
+																	{!p.health.ok && p.health.detail && (
+																		<span className="cb-cli-reason">
+																			{" "}
+																			· {p.health.detail.slice(0, 100)}
+																			{p.health.detail.length > 100 ? "…" : ""}
+																		</span>
+																	)}
+																</span>
+																<span
+																	className={
+																		p.health.ok
+																			? "cb-cli-pill ok"
+																			: "cb-cli-pill down"
+																	}
+																>
+																	{p.health.ok ? "✓" : "DOWN"}
+																</span>
+															</span>
+															{desc && (
+																<span className="cb-cli-desc" title={desc}>
+																	{desc}
+																</span>
+															)}
+														</button>
+														{busEntry && (
+															<button
+																type="button"
+																role="menuitem"
+																className="cb-cli-bus-pill is-link"
+																aria-label={t("composer.cliBusPillTitle", {
+																	plugin: `${BUS_CLI_ID_PREFIX}${p.id}`,
+																})}
+																title={t("composer.cliBusPillTitle", {
+																	plugin: `${BUS_CLI_ID_PREFIX}${p.id}`,
+																})}
+																onMouseEnter={() => setCliFocused(idx + 1)}
+																onClick={() => {
+																	emitDeepLink(
+																		"bus:expand-plugin",
+																		`${BUS_CLI_ID_PREFIX}${p.id}`,
+																	);
+																	openOverlay("settings", "plugins");
+																	setCliOpen(false);
+																}}
+															>
+																bus →
+															</button>
+														)}
+													</div>
+												);
+											})}
+										</div>
+									)}
+								</div>
+							)}
+							{isStreaming ? (
+								<>
+									{text.trim() && canInterrupt && (
+										<button
+											className="cb-send cb-interrupt"
+											title={t("composer.interruptTitle")}
+											type="button"
+											onClick={onInterrupt}
+										>
+											<Zap size={14} />
+										</button>
+									)}
+									{text.trim() && (
+										<button
+											className="cb-send cb-queue"
+											title={t("composer.queueSendTitle")}
+											type="button"
+											onClick={() => void onSubmit()}
+										>
+											<ArrowUp size={16} />
+										</button>
+									)}
+									<button
+										className="cb-send cb-stop"
+										title={t("composer.stopTitle")}
+										type="button"
+										onClick={() => cancelStream()}
+									>
+										<Square size={12} />
+									</button>
+								</>
+							) : (
+								<button
+									className="cb-send"
+									title={
+										!activeSid
+											? t("composer.sendNoSession")
+											: !activeAgent
+												? t("composer.sendNoAgent")
+												: t("composer.send")
+									}
+									type="button"
+									disabled={
+										(!text.trim() &&
+											attached.length === 0 &&
+											pendingFileReadCount === 0) ||
+										!activeAgent ||
+										!activeSid
+									}
+									onClick={() => void onSubmit()}
+								>
+									<ArrowUp size={16} />
+								</button>
+							)}
+						</div>
+					</div>
+					{atOpen && atHasMentions && (
+						<div className="cb-at-menu-anchor">
+							<div
+								className="cb-at-menu"
+								role="menu"
+								aria-label="Agent mentions"
+							>
+								<div className="cb-at-menu-head">
+									<span className="cb-at-menu-head-tag">AGENTS</span>
+									<span className="cb-at-menu-head-n">
+										{agentMentions?.length}
+									</span>
+									<span className="cb-at-menu-head-sub">marketplace + bus</span>
+								</div>
+								{agentMentions?.map((a, i) => (
+									<div key={a.id} role="none" className="cb-at-item-row">
+										<button
+											type="button"
+											role="menuitem"
+											className={`cb-at-item${summonAgentId === a.id ? " is-selected" : ""}${atFocused === i ? " is-active" : ""}`}
+											onMouseEnter={() => setAtFocused(i)}
+											title={
+												a.inBus
+													? t("composer.agentItemInBusTitle", {
+															name: a.name,
+															role: a.role,
+															id: a.id,
+														})
+													: t("composer.agentItemTitle", {
+															name: a.name,
+															role: a.role,
+															id: a.id,
+														})
+											}
+											onClick={() => selectSummonedAgent(a.id)}
+										>
+											<MentionAvatar
+												agent={a}
+												initials={avatarInitials[a.id] ?? "?"}
+												size={15}
+												className={`cb-at-avatar cb-at-role-${a.role}`}
+											/>
+											<span className="cb-at-id">{a.id}</span>
+											<span className="cb-at-name">
+												{resolveNaming(a).title}
+											</span>
+											<span className="cb-at-role">
+												{resolveNaming(a).sub || a.role}
+											</span>
+											{a.inBus && <span className="cb-at-bus-pill">bus</span>}
+										</button>
+										{a.inBus && a.busExtensionId && (
+											<button
+												type="button"
+												role="menuitem"
+												className="cb-at-arrow"
+												aria-label={t("composer.viewInBusAria", {
+													plugin: a.busExtensionId,
+												})}
+												title={t("composer.viewInBusTitle", {
+													plugin: a.busExtensionId,
+												})}
+												onMouseEnter={() => setAtFocused(i)}
+												onClick={() => openInBusAdmin(a.busExtensionId!)}
+											>
+												→
+											</button>
+										)}
+									</div>
+								))}
+								<div className="cb-at-foot">{t("composer.atFoot")}</div>
+							</div>
+						</div>
+					)}
+				</div>
+			</div>
+		</section>
+	);
 }

@@ -15,6 +15,7 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { chatRequest } from "../../connection";
 import { openAgentWorkspace } from "../../lib/open-agent-workspace";
 import { onSessionEvent } from "../../session-bridge";
 import { useActiveStreamingByAgent } from "../../session-store";
@@ -330,7 +331,7 @@ export function ChatAgentCapsule() {
 
 	useEffect(() => {
 		let cancelled = false;
-		fetch(agentCatalogUrl())
+		chatRequest(agentCatalogUrl())
 			.then((r) => r.json())
 			.then((j: { agents?: CatalogAgent[] }) => {
 				if (cancelled) return;

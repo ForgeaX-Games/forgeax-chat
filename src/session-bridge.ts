@@ -1,3 +1,9 @@
+import {
+	type ChatWebSocket,
+	chatRequest,
+	chatWebSocket,
+	registerChatConnectionCleanup,
+} from "./connection";
 /** forgeax 原生路径 bridge —— Chat 直接给 server EventBus 发消息。
  *
  *  跟 cli-provider 桥（/api/cli/chat SSE，临时）严格分开：这条是 R3 之后
@@ -104,7 +110,7 @@ export async function fetchSessionList(game?: string): Promise<SessionMeta[]> {
 	const url = game
 		? `/api/sessions?game=${encodeURIComponent(game)}`
 		: "/api/sessions";
-	const r = await fetch(url);
+	const r = await chatRequest(url);
 	if (!r.ok) throw new Error(`GET /api/sessions ${r.status}`);
 	const j = (await r.json()) as { sessions?: SessionMeta[] };
 	return j.sessions ?? [];
@@ -123,7 +129,7 @@ export async function createSession(opts?: {
 	if (opts?.scope !== undefined) body.scope = opts.scope;
 	if (opts?.bootstrapAgent !== undefined)
 		body.bootstrapAgent = opts.bootstrapAgent;
-	const r = await fetch("/api/sessions", {
+	const r = await chatRequest("/api/sessions", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(body),
@@ -148,7 +154,7 @@ export async function ensureSession(opts?: {
 	bootstrappedAgent: string | null;
 	created: boolean;
 }> {
-	const r = await fetch("/api/sessions/ensure", {
+	const r = await chatRequest("/api/sessions/ensure", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({
@@ -169,7 +175,7 @@ export async function ensureSession(opts?: {
 /** DELETE /api/sessions/:sid —— 整个 session 目录从盘上抹掉（含 ledger / agents）。
  *  对 unknown sid 是 idempotent（server 端不抛）。失败时抛带 detail 的 Error。 */
 export async function deleteSession(sid: string): Promise<void> {
-	const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}`, {
+	const r = await chatRequest(`/api/sessions/${encodeURIComponent(sid)}`, {
 		method: "DELETE",
 	});
 	if (!r.ok) {
@@ -196,19 +202,25 @@ export async function emitForgeaXMessage(
 		 *  interrupt-send: the EventQueue onSteer listener aborts the running LLM
 		 *  turn immediately, then the steer event is processed as its own turn. */
 		handoff?: "silent" | "passive" | "turn" | "innerLoop" | "steer";
+		/** Cancels an in-flight send when the owning Chat view is disposed. */
+		signal?: AbortSignal;
 	} = {},
 ): Promise<{ ok: boolean; to?: string; msgId?: string; error?: string }> {
-	const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/messages`, {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({
-			content,
-			...(opts.to ? { to: opts.to } : {}),
-			...(opts.type ? { type: opts.type } : {}),
-			...(opts.payload ? { payload: opts.payload } : {}),
-			...(opts.handoff ? { handoff: opts.handoff } : {}),
-		}),
-	});
+	const r = await chatRequest(
+		`/api/sessions/${encodeURIComponent(sid)}/messages`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				content,
+				...(opts.to ? { to: opts.to } : {}),
+				...(opts.type ? { type: opts.type } : {}),
+				...(opts.payload ? { payload: opts.payload } : {}),
+				...(opts.handoff ? { handoff: opts.handoff } : {}),
+			}),
+			signal: opts.signal,
+		},
+	);
 	if (!r.ok) {
 		let detail: string;
 		try {
@@ -227,7 +239,7 @@ export async function emitForgeaXMessage(
 export async function listSessionAgents(
 	sid: string,
 ): Promise<ForgeaXAgentNode[]> {
-	const r = await fetch("/api/commands/list_agents/query", {
+	const r = await chatRequest("/api/commands/list_agents/query", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ args: [sid] }),
@@ -249,7 +261,7 @@ export async function listSessionAgents(
 type SessionEventHandler = (event: SessionEvent) => void;
 type TurnSnapshotHandler = (frame: TurnSnapshotFrame) => void;
 type ResumeGapHandler = (frame: ResumeGapFrame) => void;
-let _ws: WebSocket | null = null;
+let _ws: ChatWebSocket | null = null;
 // handler 按 key 注册（不是匿名 Set），HMR 重载 session-stream.ts 时新 dispatch
 // 覆盖旧的，避免一份 event 被多份残留 handler 重复处理。
 const _wsHandlers = new Map<string, SessionEventHandler>();
@@ -343,8 +355,7 @@ function _routeFrame(frame: SessionEvent | TurnSnapshotFrame): void {
 }
 
 function wsUrl(sid: string): string {
-	const proto = location.protocol === "https:" ? "wss:" : "ws:";
-	let url = `${proto}//${location.host}/ws?sid=${encodeURIComponent(sid)}`;
+	let url = `/ws?sid=${encodeURIComponent(sid)}`;
 	// 断线续传(§3.3):有 cursor 才带 since —— 首连/换 sid 走全量(hello + 快照)。
 	const cur = _cursors.get(sid);
 	if (cur) url += `&since=${cur.seq}&sgen=${encodeURIComponent(cur.sgen)}`;
@@ -365,9 +376,9 @@ function _connectOnce(sid: string): void {
 		_ws = null;
 	}
 	_attachedSid = sid;
-	let ws: WebSocket;
+	let ws: ChatWebSocket;
 	try {
-		ws = new WebSocket(wsUrl(sid));
+		ws = chatWebSocket(wsUrl(sid));
 	} catch (err) {
 		console.warn("[forgeax-bridge] ws ctor failed", err);
 		_scheduleReconnect();
@@ -487,6 +498,8 @@ export function disconnectForgeaXWs(): void {
 	connectForgeaXWs(null);
 }
 
+registerChatConnectionCleanup(disconnectForgeaXWs);
+
 /** 按 key 注册 handler；同 key 重复注册会**覆盖**（HMR 友好）。返回 unsubscribe。 */
 export function onSessionEvent(
 	key: string,
@@ -494,7 +507,7 @@ export function onSessionEvent(
 ): () => void {
 	_wsHandlers.set(key, handler);
 	return () => {
-		_wsHandlers.delete(key);
+		if (_wsHandlers.get(key) === handler) _wsHandlers.delete(key);
 	};
 }
 
@@ -505,7 +518,7 @@ export function onTurnSnapshot(
 ): () => void {
 	_snapshotHandlers.set(key, handler);
 	return () => {
-		_snapshotHandlers.delete(key);
+		if (_snapshotHandlers.get(key) === handler) _snapshotHandlers.delete(key);
 	};
 }
 
@@ -516,7 +529,7 @@ export function onResumeGap(
 ): () => void {
 	_gapHandlers.set(key, handler);
 	return () => {
-		_gapHandlers.delete(key);
+		if (_gapHandlers.get(key) === handler) _gapHandlers.delete(key);
 	};
 }
 

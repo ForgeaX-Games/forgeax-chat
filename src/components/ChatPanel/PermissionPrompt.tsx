@@ -18,6 +18,7 @@ import {
 	X,
 } from "lucide-react";
 import { type ReactElement, useEffect, useRef, useState } from "react";
+import { chatRequest } from "../../connection";
 import {
 	commandPreview,
 	permissionPresentation,
@@ -231,7 +232,7 @@ function PermissionCard({
 		setPermissionError(null);
 		const reqId = pending.reqId;
 		try {
-			const response = await fetch(
+			const response = await chatRequest(
 				`/api/sessions/${encodeURIComponent(activeSid)}/permission-reply`,
 				{
 					method: "POST",

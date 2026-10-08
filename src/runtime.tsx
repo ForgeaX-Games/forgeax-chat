@@ -18,6 +18,12 @@ import {
 	requestComposerText,
 	useComposerPendingText,
 } from "./composer-text-bridge";
+import {
+	type ChatConnection,
+	chatRequest,
+	disposeChatConnection,
+	setChatConnection,
+} from "./connection";
 import { translateStandaloneMessage } from "./standalone-messages";
 
 export { CURRENT_MODEL, useModelLabel } from "./model-label";
@@ -521,7 +527,7 @@ async function callCommand<T>(
 	mode: "query" | "execute",
 	args: string[],
 ): Promise<T> {
-	const response = await fetch(`/api/commands/${name}/${mode}`, {
+	const response = await chatRequest(`/api/commands/${name}/${mode}`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ args }),
@@ -658,11 +664,16 @@ const chatTurnTrace = createChatTurnTraceLifecycle({
 });
 
 export function configureChatRuntime(
-	services: Partial<ChatRuntimeServices>,
+	services: Partial<ChatRuntimeServices> & { connection?: ChatConnection },
 ): void {
-	Object.assign(runtime, services);
+	const { connection, ...hostServices } = services;
+	if (connection) setChatConnection(connection);
+	Object.assign(runtime, hostServices);
 	if (services.hostStore) installHostStore(services.hostStore);
 }
+
+export type { ChatConnection };
+export { chatRequest, disposeChatConnection };
 
 export function useHost(): ChatAppHost {
 	return runtime.useHost();

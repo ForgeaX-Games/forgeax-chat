@@ -1,6 +1,7 @@
 import { agentCatalogUrl } from "@forgeax/agents/lib/agent-api-url";
 import { getLocale, type Locale, subscribe } from "@forgeax/chat/runtime";
 import { useEffect, useState } from "react";
+import { chatRequest } from "../../connection";
 
 /**
  * Module-cached agent id → display name resolver.
@@ -30,7 +31,7 @@ const subscribers = new Set<() => void>();
 function load(lang: Locale): Promise<Record<string, AgentProfile>> {
 	if (cache && cacheLang === lang) return Promise.resolve(cache);
 	if (!inflight) {
-		inflight = fetch(agentCatalogUrl())
+		inflight = chatRequest(agentCatalogUrl())
 			.then(
 				(r) =>
 					r.json() as Promise<{

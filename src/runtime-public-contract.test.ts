@@ -198,7 +198,7 @@ describe("Chat runtime public contract", () => {
 			"import { useModelLabel } from '@forgeax/chat/runtime';",
 		);
 		expect(modelLabelSource).toContain('label: "Claude Opus 4.7"');
-		expect(modelLabelSource).toContain('fetch("/api/health")');
+		expect(modelLabelSource).toContain('chatRequest("/api/health")');
 		expect(modelLabelSource).toContain("let cancelled = false;");
 	});
 

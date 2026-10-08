@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { chatRequest, registerChatConnectionCleanup } from "./connection";
 
 export interface ModelInfo {
 	label: string;
@@ -9,10 +10,13 @@ export interface ModelInfo {
 export const CURRENT_MODEL: ModelInfo = { label: "Claude Opus 4.7" };
 
 let modelLabelPromise: Promise<string | null> | null = null;
+registerChatConnectionCleanup(() => {
+	modelLabelPromise = null;
+});
 
 export function loadModelLabel(): Promise<string | null> {
 	if (modelLabelPromise) return modelLabelPromise;
-	modelLabelPromise = fetch("/api/health")
+	modelLabelPromise = chatRequest("/api/health")
 		.then((response) => (response.ok ? response.json() : null))
 		.then((payload: { model?: unknown } | null) => {
 			if (

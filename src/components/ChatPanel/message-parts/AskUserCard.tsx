@@ -1,3 +1,4 @@
+import { chatRequest } from "../../../connection";
 /** Grouped Ask User card.
  *
  * Pending questions stay fully expanded and are submitted once as a group.
@@ -193,7 +194,7 @@ export function AskUserCard({
 		setSending(true);
 		setError(null);
 		try {
-			const response = await fetch(
+			const response = await chatRequest(
 				`/api/sessions/${encodeURIComponent(sid)}/ask-reply`,
 				{
 					method: "POST",

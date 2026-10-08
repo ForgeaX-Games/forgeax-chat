@@ -1,6 +1,7 @@
 import { agentCatalogUrl } from "@forgeax/agents/lib/agent-api-url";
 import { useShellStore } from "@forgeax/chat/runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { chatRequest } from "../../connection";
 import { canonicalToolName } from "../../event-engine/tool-name";
 import { openAgentWorkspace } from "../../lib/open-agent-workspace";
 import { onSessionEvent, onTurnSnapshot } from "../../session-bridge";
@@ -73,7 +74,7 @@ export function useAgentThreadNav(): AgentThreadNav {
 	const [mainAgentId, setMainAgentId] = useState<string | null>(null);
 	useEffect(() => {
 		let alive = true;
-		fetch(agentCatalogUrl())
+		chatRequest(agentCatalogUrl())
 			.then(
 				(r) =>
 					r.json() as Promise<{

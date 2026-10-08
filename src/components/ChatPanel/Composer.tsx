@@ -54,6 +54,7 @@ import {
 	useState,
 	useSyncExternalStore,
 } from "react";
+import { chatRequest } from "../../connection";
 import { useModelLabel } from "../../model-label";
 import { useActiveStreaming, useChatStore } from "../../session-store";
 import {
@@ -747,7 +748,7 @@ export function Composer({
 		try {
 			const rows: BusSkillRow[] = [];
 			const seenTriggers = new Set<string>();
-			const skillResp = await fetch(
+			const skillResp = await chatRequest(
 				`/api/skills${requestedSid ? `?sessionId=${encodeURIComponent(requestedSid)}` : ""}`,
 			);
 			if (!skillResp.ok)
@@ -780,7 +781,7 @@ export function Composer({
 			}
 			// Merge server commands (e.g. /compact) into the slash popover alongside bus skills.
 			try {
-				const cmdResp = await fetch("/api/commands");
+				const cmdResp = await chatRequest("/api/commands");
 				if (cmdResp.ok) {
 					const { commands } = (await cmdResp.json()) as {
 						commands?: Array<{
@@ -822,7 +823,7 @@ export function Composer({
 	// AGENTS list and AgentSwitcher), then bus-only agents appended.
 	const fetchAgentMentions = useCallback(async () => {
 		try {
-			const res = await fetch(agentCatalogUrl());
+			const res = await chatRequest(agentCatalogUrl());
 			if (!res.ok) throw new Error(`GET /api/agents → ${res.status}`);
 			const data = (await res.json()) as {
 				agents?: Array<{
@@ -1094,7 +1095,7 @@ export function Composer({
 				succeeded: cliPrewarmSucceeded.current,
 				cooldowns: cliPrewarmCooldowns.current,
 				request: (endpoint) =>
-					fetch(endpoint, {
+					chatRequest(endpoint, {
 						method: "POST",
 						headers: { "content-type": "application/json" },
 						body: JSON.stringify({

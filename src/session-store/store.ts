@@ -18,6 +18,12 @@ import {
 import type { ArtifactSummary } from "@forgeax/types/artifact-summary";
 import { create } from "zustand";
 import {
+	type ChatEventSource,
+	chatEventSource,
+	chatRequest,
+	registerChatConnectionCleanup,
+} from "../connection";
+import {
 	parseEventLines,
 	trimToCompactBoundary,
 } from "../event-engine/event-replay";
@@ -359,8 +365,8 @@ interface TurnController {
 const _abortByTab = new Map<string, TurnController>();
 
 /** EventSource tails opened by loadThreadHistory for runs still streaming. */
-const _tailsByTab = new Map<string, Set<EventSource>>();
-function trackTail(sid: string, es: EventSource): void {
+const _tailsByTab = new Map<string, Set<ChatEventSource>>();
+function trackTail(sid: string, es: ChatEventSource): void {
 	let set = _tailsByTab.get(sid);
 	if (!set) {
 		set = new Set();
@@ -368,7 +374,7 @@ function trackTail(sid: string, es: EventSource): void {
 	}
 	set.add(es);
 }
-function untrackTail(sid: string, es: EventSource): void {
+function untrackTail(sid: string, es: ChatEventSource): void {
 	const set = _tailsByTab.get(sid);
 	if (!set) return;
 	set.delete(es);
@@ -386,6 +392,12 @@ function closeThreadHistoryTails(sid: string): void {
 	}
 	_tailsByTab.delete(sid);
 }
+
+registerChatConnectionCleanup(() => {
+	for (const controller of _abortByTab.values()) controller.controller.abort();
+	_abortByTab.clear();
+	for (const sid of _tailsByTab.keys()) closeThreadHistoryTails(sid);
+});
 
 // ── Pure segment reducers (moved from Interface; Chat owns them now) ─────────
 
@@ -640,7 +652,7 @@ async function fetchSessionEventsNdjson(
 	agentPath: string,
 ): Promise<string> {
 	try {
-		const r = await fetch("/api/commands/fetch_session_events/query", {
+		const r = await chatRequest("/api/commands/fetch_session_events/query", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ args: [sid, agentPath] }),
@@ -662,7 +674,7 @@ async function fetchSessionBlob(
 	agentPath: string,
 	sha256: string,
 ): Promise<Uint8Array> {
-	const response = await fetch("/api/commands/fetch_blob/query", {
+	const response = await chatRequest("/api/commands/fetch_blob/query", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ args: [sid, agentPath, sha256] }),
@@ -1271,7 +1283,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 		if (!threadId) return;
 		try {
 			const { agentId: activeAgentId } = activeTarget();
-			const tr = await fetch(`/api/threads/${encodeURIComponent(threadId)}`);
+			const tr = await chatRequest(
+				`/api/threads/${encodeURIComponent(threadId)}`,
+			);
 			if (!tr.ok) return;
 			const tj = (await tr.json()) as { thread?: { runIds?: string[] } };
 			const runIds = tj.thread?.runIds ?? [];
@@ -1295,7 +1309,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 			let inFlightRunId: string | null = null;
 
 			for (const runId of runIds) {
-				const rr = await fetch(
+				const rr = await chatRequest(
 					`/api/runs/${encodeURIComponent(runId)}/events?stream=poll`,
 				);
 				if (!rr.ok) continue;
@@ -1354,7 +1368,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 					(lastSeq >= 0
 						? `&lastEventId=${encodeURIComponent(`${runId}:${lastSeq}`)}`
 						: "");
-				const es = new EventSource(url);
+				const es = chatEventSource(url);
 				trackTail(threadId, es);
 
 				const onAguiFrame = (raw: MessageEvent<string>): void => {
@@ -1423,7 +1437,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 					es.addEventListener(t, onAguiFrame as EventListener);
 				es.addEventListener("message", onAguiFrame as EventListener);
 				es.onerror = () => {
-					if (es.readyState === EventSource.CLOSED) untrackTail(threadId, es);
+					if (es.readyState === 2) untrackTail(threadId, es);
 				};
 			}
 		} catch (e) {
@@ -1597,7 +1611,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
 		const runId = conv?.runId ?? null;
 		if (runId) {
-			fetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
+			chatRequest(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
 				method: "POST",
 			}).catch((e) =>
 				console.warn(
@@ -1608,7 +1622,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 		}
 
 		const qs = agentId ? `?agent=${encodeURIComponent(agentId)}` : "";
-		fetch(`/api/sessions/${encodeURIComponent(sid)}/abort${qs}`, {
+		chatRequest(`/api/sessions/${encodeURIComponent(sid)}/abort${qs}`, {
 			method: "POST",
 		}).catch((e) =>
 			console.warn(
@@ -1710,7 +1724,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 				autoStart: true,
 			};
 			try {
-				const r = await fetch("/api/daemons", {
+				const r = await chatRequest("/api/daemons", {
 					method: "POST",
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify(payload),
@@ -1759,7 +1773,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 				},
 			]);
 			try {
-				const r = await fetch(
+				const r = await chatRequest(
 					`/api/bus/ui/surfaces/${encodeURIComponent(surfaceId)}/dispatch`,
 					{
 						method: "POST",
@@ -1798,7 +1812,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 			const agentId = startTab?.agentId ?? null;
 			let skill: { skillId: string; extensionId: string } | undefined;
 			try {
-				const skillResp = await fetch(
+				const skillResp = await chatRequest(
 					`/api/skills?sessionId=${encodeURIComponent(startSid)}`,
 				);
 				if (skillResp.ok) {
@@ -1823,7 +1837,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
 			if (skill) {
 				try {
-					const r = await fetch("/api/skills/run", {
+					const r = await chatRequest("/api/skills/run", {
 						method: "POST",
 						headers: { "content-type": "application/json" },
 						body: JSON.stringify({
@@ -1888,7 +1902,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 					},
 				]);
 				try {
-					const r = await fetch(
+					const r = await chatRequest(
 						`/api/commands/${encodeURIComponent(cmdName)}/execute`,
 						{
 							method: "POST",
@@ -2165,6 +2179,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 				);
 				const r = await emitForgeaXMessage(startSid, wireText, {
 					to: candidate,
+					signal,
 					payload: {
 						agentId,
 						clientMsgId,
@@ -2176,6 +2191,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 							: {}),
 					},
 				});
+				if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 				if (!r.ok) throw new Error(r.error ?? "emit failed");
 				if (r.msgId) {
 					const mid = r.msgId;
@@ -2191,11 +2207,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 				}
 				patchAsst((m) => ({ ...m, providerId: m.providerId ?? "forgeax" }));
 			} catch (err) {
-				patchAsst((m) => ({
-					...m,
-					status: "error",
-					errorMessage: `forgeax emit failed: ${(err as Error).message}`,
-				}));
+				if (signal.aborted || (err as Error).name === "AbortError") {
+					patchAsst((m) => sealAbortedAssistantMessage(m, Date.now()));
+					chatTurnEnd(activeAgent, "cancelled");
+				} else {
+					patchAsst((m) => ({
+						...m,
+						status: "error",
+						errorMessage: `forgeax emit failed: ${(err as Error).message}`,
+					}));
+					chatTurnEnd(activeAgent, "error", (err as Error).message);
+				}
 				finishTurn();
 			}
 			if (ownsAborter()) _abortByTab.delete(startSid);
@@ -2269,7 +2291,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 				// Keep provider-native fallback when an old/unscaffolded session has no
 				// agent model record; failure to read optional routing must not block chat.
 			}
-			res = await fetch("/api/cli/chat", {
+			res = await chatRequest("/api/cli/chat", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({

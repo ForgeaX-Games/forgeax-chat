@@ -10,6 +10,7 @@
  *  chat bundle owns its daemon-tick wiring end-to-end without an Interface callback.
  */
 import { type ChatMessage, useShellStore } from "@forgeax/chat/runtime";
+import { registerChatConnectionCleanup } from "../connection";
 import { useChatStore } from "./store";
 
 const _tickMsgIdByTickId = new Map<string, string>();
@@ -146,7 +147,11 @@ useShellStore.subscribe((s) => {
 import { subscribeBroadcast } from "@forgeax/chat/runtime";
 
 const FLAG = "__FORGEAX_CHAT_DAEMON_TICK__";
-type Slot = { handler: typeof handleDaemonTick; subscribed?: boolean };
+type Slot = {
+	handler: typeof handleDaemonTick;
+	subscribed?: boolean;
+	stop?: () => void;
+};
 type WithFlag = { [FLAG]?: Slot };
 const _gt = globalThis as unknown as WithFlag;
 // Create the slot ONCE (never replaced), so the live handler can be hot-swapped
@@ -155,14 +160,33 @@ _gt[FLAG] ??= { handler: handleDaemonTick };
 _gt[FLAG]!.handler = handleDaemonTick;
 
 /** chat boot 调一次：把 daemon-tick-{start,event,end} 帧接到共享广播流。幂等 + HMR 安全。 */
-export function subscribeDaemonTick(): void {
+export function subscribeDaemonTick(): () => void {
 	const slot = _gt[FLAG]!;
-	if (slot.subscribed) return;
-	slot.subscribed = true;
+	if (slot.subscribed) {
+		if (!slot.stop) throw new Error("daemon tick subscription has no disposer");
+		return slot.stop;
+	}
 	const dispatch = (m: unknown): void => {
 		_gt[FLAG]?.handler(m);
 	};
-	subscribeBroadcast("daemon-tick-start", dispatch);
-	subscribeBroadcast("daemon-tick-event", dispatch);
-	subscribeBroadcast("daemon-tick-end", dispatch);
+	const stops: Array<() => void> = [];
+	try {
+		stops.push(subscribeBroadcast("daemon-tick-start", dispatch));
+		stops.push(subscribeBroadcast("daemon-tick-event", dispatch));
+		stops.push(subscribeBroadcast("daemon-tick-end", dispatch));
+	} catch (error) {
+		for (const stop of stops) stop();
+		throw error;
+	}
+	slot.subscribed = true;
+	const stop = (): void => {
+		if (!slot.subscribed || slot.stop !== stop) return;
+		for (const detach of stops) detach();
+		slot.subscribed = false;
+		slot.stop = undefined;
+	};
+	slot.stop = stop;
+	return stop;
 }
+
+registerChatConnectionCleanup(() => _gt[FLAG]?.stop?.());

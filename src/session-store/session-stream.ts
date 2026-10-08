@@ -14,6 +14,7 @@ import type {
 	ArtifactResolvedPayload,
 	ArtifactSummary,
 } from "@forgeax/types/artifact-summary";
+import { registerChatConnectionCleanup } from "../connection";
 import { isChatMessageEvent } from "../event-engine/chat-visibility";
 import { formatCompactionStatus } from "../event-engine/compaction-status";
 import { formatDelegationStatus } from "../event-engine/delegation-status";
@@ -1580,20 +1581,36 @@ function handleResumeGap(frame: { sid: string }): void {
 // ─── public boot hook ─────────────────────────────────────────────────────
 
 /** Boot 时调一次。重复调安全（按 key 注册，HMR 重载会覆盖旧 dispatch）。 */
-export function subscribeSessionStream(): void {
-	onSessionEvent("session-stream", (event) =>
+let detachSessionStream: (() => void) | null = null;
+
+export function subscribeSessionStream(): () => void {
+	detachSessionStream?.();
+	const stopEvent = onSessionEvent("session-stream", (event) =>
 		enqueueSessionWork(() => dispatchSessionEvent(event)),
 	);
-	onTurnSnapshot("session-stream", (frame) =>
+	const stopSnapshot = onTurnSnapshot("session-stream", (frame) =>
 		enqueueSessionWork(() => applyTurnSnapshot(frame)),
 	);
-	onResumeGap("session-stream", (frame) =>
+	const stopGap = onResumeGap("session-stream", (frame) =>
 		enqueueSessionWork(() => handleResumeGap(frame)),
 	);
+	const detach = (): void => {
+		stopEvent();
+		stopSnapshot();
+		stopGap();
+		if (detachSessionStream === detach) {
+			detachSessionStream = null;
+			pendingSessionWork.length = 0;
+		}
+	};
+	detachSessionStream = detach;
+	return detach;
 }
 
 const pendingSessionWork: Array<() => void> = [];
 let sessionWorkScheduled = false;
+
+registerChatConnectionCleanup(() => detachSessionStream?.());
 
 function enqueueSessionWork(work: () => void): void {
 	pendingSessionWork.push(work);
